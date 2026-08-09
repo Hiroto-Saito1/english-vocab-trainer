@@ -15,7 +15,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
-from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
@@ -43,7 +42,6 @@ Audio = Annotated[AudioStore, Depends(audio_store)]
 RangeHeader = Annotated[str | None, Header(alias="Range")]
 IfNoneMatch = Annotated[str | None, Header(alias="If-None-Match")]
 ROOT = Path(__file__).parent
-repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 router = APIRouter()
 
