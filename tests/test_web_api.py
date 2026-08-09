@@ -31,3 +31,32 @@ def test_settings_patch_persists_and_validates(tmp_path: Path) -> None:
         assert client.get("/api/v1/settings").json()["daily_target"] == 42
         assert client.patch("/api/v1/settings", json={"daily_target": 0}).status_code == 422
         assert client.patch("/api/v1/settings", json={"daily_target": 101}).status_code == 422
+
+
+def test_words_filter_and_transcript_validation(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    for word in (
+        Word("nine", "nine", 9, None, "nine.mp3"),
+        Word("ten", "ten", 10, None, "ten.mp3"),
+        Word("none", "none", None, None, "none.mp3"),
+    ):
+        repository.add_word(word)
+    repository.close()
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    with TestClient(app) as client:
+        assert client.get("/api/v1/words?levels=10&limit=1").json()["items"][0]["id"] == "ten"
+        assert (
+            client.patch(
+                "/api/v1/words/nine/transcript", json={"transcript": "English only."}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.patch("/api/v1/words/nine/transcript", json={"transcript": "日本語"}).status_code
+            == 422
+        )
+        assert (
+            client.patch("/api/v1/words/no/transcript", json={"transcript": "English"}).status_code
+            == 404
+        )

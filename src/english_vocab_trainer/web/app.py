@@ -269,7 +269,7 @@ def words(
 def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
     try:
         return WordOut(**asdict(repository.update_transcript(word_id, body.transcript)))
-    except KeyError as exc:
+    except (MissingError, KeyError) as exc:
         raise HTTPException(404, "word not found") from exc
 
 
