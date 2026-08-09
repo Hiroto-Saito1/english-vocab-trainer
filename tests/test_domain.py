@@ -1,7 +1,14 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from english_vocab_trainer.domain.models import Rating, ReviewEvent, WordState, next_state
+from english_vocab_trainer.domain.models import (
+    Rating,
+    ReviewAction,
+    ReviewEvent,
+    WordState,
+    next_state,
+    rating_for_action,
+)
 
 
 def test_fsrs_again_has_ten_minute_learning_step() -> None:
@@ -17,3 +24,9 @@ def test_first_known_is_preserved() -> None:
     state = next_state(state, ReviewEvent(uuid4(), "one", Rating.EASY, now))
     assert state.first_seen_at == state.first_known_at == now
     assert state.stability > 0
+
+
+def test_action_rating_mapping() -> None:
+    assert rating_for_action(ReviewAction.UNKNOWN, False) is Rating.AGAIN
+    assert rating_for_action(ReviewAction.KNOWN, False) is Rating.EASY
+    assert rating_for_action(ReviewAction.KNOWN, True) is Rating.GOOD

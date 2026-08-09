@@ -15,6 +15,17 @@ class Rating(StrEnum):
     EASY = "easy"
 
 
+class ReviewAction(StrEnum):
+    KNOWN = "known"
+    UNKNOWN = "unknown"
+
+
+def rating_for_action(action: ReviewAction, has_active_review: bool) -> Rating:
+    if action is ReviewAction.UNKNOWN:
+        return Rating.AGAIN
+    return Rating.GOOD if has_active_review else Rating.EASY
+
+
 @dataclass(frozen=True, slots=True)
 class Word:
     id: str
