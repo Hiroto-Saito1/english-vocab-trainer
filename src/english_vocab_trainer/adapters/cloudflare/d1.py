@@ -5,6 +5,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from english_vocab_trainer.domain.models import Rating, ReviewEvent, Settings, Word, WordState
+from english_vocab_trainer.ports.errors import MissingError
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -184,6 +185,13 @@ class D1VocabularyRepository:
             daily_target,
         )
         return Settings(daily_target)
+
+    async def update_transcript(self, word_id: str, transcript: str) -> Word:
+        word = await self.get_word(word_id)
+        if word is None:
+            raise MissingError("word not found")
+        await self._run("UPDATE words SET transcript=? WHERE id=?", transcript, word_id)
+        return Word(word.id, word.term, word.level, transcript, word.audio_key)
 
     async def close(self) -> None:
         return None
