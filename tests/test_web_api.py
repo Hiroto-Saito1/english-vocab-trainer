@@ -113,3 +113,29 @@ def test_review_batch_reports_missing_and_conflict(tmp_path: Path) -> None:
         ).json()
     assert missing["results"][0]["status"] == "missing" and missing["acknowledged"] == []
     assert conflict["results"][0]["status"] == "conflict" and conflict["acknowledged"] == []
+
+
+def test_void_review_is_idempotent_and_missing_is_404(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "one.mp3"))
+    repository.close()
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    event_id = UUID(int=13)
+    event = {
+        "id": str(event_id),
+        "word_id": "one",
+        "action": "known",
+        "reviewed_at": "2026-01-01T00:00:00Z",
+    }
+    with TestClient(app) as client:
+        client.post("/api/v1/review-events/batch", json=[event])
+        first = client.post(f"/api/v1/review-events/{event_id}/void").json()
+        second = client.post(f"/api/v1/review-events/{event_id}/void").json()
+        progress = client.get("/api/v1/progress").json()
+        missing = client.post(f"/api/v1/review-events/{UUID(int=99)}/void")
+    assert (
+        first["version"] == second["version"]
+        and progress["reviewed"] == 0
+        and missing.status_code == 404
+    )
