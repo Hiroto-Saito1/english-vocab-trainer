@@ -400,11 +400,12 @@ def test_natural_undo_expiry_persists_without_replaying_audio(
     expect(page.locator("#progress")).to_have_text("1 of 3")
     install_audio_presentation_spy(page)
     page.evaluate(
-        "window.__pwaTestClock = { undoWindowMs: 50 }; window.__audioPresentationSpy.reset()"
+        "window.__pwaTestClock = { undoWindowMs: 750 }; window.__audioPresentationSpy.reset()"
     )
 
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#term")).to_be_visible()
+    expect(page.locator("#undo")).to_be_visible()
     audio_source = page.locator("#audio").get_attribute("src")
     assert audio_source
     assert page.evaluate("window.__audioPresentationSpy.calls") == {
