@@ -275,6 +275,36 @@ def install_audio_presentation_spy(page: Page) -> None:
     )
 
 
+def wait_for_persisted_undo_expiry(page: Page) -> None:
+    persisted = page.evaluate(
+        """async () => {
+          const deadline = Date.now() + 2_000;
+          const savedState = () => Promise.race([
+            new Promise((resolve, reject) => {
+              const request = indexedDB.open("english-vocab-trainer", 1);
+              request.onerror = () => reject(request.error);
+              request.onsuccess = () => {
+                const db = request.result;
+                const get = db.transaction("state").objectStore("state").get("active-session");
+                get.onerror = () => { db.close(); reject(get.error); };
+                get.onsuccess = () => { db.close(); resolve(get.result?.value); };
+              };
+            }),
+            new Promise((_, reject) => setTimeout(
+              () => reject(new Error("state probe timed out")), 500
+            )),
+          ]);
+          while (Date.now() < deadline) {
+            const state = await savedState();
+            if (state && state.event === null && state.undoDeadline === 0) return true;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          return false;
+        }"""
+    )
+    assert persisted is True, "Undo expiry was not persisted to IndexedDB within two seconds"
+
+
 @pytest.mark.e2e
 def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[str, Path]) -> None:
     base_url, database = pwa_server
@@ -359,6 +389,45 @@ def test_undo_expiry_does_not_restart_revealed_audio(
         "pause": 1,
         "seek": 1,
     }
+
+
+@pytest.mark.e2e
+def test_natural_undo_expiry_persists_without_replaying_audio(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    page.goto(base_url)
+    expect(page.locator("#progress")).to_have_text("1 of 3")
+    install_audio_presentation_spy(page)
+    page.evaluate(
+        "window.__pwaTestClock = { undoWindowMs: 50 }; window.__audioPresentationSpy.reset()"
+    )
+
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#term")).to_be_visible()
+    audio_source = page.locator("#audio").get_attribute("src")
+    assert audio_source
+    assert page.evaluate("window.__audioPresentationSpy.calls") == {
+        "play": 1,
+        "pause": 1,
+        "seek": 1,
+    }
+
+    expect(page.locator("#undo")).to_be_hidden(timeout=2_000)
+    wait_for_persisted_undo_expiry(page)
+    assert page.evaluate("window.__pwa.getState().event") is None
+    assert page.evaluate("window.__pwa.getState().undoDeadline") == 0
+    assert page.locator("#audio").get_attribute("src") == audio_source
+    assert page.evaluate("window.__audioPresentationSpy.calls") == {
+        "play": 1,
+        "pause": 1,
+        "seek": 1,
+    }
+
+    page.reload()
+    expect(page.locator("#term")).to_be_visible(timeout=10_000)
+    assert page.evaluate("window.__pwa.getState().event") is None
+    assert page.evaluate("window.__pwa.getState().undoDeadline") == 0
 
 
 @pytest.mark.e2e

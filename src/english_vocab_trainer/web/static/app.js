@@ -35,6 +35,10 @@ const allEvents = () => transaction("events", "readonly", (store) => new Promise
 
 function showStatus(message) { status.textContent = message; }
 function nowMs() { return window.__pwaTestClock?.now?.() ?? Date.now(); }
+function undoWindowMs() {
+  const value = window.__pwaTestClock?.undoWindowMs;
+  return Number.isFinite(value) && value > 0 ? value : 5000;
+}
 function nextLearning() { return state.learningQueue.filter((item) => item.due_at <= nowMs()).sort((a, b) => a.due_at - b.due_at)[0]; }
 function currentLearning() {
   if (state.current < state.cards.length) return undefined;
@@ -228,7 +232,7 @@ async function answer(action) {
   busy = true; setActions(true); audio.pause();
   const word = currentWord(), learning = currentLearning();
   state.event = { id: crypto.randomUUID(), word_id: word.id, action, reviewed_at: new Date(nowMs()).toISOString(), wasLearning: Boolean(learning), learningEntry: learning || null };
-  state.undoDeadline = nowMs() + 5000;
+  state.undoDeadline = nowMs() + undoWindowMs();
   await addEvent(state.event);
   if (action === "known") {
     if (learning) {
