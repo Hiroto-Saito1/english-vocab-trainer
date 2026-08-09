@@ -25,6 +25,9 @@ class InMemoryVocabularyRepository:
     def for_user(self, user_id: str) -> InMemoryVocabularyRepository:
         return self
 
+    def close(self) -> None:
+        pass
+
     def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
         selected = [
             w
