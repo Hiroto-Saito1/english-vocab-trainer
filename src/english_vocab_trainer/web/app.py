@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -69,6 +69,18 @@ class SettingsOut(BaseModel):
     daily_target: int
 
 
+class WordOut(BaseModel):
+    id: str
+    term: str
+    level: int | None
+    transcript: str | None
+    audio_key: str
+
+
+class WordListOut(BaseModel):
+    items: list[WordOut]
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -127,9 +139,18 @@ def settings(settings: SettingsIn, _: Identity, repository: Repository) -> Setti
     return SettingsOut(daily_target=updated.daily_target)
 
 
-@router.get("/api/v1/words")
-def words(_: Identity, limit: int = 100) -> dict[str, object]:
-    return {"items": [asdict(word) for word in repo.list_words(limit=limit)]}
+@router.get("/api/v1/words", response_model=WordListOut)
+def words(
+    _: Identity,
+    repository: Repository,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    levels: Annotated[list[int] | None, Query()] = None,
+) -> WordListOut:
+    return WordListOut(
+        items=[
+            WordOut(**asdict(word)) for word in repository.list_words(levels=levels, limit=limit)
+        ]
+    )
 
 
 @router.patch("/api/v1/words/{word_id}/transcript")
