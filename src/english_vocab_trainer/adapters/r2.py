@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any, NoReturn, Protocol, cast
+from pathlib import Path
+from typing import Any, BinaryIO, NoReturn, Protocol, cast
 
 from english_vocab_trainer.ports.audio import (
     AudioMetadata,
@@ -24,6 +25,15 @@ class StreamingBody(Protocol):
 class S3LikeClient(Protocol):
     def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]: ...
     def get_object(self, **kwargs: str) -> Mapping[str, Any]: ...
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> Mapping[str, Any]: ...
 
 
 class Boto3R2AudioStore:
@@ -130,3 +140,56 @@ class Boto3R2AudioStore:
             raise
         except Exception as exc:
             self._raise_store_error(exc, key, range_request=range_header is not None)
+
+
+class Boto3R2AudioUploader:
+    """Safe, idempotent writer for private, content-addressed audio objects."""
+
+    def __init__(self, client: S3LikeClient, bucket: str) -> None:
+        self._client, self._bucket = client, bucket
+
+    @staticmethod
+    def _metadata_matches(response: Mapping[str, Any], size: int, checksum: str) -> bool:
+        try:
+            metadata = Boto3R2AudioStore._metadata(response)
+        except AudioStorageError:
+            return False
+        return metadata.size == size and metadata.etag == checksum
+
+    def _head(self, key: str) -> Mapping[str, Any] | None:
+        try:
+            return self._client.head_object(Bucket=self._bucket, Key=key)
+        except Exception as exc:
+            code = Boto3R2AudioStore._error_code(exc)
+            if code in {"NoSuchKey", "NoSuchObject", "404"}:
+                return None
+            raise AudioStorageError("private audio storage is unavailable") from exc
+
+    def upload(self, key: str, path: Path, checksum: str, *, force: bool = False) -> bool:
+        """Upload one object. Return true iff a PUT was issued."""
+        if _KEY.fullmatch(key) is None:
+            raise FileNotFoundError("invalid audio key")
+        size = path.stat().st_size
+        existing = self._head(key)
+        if existing is not None:
+            if self._metadata_matches(existing, size, checksum):
+                return False
+            if not force:
+                raise AudioStorageError("private audio object conflicts with catalog")
+        try:
+            with path.open("rb") as body:
+                self._client.put_object(
+                    Bucket=self._bucket,
+                    Key=key,
+                    Body=body,
+                    ContentType="audio/mpeg",
+                    Metadata={"sha256": checksum},
+                )
+        except AudioStorageError:
+            raise
+        except Exception as exc:
+            raise AudioStorageError("private audio storage is unavailable") from exc
+        verified = self._head(key)
+        if verified is None or not self._metadata_matches(verified, size, checksum):
+            raise AudioStorageError("private audio storage verification failed")
+        return True

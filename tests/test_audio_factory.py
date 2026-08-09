@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -16,6 +16,17 @@ class FactoryClient:
         raise AssertionError("not used")
 
     def get_object(self, **kwargs: str) -> Mapping[str, Any]:
+        raise AssertionError("not used")
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> Mapping[str, Any]:
         raise AssertionError("not used")
 
 

@@ -63,6 +63,24 @@ class SQLiteVocabularyRepository:
             (word.id, word.term, word.level, word.transcript, word.audio_key),
         )
 
+    def bulk_upsert_words(self, words: list[Word]) -> None:
+        """Atomically publish a fully validated catalog without touching review history."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.executemany(
+                "INSERT INTO words(id,term,level,transcript,audio_key) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
+                "transcript=excluded.transcript,audio_key=excluded.audio_key",
+                [
+                    (word.id, word.term, word.level, word.transcript, word.audio_key)
+                    for word in words
+                ],
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
     def get_word(self, word_id: str) -> Word | None:
         r = self.db.execute("SELECT * FROM words WHERE id=?", (word_id,)).fetchone()
         return Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) if r else None

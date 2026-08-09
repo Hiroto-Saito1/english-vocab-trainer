@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, BinaryIO
 
 import pytest
 
@@ -15,11 +18,13 @@ from english_vocab_trainer.ingest import (
     main,
     parse_audio_path,
     publish_records,
+    r2_audio_key,
     read_catalog,
     records_from_audio,
     select_audio,
     transcribe_catalog,
     transcribe_records,
+    upload_audio,
     validate_records,
     validate_transcript,
     write_catalog,
@@ -36,16 +41,28 @@ def _audio(root: Path, source: str, level: str, name: str, content: bytes) -> Pa
 def _records(count: int = 20) -> list[CatalogRecord]:
     return [
         CatalogRecord(
-            f"audio-{index}",
+            f"audio-{sha256(f'catalog-{index}'.encode()).hexdigest()}",
             f"上級SVL/2/STAGE 01\u300000{index:02d} term {index}.mp3",
             "上級SVL",
             2,
             f"term {index}",
-            f"checksum-{index}",
+            sha256(f"catalog-{index}".encode()).hexdigest(),
             "A clear English definition includes an example sentence.",
         )
         for index in range(count)
     ]
+
+
+def _materialize_catalog_audio(root: Path, records: list[CatalogRecord]) -> list[CatalogRecord]:
+    result: list[CatalogRecord] = []
+    for index, record in enumerate(records):
+        content = f"audio-{index}".encode()
+        path = root / record.audio_key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        digest = sha256(content).hexdigest()
+        result.append(replace(record, id=f"audio-{digest}", checksum=digest))
+    return result
 
 
 def test_selection_is_lowest_deterministic_and_approved_only(tmp_path: Path) -> None:
@@ -136,6 +153,153 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
         repository.close()
 
 
+def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_path: Path) -> None:
+    database = tmp_path / "vocab.db"
+    records = _records()
+    publish_records(database, records, audio_backend="r2")
+    repository = SQLiteVocabularyRepository(database, "local-user")
+    try:
+        words = repository.list_words(limit=30)
+        assert len(words) == 20
+        assert {word.audio_key for word in words} == {
+            r2_audio_key(record.checksum) for record in records
+        }
+        prior = repository.get_word(records[0].id)
+        assert prior is not None
+        repository.db.execute(
+            "CREATE TRIGGER reject_one BEFORE INSERT ON words WHEN NEW.id="
+            f"'{records[10].id}' BEGIN SELECT RAISE(ABORT, 'no'); END"
+        )
+        changed = [
+            replace(
+                record, transcript="A different English definition includes an example sentence."
+            )
+            for record in records
+        ]
+        with pytest.raises(Exception, match="no"):
+            publish_records(database, changed, audio_backend="r2")
+        assert repository.get_word(records[0].id) == prior
+    finally:
+        repository.close()
+
+
+def test_catalog_integrity_rejects_tampering_and_canonical_key() -> None:
+    record = _records(1)[0]
+    assert r2_audio_key(record.checksum) == f"audio/{record.checksum}.mp3"
+    for malformed in ("A" * 64, "a" * 63, "a" * 65, "not-a-checksum"):
+        with pytest.raises(ValueError):
+            r2_audio_key(malformed)
+    for altered in (
+        replace(record, id="audio-" + "a" * 64),
+        replace(record, audio_key="../outside.mp3"),
+        replace(record, source="other"),
+        replace(record, term="wrong"),
+    ):
+        with pytest.raises(ValueError):
+            validate_records([altered], expected_count=1)
+
+
+class _UploadClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        raise AssertionError("checksum validation must happen before network")
+
+    def get_object(self, **kwargs: str) -> dict[str, Any]:
+        raise AssertionError("not used")
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> dict[str, Any]:
+        self.calls += 1
+        raise AssertionError("not used")
+
+
+def test_upload_validates_all_files_before_any_network(tmp_path: Path) -> None:
+    records = _materialize_catalog_audio(tmp_path, _records())
+    bad = replace(records[-1], checksum="a" * 64, id="audio-" + "a" * 64)
+    client = _UploadClient()
+    with pytest.raises(ValueError, match="does not match"):
+        upload_audio(tmp_path, [*records[:-1], bad], client, "private")
+
+
+class _CliUploadClient:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+        self.puts = 0
+
+    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
+        if Key not in self.objects:
+            error = RuntimeError("missing")
+            error.response = {"Error": {"Code": "NoSuchKey"}}  # type: ignore[attr-defined]
+            raise error
+        body, digest = self.objects[Key]
+        return {"ContentLength": len(body), "Metadata": {"sha256": digest}}
+
+    def get_object(self, **kwargs: str) -> Mapping[str, Any]:
+        raise AssertionError("not used")
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        self.puts += 1
+        self.objects[Key] = (Body.read(), Metadata["sha256"])
+        return {}
+
+
+def test_cli_upload_dry_run_needs_no_client_and_normal_upload_resumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = tmp_path / ".private" / "catalog.jsonl"
+    records = _materialize_catalog_audio(tmp_path, _records())
+    write_catalog(catalog, records)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vocab-ingest",
+            "upload-audio",
+            "--source",
+            str(tmp_path),
+            "--catalog",
+            str(catalog),
+            "--dry-run",
+        ],
+    )
+    monkeypatch.setattr(
+        "english_vocab_trainer.ingest.r2_client_from_env",
+        lambda _: (_ for _ in ()).throw(AssertionError("dry run must not construct a client")),
+    )
+    main()
+
+    client = _CliUploadClient()
+    monkeypatch.setattr(
+        "english_vocab_trainer.ingest.r2_client_from_env", lambda _: (client, "private")
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["vocab-ingest", "upload-audio", "--source", str(tmp_path), "--catalog", str(catalog)],
+    )
+    main()
+    main()
+    output = capsys.readouterr().out
+    assert "would upload 20" in output and client.puts == 20 and "skipped 20" in output
+
+
 def test_cli_scan_and_validate_private_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -196,7 +360,7 @@ def test_cli_dry_run_transcribe_and_publish(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
-    write_catalog(catalog, _records())
+    write_catalog(catalog, _materialize_catalog_audio(tmp_path, _records()))
     monkeypatch.setattr(
         sys,
         "argv",

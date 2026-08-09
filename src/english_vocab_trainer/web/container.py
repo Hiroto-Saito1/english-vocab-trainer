@@ -25,6 +25,26 @@ def _boto3_client_factory(**kwargs: Any) -> S3LikeClient:
     return cast(S3LikeClient, boto3.client("s3", **kwargs))
 
 
+def r2_client_from_env(
+    environ: Mapping[str, str], client_factory: S3ClientFactory | None = None
+) -> tuple[S3LikeClient, str]:
+    """Build the one private R2 client used by serving and ingest commands."""
+    required = ("R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+    if any(not environ.get(name) for name in required):
+        raise ConfigurationError("private R2 audio configuration is incomplete")
+    factory = client_factory or _boto3_client_factory
+    try:
+        client = factory(
+            endpoint_url=environ["R2_ENDPOINT_URL"],
+            aws_access_key_id=environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"],
+            region_name=environ.get("R2_REGION", "auto"),
+        )
+    except Exception as exc:
+        raise ConfigurationError("private R2 audio client is unavailable") from exc
+    return client, environ["R2_BUCKET"]
+
+
 def audio_store_from_env(
     environ: Mapping[str, str], client_factory: S3ClientFactory | None = None
 ) -> AudioStore:
@@ -36,20 +56,8 @@ def audio_store_from_env(
             raise ConfigurationError("AUDIO_ROOT is required for the filesystem audio backend")
         return FilesystemAudioStore(Path(root))
     if backend == "r2":
-        required = ("R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
-        if any(not environ.get(name) for name in required):
-            raise ConfigurationError("private R2 audio configuration is incomplete")
-        factory = client_factory or _boto3_client_factory
-        try:
-            client = factory(
-                endpoint_url=environ["R2_ENDPOINT_URL"],
-                aws_access_key_id=environ["R2_ACCESS_KEY_ID"],
-                aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"],
-                region_name=environ.get("R2_REGION", "auto"),
-            )
-        except Exception as exc:
-            raise ConfigurationError("private R2 audio client is unavailable") from exc
-        return Boto3R2AudioStore(client, environ["R2_BUCKET"])
+        client, bucket = r2_client_from_env(environ, client_factory)
+        return Boto3R2AudioStore(client, bucket)
     raise ConfigurationError("AUDIO_BACKEND must be filesystem or r2")
 
 

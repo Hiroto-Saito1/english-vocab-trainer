@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from pathlib import Path
+from typing import Any, BinaryIO
 
 import pytest
 
-from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore
+from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, Boto3R2AudioUploader
 from english_vocab_trainer.ports.audio import AudioStorageError, InvalidRangeError
 
 SHA = "a" * 64
@@ -63,6 +64,56 @@ class FakeR2:
             "ContentLength": len(self.body.value),
             "Metadata": {"sha256": SHA},
         }
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        self.value = Body.read()
+        return {}
+
+
+class UploadR2:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+        self.put_calls = 0
+        self.body: BinaryIO | None = None
+        self.error: Exception | None = None
+        self.bad_verify = False
+
+    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
+        if self.error is not None:
+            raise self.error
+        try:
+            value, digest = self.objects[Key]
+        except KeyError as exc:
+            raise ClientError("NoSuchKey") from exc
+        return {
+            "ContentLength": len(value),
+            "Metadata": {"sha256": "b" * 64 if self.bad_verify else digest},
+        }
+
+    def get_object(self, **kwargs: str) -> Mapping[str, Any]:
+        raise AssertionError("not used")
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: BinaryIO,
+        ContentType: str,
+        Metadata: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        self.put_calls += 1
+        self.body = Body
+        self.objects[Key] = (Body.read(), Metadata["sha256"])
+        return {}
 
 
 def test_r2_head_never_gets_and_get_closes_body() -> None:
@@ -136,3 +187,57 @@ def test_r2_maps_upstream_range_codes_and_checks_response_shape() -> None:
     missing.error = StatusError()
     with pytest.raises(FileNotFoundError):
         Boto3R2AudioStore(missing, "private-audio").head(KEY)
+
+
+def test_r2_uploader_uploads_verifies_skips_and_closes_file(tmp_path: Path) -> None:
+    path = tmp_path / "sample.mp3"
+    path.write_bytes(b"audio")
+    digest = "c" * 64
+    key = f"audio/{digest}.mp3"
+    client = UploadR2()
+    uploader = Boto3R2AudioUploader(client, "private-audio")
+
+    assert uploader.upload(key, path, digest)
+    assert client.put_calls == 1 and client.body is not None and client.body.closed
+    assert not uploader.upload(key, path, digest)
+    assert client.put_calls == 1
+
+
+def test_r2_uploader_fails_closed_for_conflicts_errors_and_bad_verification(tmp_path: Path) -> None:
+    path = tmp_path / "sample.mp3"
+    path.write_bytes(b"audio")
+    digest = "d" * 64
+    key = f"audio/{digest}.mp3"
+    client = UploadR2()
+    client.objects[key] = (b"other", "e" * 64)
+    uploader = Boto3R2AudioUploader(client, "private-audio")
+    with pytest.raises(AudioStorageError, match="conflicts"):
+        uploader.upload(key, path, digest)
+    assert uploader.upload(key, path, digest, force=True)
+
+    broken = UploadR2()
+    broken.bad_verify = True
+    with pytest.raises(AudioStorageError, match="verification"):
+        Boto3R2AudioUploader(broken, "private-audio").upload(key, path, digest)
+    unavailable = UploadR2()
+    unavailable.error = ClientError("AccessDenied")
+    with pytest.raises(AudioStorageError, match="unavailable"):
+        Boto3R2AudioUploader(unavailable, "private-audio").upload(key, path, digest)
+
+    with pytest.raises(FileNotFoundError, match="invalid audio key"):
+        uploader.upload("bad-key", path, digest)
+
+    class PutFailure(UploadR2):
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: BinaryIO,
+            ContentType: str,
+            Metadata: Mapping[str, str],
+        ) -> Mapping[str, Any]:
+            raise ClientError("AccessDenied")
+
+    with pytest.raises(AudioStorageError, match="unavailable"):
+        Boto3R2AudioUploader(PutFailure(), "private-audio").upload(key, path, digest)

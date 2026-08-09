@@ -10,15 +10,18 @@ import re
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.r2 import Boto3R2AudioUploader, S3LikeClient
 from english_vocab_trainer.domain.models import Word
 from english_vocab_trainer.validation import validate_english_transcript
+from english_vocab_trainer.web.container import ConfigurationError, r2_client_from_env
 
 APPROVED_SOURCES = ("上級SVL", "超上級SVL")
 _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +48,13 @@ class CatalogRecord:
 @dataclass(frozen=True, slots=True)
 class TranscriptionSummary:
     completed: int
+    skipped: int
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
+class UploadSummary:
+    uploaded: int
     skipped: int
     total: int
 
@@ -83,6 +93,13 @@ def parse_audio_path(root: Path, path: Path) -> tuple[int | None, str]:
 def checksum(path: Path) -> str:
     with path.open("rb") as audio:
         return hashlib.file_digest(audio, "sha256").hexdigest()
+
+
+def r2_audio_key(checksum_value: str) -> str:
+    """Return the only allowed private R2 object key for a catalog checksum."""
+    if _SHA256.fullmatch(checksum_value) is None:
+        raise ValueError("checksum must be a lowercase SHA-256 hex digest")
+    return f"audio/{checksum_value}.mp3"
 
 
 def select_audio(root: Path, limit_per_source: int = 10) -> list[AudioCandidate]:
@@ -216,40 +233,135 @@ def transcribe_catalog(
         return TranscriptionSummary(completed, skipped, total)
 
 
+def _relative_audio_path(audio_key: str) -> PurePosixPath:
+    path = PurePosixPath(audio_key)
+    if (
+        path.is_absolute()
+        or len(path.parts) < 3
+        or ".." in path.parts
+        or path.parts[0] not in APPROVED_SOURCES
+        or path.suffix.lower() != ".mp3"
+    ):
+        raise ValueError("audio key is outside approved source trees")
+    return path
+
+
+def _validate_record(record: CatalogRecord, root: Path | None) -> None:
+    if record.source not in APPROVED_SOURCES:
+        raise ValueError("catalog source is not approved")
+    if _SHA256.fullmatch(record.checksum) is None:
+        raise ValueError("catalog checksum must be a lowercase SHA-256 hex digest")
+    if record.id != f"audio-{record.checksum}":
+        raise ValueError("catalog id must match checksum")
+    relative = _relative_audio_path(record.audio_key)
+    if relative.parts[0] != record.source:
+        raise ValueError("catalog source does not match audio key")
+    synthetic_root = root if root is not None else Path("/")
+    try:
+        level, term = parse_audio_path(synthetic_root, synthetic_root / Path(*relative.parts))
+    except ValueError as exc:
+        raise ValueError("catalog audio key cannot be parsed") from exc
+    if (level, term) != (record.level, record.term):
+        raise ValueError("catalog term or level does not match audio key")
+    if root is not None:
+        resolved_root = root.resolve()
+        source_path = (root / Path(*relative.parts)).resolve()
+        try:
+            source_path.relative_to(resolved_root / record.source)
+        except ValueError as exc:
+            raise ValueError("audio key is outside approved source trees") from exc
+    if record.transcript is None:
+        raise ValueError(f"missing transcript for {record.term}")
+    validate_transcript(record.transcript)
+
+
 def validate_records(
-    records: Iterable[CatalogRecord], expected_count: int = 20
+    records: Iterable[CatalogRecord], expected_count: int = 20, *, root: Path | None = None
 ) -> list[CatalogRecord]:
     result = list(records)
     if len(result) != expected_count:
         raise ValueError(f"expected {expected_count} records, found {len(result)}")
     if len({record.id for record in result}) != len(result):
-        raise ValueError("audio checksum collision or duplicate record")
+        raise ValueError("duplicate catalog id")
+    if len({record.checksum for record in result}) != len(result):
+        raise ValueError("duplicate catalog checksum")
+    if len({record.audio_key for record in result}) != len(result):
+        raise ValueError("duplicate catalog audio key")
     for record in result:
-        if record.transcript is None:
-            raise ValueError(f"missing transcript for {record.term}")
-        validate_transcript(record.transcript)
+        _validate_record(record, root)
     return result
 
 
-def publish_records(database: Path, records: Iterable[CatalogRecord]) -> None:
+def publish_records(
+    database: Path,
+    records: Iterable[CatalogRecord],
+    *,
+    audio_backend: str = "filesystem",
+    root: Path | None = None,
+) -> None:
+    if audio_backend not in {"filesystem", "r2"}:
+        raise ValueError("audio backend must be filesystem or r2")
+    validated = validate_records(records, root=root)
+    words = [
+        Word(
+            record.id,
+            record.term,
+            record.level,
+            record.transcript,
+            record.audio_key if audio_backend == "filesystem" else r2_audio_key(record.checksum),
+        )
+        for record in validated
+    ]
     repository = SQLiteVocabularyRepository(database, "local-user")
     try:
-        for record in validate_records(records):
-            repository.add_word(
-                Word(record.id, record.term, record.level, record.transcript, record.audio_key)
-            )
+        repository.bulk_upsert_words(words)
     finally:
         repository.close()
 
 
+def upload_audio(
+    root: Path,
+    records: Iterable[CatalogRecord],
+    client: S3LikeClient,
+    bucket: str,
+    *,
+    force: bool = False,
+    on_progress: Callable[[int, int, CatalogRecord, str], None] | None = None,
+) -> UploadSummary:
+    """Validate all catalog entries then idempotently upload private R2 objects."""
+    validated = validate_records(records, root=root)
+    paths: list[Path] = []
+    for record in validated:
+        path = root / Path(*_relative_audio_path(record.audio_key).parts)
+        if not path.is_file() or checksum(path) != record.checksum:
+            raise ValueError("local audio does not match catalog checksum")
+        paths.append(path)
+    uploader = Boto3R2AudioUploader(client, bucket)
+    uploaded = 0
+    for index, (record, path) in enumerate(zip(validated, paths, strict=True), start=1):
+        changed = uploader.upload(r2_audio_key(record.checksum), path, record.checksum, force=force)
+        uploaded += int(changed)
+        if on_progress is not None:
+            on_progress(index, len(validated), record, "uploaded" if changed else "skipped")
+    return UploadSummary(uploaded, len(validated) - uploaded, len(validated))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import a private 20-audio SVL MVP catalog")
-    parser.add_argument("command", choices=["scan", "transcribe", "validate", "publish"])
+    parser.add_argument(
+        "command", choices=["scan", "transcribe", "validate", "publish", "upload-audio"]
+    )
     parser.add_argument(
         "--source", type=Path, required=True, help="parent containing approved SVL trees"
     )
     parser.add_argument("--catalog", type=Path, default=Path(".private/catalog.jsonl"))
     parser.add_argument("--database", type=Path)
+    parser.add_argument(
+        "--audio-backend",
+        choices=["filesystem", "r2"],
+        default="filesystem",
+        help="audio keys to publish (default: filesystem)",
+    )
     parser.add_argument("--limit-per-source", type=int, default=10)
     parser.add_argument(
         "--resume", action="store_true", help="preserve matching catalog transcripts"
@@ -289,15 +401,49 @@ def main() -> None:
                 flush=True,
             )
     elif args.command == "validate":
-        print(
-            f"valid: {len(validate_records(read_catalog(args.catalog)))} English transcript records"
-        )
+        valid = validate_records(read_catalog(args.catalog), root=args.source)
+        print(f"valid: {len(valid)} English transcript records")
+    elif args.command == "upload-audio":
+        records = read_catalog(args.catalog)
+        validated = validate_records(records, root=args.source)
+        if args.dry_run:
+            for record in validated:
+                path = args.source / Path(*_relative_audio_path(record.audio_key).parts)
+                if not path.is_file() or checksum(path) != record.checksum:
+                    raise ValueError("local audio does not match catalog checksum")
+                r2_audio_key(record.checksum)
+            print(f"would upload {len(validated)} private R2 audio objects")
+        else:
+            try:
+                client, bucket = r2_client_from_env(os.environ)
+            except ConfigurationError as exc:
+                raise SystemExit(str(exc)) from exc
+            upload_summary = upload_audio(
+                args.source,
+                validated,
+                client,
+                bucket,
+                force=args.force,
+                on_progress=lambda completed, total, record, status: print(
+                    f"{status} {completed}/{total}: {record.term}", flush=True
+                ),
+            )
+            print(
+                f"uploaded {upload_summary.uploaded}; skipped {upload_summary.skipped}; "
+                f"total {upload_summary.total}",
+                flush=True,
+            )
     else:
         if args.database is None:
             raise SystemExit("publish requires --database")
         records = read_catalog(args.catalog)
         if args.dry_run:
-            print(f"would publish {len(validate_records(records))} records to SQLite")
+            print(
+                f"would publish {len(validate_records(records, root=args.source))} records "
+                f"to SQLite using {args.audio_backend} audio keys"
+            )
         else:
-            publish_records(args.database, records)
+            publish_records(
+                args.database, records, audio_backend=args.audio_backend, root=args.source
+            )
             print("published private catalog to SQLite")
