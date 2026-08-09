@@ -112,6 +112,11 @@ class D1VocabularyRepository:
         statement: Any = self._prepare(sql, *params)
         return await statement.run()
 
+    async def _batch(self, statements: list[object]) -> list[object]:
+        result: object = await cast(Any, self.db).batch(statements)
+        native = result.to_py() if hasattr(result, "to_py") else result
+        return cast(list[object], native)
+
     async def get_word(self, word_id: str) -> Word | None:
         row = await self._first(
             "SELECT id,term,level,transcript,audio_key FROM words WHERE id=?", word_id
