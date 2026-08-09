@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+import pytest
+
+from english_vocab_trainer.adapters.local.sqlite import (
+    ConflictError,
+    MissingError,
+    SQLiteVocabularyRepository,
+)
 from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word
 
 
@@ -73,3 +79,56 @@ def test_due_is_current_user_and_past_only(tmp_path: Path) -> None:
     assert [w.id for w in a.due_words(now, 10)] == ["nine"] and not repo(path, "bob").due_words(
         now, 10
     )
+
+
+def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:
+    r = repo(tmp_path / "v.db")
+    with pytest.raises(MissingError):
+        r.append_event(event("missing", datetime.now(UTC)), 0)
+    words(r)
+    r.append_event(event("nine", datetime.now(UTC)), 0)
+    r.close()
+
+
+def test_stale_cas_has_no_partial_event(tmp_path: Path) -> None:
+    r = repo(tmp_path / "v.db")
+    words(r)
+    r.append_event(event("nine", datetime.now(UTC)), 0)
+    with pytest.raises(ConflictError):
+        r.append_event(event("nine", datetime.now(UTC)), 0)
+    assert r.progress(datetime.now(UTC))["reviewed"] == 1
+    r.close()
+
+
+def test_uuid_idempotency_and_conflicts(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    r = repo(path)
+    words(r)
+    e = event("nine", datetime.now(UTC))
+    one = r.append_event(e, 0)
+    two = r.append_event(e, 99)
+    assert one.version == two.version
+    with pytest.raises(ConflictError):
+        r.append_event(ReviewEvent(e.id, "ten", Rating.EASY, e.reviewed_at), 0)
+    with pytest.raises(ConflictError):
+        repo(path, "bob").append_event(e, 0)
+    r.close()
+
+
+def test_out_of_order_replay_and_double_void(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    now = datetime.now(UTC)
+    first = event("nine", now)
+    second = ReviewEvent(uuid4(), "nine", Rating.AGAIN, now + timedelta(days=1))
+    a = repo(path)
+    words(a)
+    a.append_event(second, 0)
+    state = a.append_event(first, 1)
+    b = repo(tmp_path / "other.db")
+    words(b)
+    b.append_event(first, 0)
+    expected = b.append_event(second, 1)
+    assert state.card_json == expected.card_json and state.due_at == expected.due_at
+    voided = a.void_event(second.id)
+    repeated = a.void_event(second.id)
+    assert voided.card_json == repeated.card_json and voided.version == repeated.version
