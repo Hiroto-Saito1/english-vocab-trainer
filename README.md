@@ -4,7 +4,7 @@ This project is being rebuilt as a conventional FastAPI application for Fly.io. 
 
 The application is English-only and audio-first. Its SQLite schema is created from versioned SQL migrations, and audio/catalogs/transcripts/secrets are excluded from Git.
 
-## M1: private 20-audio vertical slice
+## M1/M2a: private audio proxy
 
 M1 runs locally with SQLite and an audio root. It selects exactly ten files from each approved
 source tree (`上級SVL/` and `超上級SVL/`), favouring lower levels and using a deterministic path
@@ -32,19 +32,25 @@ Japanese characters and transcripts too short to contain an English definition/e
 `--resume` on scan to retain matching existing transcripts, `--force` to transcribe again, and
 `--dry-run` on scan/transcribe/publish to verify a planned operation without writes.
 
-Run the application with Python 3.13 and uv. `AUDIO_ROOT` must be the parent containing the two
-approved source directories, so catalog audio keys resolve without copying any MP3:
+Run the application with Python 3.13 and uv. The local filesystem backend requires an explicit
+`AUDIO_BACKEND=filesystem`; `AUDIO_ROOT` must be the parent containing the two approved source
+directories, so catalog audio keys resolve without copying any MP3:
 
-`VOCAB_DB_PATH=./vocab.db AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:app --app-dir src`
+`VOCAB_DB_PATH=./vocab.db AUDIO_BACKEND=filesystem AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:app --app-dir src`
+
+M2a also includes a private, server-side R2 proxy. Set `AUDIO_BACKEND=r2`, `R2_ENDPOINT_URL`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` (optionally `R2_REGION`, default
+`auto`). Objects must use `audio/<64 lowercase hex>.mp3` keys and include lowercase `sha256`
+metadata. The browser only receives the authenticated `/api/v1/audio/{word_id}` proxy; neither
+R2 URLs nor credentials are exposed. Real R2 credentials and uploads have not yet been verified.
 
 The web flow is audio first: term and transcript are hidden until **Unknown**, **Known** maps to
 Easy for a new word and Good for a reviewed word, and **Unknown** maps to Again. Events are
 idempotent UUIDs; Undo either removes an unsynchronised event or calls the void/replay endpoint.
 The PWA retains its session and outbox in IndexedDB, deleting only server-acknowledged event IDs.
 
-No MP3, catalog, transcript, secret, or database belongs in Git. Before a Fly deployment, set the
-database path and audio volume mount and configure production authentication; it currently fails
-closed until that later M2/M3 work is completed.
+No MP3, catalog, transcript, secret, or database belongs in Git. Production repository/auth
+remain fail-closed until M3; upload/publish and offline cache work remain in M2b/M2c.
 
 Browser acceptance tests use a live local Uvicorn server and Chromium. Install and run them with:
 

@@ -3,44 +3,51 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from english_vocab_trainer.ports.audio import AudioResult
+from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, parse_single_range
 
-
-def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
-    if value is None:
-        return None
-    if not value.startswith("bytes=") or "," in value:
-        raise ValueError("invalid range")
-    start_text, end_text = value[6:].split("-", 1)
-    if not start_text:
-        length = int(end_text)
-        if length <= 0:
-            raise ValueError("invalid range")
-        return max(0, size - length), size - 1
-    start = int(start_text)
-    end = int(end_text) if end_text else size - 1
-    if start < 0 or start >= size or end < start:
-        raise ValueError("unsatisfiable range")
-    return start, min(end, size - 1)
+__all__ = ["FilesystemAudioStore", "parse_single_range"]
 
 
 class FilesystemAudioStore:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    def _path(self, key: str) -> Path:
         candidate = (self.root / key).resolve()
-        if self.root not in candidate.parents or candidate.suffix.lower() != ".mp3":
+        # Only canonical lower-case MP3 paths below the configured root are public.
+        if candidate.suffix != ".mp3" or not candidate.is_relative_to(self.root):
             raise FileNotFoundError(key)
-        data = candidate.read_bytes()
-        size = len(data)
-        selected = parse_single_range(range_header, size)
-        start, end = selected if selected else (0, size - 1)
+        return candidate
+
+    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+        candidate = self._path(key)
+        metadata = self.head(key)
+        selected = parse_single_range(range_header, metadata.size)
+        start, end = selected if selected is not None else (0, metadata.size - 1)
+        length = max(0, end - start + 1)
+        try:
+            with candidate.open("rb") as source:
+                source.seek(start)
+                data = source.read(length)
+        except OSError as exc:
+            raise FileNotFoundError(key) from exc
+        if len(data) != length:
+            raise FileNotFoundError(key)
         return AudioResult(
-            data[start : end + 1],
-            size,
-            hashlib.sha256(data).hexdigest(),
+            data,
+            metadata.size,
+            metadata.etag,
             start,
             end,
-            bool(selected),
+            selected is not None,
         )
+
+    def head(self, key: str) -> AudioMetadata:
+        candidate = self._path(key)
+        try:
+            size = candidate.stat().st_size
+            with candidate.open("rb") as source:
+                etag = hashlib.file_digest(source, "sha256").hexdigest()
+        except OSError as exc:
+            raise FileNotFoundError(key) from exc
+        return AudioMetadata(size, etag)

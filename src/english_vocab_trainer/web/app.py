@@ -15,11 +15,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
-from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction, Word
-from english_vocab_trainer.ports.audio import AudioStore
+from english_vocab_trainer.ports.audio import (
+    AudioStorageError,
+    AudioStore,
+    InvalidRangeError,
+    parse_single_range,
+)
 from english_vocab_trainer.ports.errors import (
     ConcurrentUpdateError,
     EventConflictError,
@@ -27,12 +31,13 @@ from english_vocab_trainer.ports.errors import (
 )
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.validation import validate_english_transcript
-from english_vocab_trainer.web.audio import build_audio_response
+from english_vocab_trainer.web.audio import build_audio_head_response, build_audio_response
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
     UnavailableAudioStore,
     UnavailableRepositoryProvider,
+    audio_store_from_env,
 )
 from english_vocab_trainer.web.dependencies import audio_store, identity
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
@@ -231,16 +236,37 @@ def audio(
     word = repository.get_word(word_id)
     if word is None:
         raise HTTPException(404, "word not found")
+    if range_header is not None:
+        try:
+            metadata = store.head(word.audio_key)
+            parse_single_range(range_header, metadata.size)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "audio not found") from exc
+        except InvalidRangeError:
+            return Response(
+                status_code=416,
+                headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
+            )
+        except (AudioStorageError, ConfigurationError) as exc:
+            raise HTTPException(502, "audio storage is unavailable") from exc
     try:
         result = store.get(word.audio_key, range_header)
     except FileNotFoundError as exc:
         raise HTTPException(404, "audio not found") from exc
-    except ValueError:
-        full = store.get(word.audio_key, None)
+    except InvalidRangeError:
+        # An upstream may reject a range after local validation (for example, a race).
+        try:
+            metadata = store.head(word.audio_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "audio not found") from exc
+        except (AudioStorageError, ConfigurationError) as exc:
+            raise HTTPException(502, "audio storage is unavailable") from exc
         return Response(
             status_code=416,
-            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{full.size}"},
+            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
         )
+    except (AudioStorageError, ConfigurationError) as exc:
+        raise HTTPException(502, "audio storage is unavailable") from exc
     return build_audio_response(result, False, if_none_match)
 
 
@@ -253,9 +279,22 @@ def audio_head(
     range_header: RangeHeader = None,
     if_none_match: IfNoneMatch = None,
 ) -> Response:
-    response = audio(word_id, _, repository, store, range_header, if_none_match)
-    response.body = b""
-    return response
+    word = repository.get_word(word_id)
+    if word is None:
+        raise HTTPException(404, "word not found")
+    try:
+        metadata = store.head(word.audio_key)
+        try:
+            return build_audio_head_response(metadata, range_header, if_none_match)
+        except InvalidRangeError:
+            return Response(
+                status_code=416,
+                headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "audio not found") from exc
+    except (AudioStorageError, ConfigurationError) as exc:
+        raise HTTPException(502, "audio storage is unavailable") from exc
 
 
 @router.get("/api/v1/progress", response_model=ProgressOut)
@@ -307,16 +346,19 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
     if environment in {"local", "test"}:
         try:
             database = Path(environ["VOCAB_DB_PATH"])
-            audio = Path(environ["AUDIO_ROOT"])
         except KeyError as exc:
-            raise ConfigurationError("VOCAB_DB_PATH and AUDIO_ROOT are required") from exc
+            raise ConfigurationError("VOCAB_DB_PATH is required") from exc
         return AppContainer(
             SQLiteRepositoryProvider(database),
-            FilesystemAudioStore(audio),
+            audio_store_from_env(environ),
             environment,
             environ.get("LOCAL_USER_ID", "local-user"),
         )
-    return AppContainer(UnavailableRepositoryProvider(), UnavailableAudioStore(), "production")
+    try:
+        audio = audio_store_from_env(environ)
+    except ConfigurationError:
+        audio = UnavailableAudioStore()
+    return AppContainer(UnavailableRepositoryProvider(), audio, "production")
 
 
 app = create_app(container_from_env())

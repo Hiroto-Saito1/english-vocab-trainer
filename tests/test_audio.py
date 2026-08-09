@@ -9,8 +9,9 @@ from english_vocab_trainer.ingest import parse_audio_path
 def test_range_parser() -> None:
     assert parse_single_range("bytes=1-3", 5) == (1, 3)
     assert parse_single_range("bytes=-2", 5) == (3, 4)
-    with pytest.raises(ValueError):
-        parse_single_range("bytes=9-", 5)
+    for invalid in ("bytes=9-", "bytes=1-2,3-4", "items=1-2", "bytes=-0", "bytes=a-2"):
+        with pytest.raises(ValueError):
+            parse_single_range(invalid, 5)
 
 
 def test_audio_store_blocks_traversal(tmp_path: Path) -> None:
@@ -19,6 +20,8 @@ def test_audio_store_blocks_traversal(tmp_path: Path) -> None:
     assert result.body == b"bcd" and result.partial
     with pytest.raises(FileNotFoundError):
         FilesystemAudioStore(tmp_path).get("../x.mp3")
+    with pytest.raises(FileNotFoundError):
+        FilesystemAudioStore(tmp_path).get("x.MP3")
 
 
 @pytest.mark.parametrize(

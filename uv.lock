@@ -369,6 +369,7 @@ name = "english-vocab-trainer"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "boto3" },
     { name = "fastapi" },
     { name = "fsrs" },
     { name = "jinja2" },
@@ -388,13 +389,13 @@ dev = [
     { name = "ruff" },
 ]
 ingest = [
-    { name = "boto3" },
     { name = "mlx-whisper" },
     { name = "tqdm" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.36" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fsrs", specifier = ">=5.1" },
     { name = "jinja2", specifier = ">=3.1" },
@@ -414,7 +415,6 @@ dev = [
     { name = "ruff", specifier = ">=0.9" },
 ]
 ingest = [
-    { name = "boto3", specifier = ">=1.36" },
     { name = "mlx-whisper", specifier = ">=0.4" },
     { name = "tqdm", specifier = ">=4.66,<4.70" },
 ]

@@ -1,13 +1,56 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
 
-from english_vocab_trainer.ports.audio import AudioResult, AudioStore
+from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
+from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, S3LikeClient
+from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, AudioStore
 from english_vocab_trainer.ports.repositories import RepositoryProvider, VocabularyRepository
 
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+S3ClientFactory = Callable[..., S3LikeClient]
+
+
+def _boto3_client_factory(**kwargs: Any) -> S3LikeClient:
+    # Import only when R2 is selected so local/test users do not need network setup.
+    import boto3  # type: ignore[import-untyped]
+
+    return cast(S3LikeClient, boto3.client("s3", **kwargs))
+
+
+def audio_store_from_env(
+    environ: Mapping[str, str], client_factory: S3ClientFactory | None = None
+) -> AudioStore:
+    """Create the explicitly selected private audio backend, or fail closed."""
+    backend = environ.get("AUDIO_BACKEND")
+    if backend == "filesystem":
+        root = environ.get("AUDIO_ROOT")
+        if not root:
+            raise ConfigurationError("AUDIO_ROOT is required for the filesystem audio backend")
+        return FilesystemAudioStore(Path(root))
+    if backend == "r2":
+        required = ("R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+        if any(not environ.get(name) for name in required):
+            raise ConfigurationError("private R2 audio configuration is incomplete")
+        factory = client_factory or _boto3_client_factory
+        try:
+            client = factory(
+                endpoint_url=environ["R2_ENDPOINT_URL"],
+                aws_access_key_id=environ["R2_ACCESS_KEY_ID"],
+                aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"],
+                region_name=environ.get("R2_REGION", "auto"),
+            )
+        except Exception as exc:
+            raise ConfigurationError("private R2 audio client is unavailable") from exc
+        return Boto3R2AudioStore(client, environ["R2_BUCKET"])
+    raise ConfigurationError("AUDIO_BACKEND must be filesystem or r2")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,5 +67,8 @@ class UnavailableRepositoryProvider:
 
 
 class UnavailableAudioStore:
+    def head(self, key: str) -> AudioMetadata:
+        raise ConfigurationError("audio store is not configured")
+
     def get(self, key: str, range_header: str | None = None) -> AudioResult:
         raise ConfigurationError("audio store is not configured")
