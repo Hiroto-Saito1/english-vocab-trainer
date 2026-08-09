@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -60,3 +61,18 @@ def test_words_filter_and_transcript_validation(tmp_path: Path) -> None:
             client.patch("/api/v1/words/no/transcript", json={"transcript": "English"}).status_code
             == 404
         )
+
+
+def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "one.mp3"))
+    repository.close()
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    event = {"id": str(UUID(int=9)), "word_id": "one", "action": "known", "reviewed_at": "2026-01-01T00:00:00Z"}
+    with TestClient(app) as client:
+        first = client.post("/api/v1/review-events/batch", json=[event]).json()
+        second = client.post("/api/v1/review-events/batch", json=[event]).json()
+        progress = client.get("/api/v1/progress").json()
+    assert first["results"][0]["status"] == "applied" and first["results"][0]["rating"] == "easy"
+    assert second["results"][0]["status"] == "idempotent" and progress["reviewed"] == 1
