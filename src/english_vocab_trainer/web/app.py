@@ -20,7 +20,7 @@ from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.adapters.local.sqlite import MissingError
 from english_vocab_trainer.application.services import create_study_session, submit_review
-from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent
+from english_vocab_trainer.domain.models import Rating, ReviewAction
 from english_vocab_trainer.ports.errors import (
     ConcurrentUpdateError,
     EventConflictError,
@@ -108,6 +108,14 @@ class BatchOut(BaseModel):
     acknowledged: list[UUID]
 
 
+class VoidOut(BaseModel):
+    id: UUID
+    status: Literal["voided"]
+    word_id: str
+    due_at: datetime
+    version: int
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -166,15 +174,24 @@ def review_batch(events: list[EventIn], _: Identity, repository: Repository) -> 
     return BatchOut(results=results, acknowledged=acknowledged)
 
 
-@router.post("/api/v1/review-events/{event_id}/void")
-def void_event(event_id: UUID, _: Identity) -> dict[str, str]:
-    event = repo.events.get(str(event_id))
+@router.post("/api/v1/review-events/{event_id}/void", response_model=VoidOut)
+def void_event(event_id: UUID, _: Identity, repository: Repository) -> VoidOut:
+    event = repository.get_event(event_id)
     if event is None:
         raise HTTPException(404, "event not found")
-    repo.events[str(event_id)] = ReviewEvent(
-        event.id, event.word_id, event.rating, event.reviewed_at, datetime.now(UTC)
+    try:
+        state = repository.void_event(event_id)
+    except MissingError as exc:
+        raise HTTPException(404, "event not found") from exc
+    except (EventConflictError, ConcurrentUpdateError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return VoidOut(
+        id=event_id,
+        status="voided",
+        word_id=event.word_id,
+        due_at=state.due_at,
+        version=state.version,
     )
-    return {"id": str(event_id), "status": "voided"}
 
 
 @router.get("/api/v1/audio/{word_id}")
@@ -218,7 +235,7 @@ def words(
 def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
     try:
         return WordOut(**asdict(repository.update_transcript(word_id, body.transcript)))
-    except (KeyError) as exc:
+    except KeyError as exc:
         raise HTTPException(404, "word not found") from exc
 
 
