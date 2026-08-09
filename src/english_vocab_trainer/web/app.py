@@ -59,6 +59,12 @@ class SettingsIn(BaseModel):
     daily_target: int = Field(default=30, ge=1, le=100)
 
 
+class ProgressOut(BaseModel):
+    total: int
+    due: int
+    reviewed: int
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -101,9 +107,9 @@ def audio(word_id: str, _: Identity) -> Response:
     return Response(status_code=501, headers={"Accept-Ranges": "bytes"})
 
 
-@router.get("/api/v1/progress")
-def progress(_: Identity) -> dict[str, int]:
-    return repo.progress(datetime.now(UTC))
+@router.get("/api/v1/progress", response_model=ProgressOut)
+def progress(_: Identity, repository: Repository) -> ProgressOut:
+    return ProgressOut(**repository.progress(datetime.now(UTC)))
 
 
 @router.get("/api/v1/settings")
