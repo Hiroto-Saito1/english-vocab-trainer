@@ -256,6 +256,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#term")).to_be_hidden()
     expect(page.locator("#tier")).to_be_hidden()
     expect(page.locator("#transcript")).to_be_hidden()
+    expect(page.locator("#progress")).to_have_text("1 of 3")
 
     page.get_by_role("button", name="Known", exact=True).click()
     expect(page.locator("#progress")).to_have_text("2 of 3")
