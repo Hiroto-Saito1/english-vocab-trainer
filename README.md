@@ -54,7 +54,7 @@ Run the application with Python 3.13 and uv. The local filesystem backend requir
 `AUDIO_BACKEND=filesystem`; `AUDIO_ROOT` must be the parent containing the two approved source
 directories, so catalog audio keys resolve without copying any MP3:
 
-`VOCAB_DB_PATH=./vocab.db AUDIO_BACKEND=filesystem AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:app --app-dir src`
+`VOCAB_DB_PATH=./vocab.db AUDIO_BACKEND=filesystem AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:create_app_from_env --factory --app-dir src`
 
 The private, server-side R2 proxy uses `AUDIO_BACKEND=r2`, `R2_ENDPOINT_URL`,
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` (optionally `R2_REGION`, default
@@ -105,3 +105,29 @@ Browser acceptance tests use a live local Uvicorn server and Chromium. Install a
 
 M2c browser coverage waits for the service worker, cache-readiness state, and browser conditions;
 it does not depend on fixed sleeps for PWA/cache timing.
+
+## M3a: production sign-in
+
+Production starts only through the factory entrypoint above and requires `APP_ENV=production`,
+`VOCAB_DB_PATH`, a complete private audio backend configuration, `APP_PASSWORD_HASH`, and
+`SESSION_SIGNING_SECRET`. `APP_PASSWORD_HASH` must be a sufficiently strong Argon2id encoded hash
+(at least 19 MiB memory, two iterations, and 16-byte salt/hash). `SESSION_SIGNING_SECRET` is a
+canonical base64url value decoding to at least 32 random bytes. Generate both without placing the
+values in shell history, then enter them into the secret manager:
+
+`uv run python -c 'from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass("Password: ")))'`
+
+`uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'`
+
+The production session cookie is `__Host-` scoped, Secure, HttpOnly, SameSite=Strict, and lasts
+30 days. Its separate Secure CSRF cookie is non-HttpOnly only so the PWA can submit the matching
+header; neither credential is stored in IndexedDB or Cache Storage. Login/auth and non-audio API
+responses are `no-store`. Private full audio remains eligible only for the explicit current-session
+PWA cache.
+
+Authentication uses a persistent global limiter for this one-account application: at most five
+password-verification reservations in any 15-minute rolling window. A successful sign-in clears the
+window. This deliberately permits a local denial-of-service tradeoff rather than trusting spoofable
+client IP headers. Offline resume is device-local until logout; Logout first clears local study data,
+then expires server cookies. If the network is unavailable after local clearing, the UI asks to
+reconnect to complete cookie logout.

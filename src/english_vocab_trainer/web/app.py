@@ -10,10 +10,11 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
+from starlette.middleware.base import RequestResponseEndpoint
 
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
@@ -36,17 +37,18 @@ from english_vocab_trainer.web.audio import (
     build_audio_response,
     if_none_match_matches,
 )
+from english_vocab_trainer.web.auth import AuthenticationError
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
-    UnavailableAudioStore,
-    UnavailableRepositoryProvider,
     audio_store_from_env,
+    auth_from_env,
 )
-from english_vocab_trainer.web.dependencies import audio_store, identity
+from english_vocab_trainer.web.dependencies import audio_store, csrf, identity
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
 Identity = Annotated[str, Depends(identity)]
+Csrf = Annotated[None, Depends(csrf)]
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 Audio = Annotated[AudioStore, Depends(audio_store)]
 RangeHeader = Annotated[str | None, Header(alias="Range")]
@@ -138,8 +140,77 @@ def word_out(word: Word) -> WordOut:
 
 
 @router.get("/", response_class=HTMLResponse)
-def home(request: Request) -> HTMLResponse:
+def home(request: Request) -> Response:
+    container = request.app.state.container
+    if container.environment not in {"local", "test"}:
+        try:
+            assert container.auth is not None
+            container.auth.user_from_session(
+                request.cookies.get(container.auth.session_cookie_name)
+            )
+        except AuthenticationError:
+            return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
+
+
+@router.get("/health", include_in_schema=False)
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@router.get("/login", response_class=HTMLResponse)
+def login_form(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"title": "Sign in", "error": False},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/login", response_class=HTMLResponse)
+async def login(request: Request) -> Response:
+    container = request.app.state.container
+    if container.environment in {"local", "test"} or container.auth is None:
+        raise HTTPException(404, "not found")
+    origin = request.headers.get("Origin")
+    if origin is not None and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(403, "invalid origin")
+    form = await request.form()
+    password = form.get("password")
+    cookies = container.auth.authenticate(password if isinstance(password, str) else "")
+    if cookies is None:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"title": "Sign in", "error": True},
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+    response = RedirectResponse("/", status_code=303, headers={"Cache-Control": "no-store"})
+    common = {
+        "max_age": 30 * 24 * 60 * 60,
+        "secure": container.auth.secure_cookies,
+        "samesite": "strict",
+        "path": "/",
+    }
+    response.set_cookie(
+        container.auth.session_cookie_name, cookies.session, httponly=True, **common
+    )
+    response.set_cookie(container.auth.csrf_cookie_name, cookies.csrf, httponly=False, **common)
+    return response
+
+
+@router.post("/auth/logout", status_code=204)
+def logout(request: Request, _: Identity, __: Csrf) -> Response:
+    container = request.app.state.container
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    if container.auth is not None:
+        for name in (container.auth.session_cookie_name, container.auth.csrf_cookie_name):
+            response.delete_cookie(
+                name, path="/", secure=container.auth.secure_cookies, samesite="strict"
+            )
+    return response
 
 
 @router.get("/sw.js", include_in_schema=False)
@@ -184,7 +255,7 @@ def get_session(session_id: str, _: Identity, repository: Repository) -> Session
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
-def review_batch(events: list[EventIn], _: Identity, repository: Repository) -> BatchOut:
+def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repository) -> BatchOut:
     if len(events) > 100:
         raise HTTPException(422, "at most 100 events")
     results: list[EventResultOut] = []
@@ -219,7 +290,7 @@ def review_batch(events: list[EventIn], _: Identity, repository: Repository) -> 
 
 
 @router.post("/api/v1/review-events/{event_id}/void", response_model=VoidOut)
-def void_event(event_id: UUID, _: Identity, repository: Repository) -> VoidOut:
+def void_event(event_id: UUID, _: Identity, __: Csrf, repository: Repository) -> VoidOut:
     event = repository.get_event(event_id)
     if event is None:
         raise HTTPException(404, "event not found")
@@ -336,7 +407,7 @@ def get_settings(_: Identity, repository: Repository) -> SettingsOut:
 
 
 @router.patch("/api/v1/settings", response_model=SettingsOut)
-def settings(settings: SettingsIn, _: Identity, repository: Repository) -> SettingsOut:
+def settings(settings: SettingsIn, _: Identity, __: Csrf, repository: Repository) -> SettingsOut:
     updated = repository.update_settings(settings.daily_target)
     return SettingsOut(daily_target=updated.daily_target)
 
@@ -354,7 +425,9 @@ def words(
 
 
 @router.patch("/api/v1/words/{word_id}/transcript", response_model=WordOut)
-def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
+def transcript(
+    word_id: str, body: TranscriptIn, _: Identity, __: Csrf, repository: Repository
+) -> WordOut:
     try:
         return word_out(repository.update_transcript(word_id, body.transcript))
     except (MissingError, KeyError) as exc:
@@ -364,6 +437,21 @@ def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Reposi
 def create_app(container: AppContainer) -> FastAPI:
     new_app = FastAPI(title="English Vocab Trainer", version="1.0.0")
     new_app.state.container = container
+
+    @new_app.middleware("http")
+    async def private_response_cache_control(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        response = await call_next(request)
+        path = request.url.path
+        if (
+            (path.startswith("/api/") and not path.startswith("/api/v1/audio/"))
+            or path.startswith("/auth/")
+            or path == "/login"
+        ):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     new_app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
     new_app.include_router(router)
     return new_app
@@ -383,10 +471,18 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
             environ.get("LOCAL_USER_ID", "local-user"),
         )
     try:
-        audio = audio_store_from_env(environ)
-    except ConfigurationError:
-        audio = UnavailableAudioStore()
-    return AppContainer(UnavailableRepositoryProvider(), audio, "production")
+        database = Path(environ["VOCAB_DB_PATH"])
+        return AppContainer(
+            SQLiteRepositoryProvider(database),
+            audio_store_from_env(environ),
+            "production",
+            auth=auth_from_env(environ, database, secure_cookies=True),
+        )
+    except (KeyError, ConfigurationError) as exc:
+        raise ConfigurationError(
+            "production storage or authentication configuration is incomplete"
+        ) from exc
 
 
-app = create_app(container_from_env())
+def create_app_from_env() -> FastAPI:
+    return create_app(container_from_env())

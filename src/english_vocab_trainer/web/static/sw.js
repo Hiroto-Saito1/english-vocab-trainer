@@ -132,7 +132,9 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          if (response.status === 200) event.waitUntil(caches.open(SHELL).then((cache) => cache.put(event.request, response.clone())));
+          const requested = new URL(event.request.url);
+          const returned = new URL(response.url);
+          if (response.status === 200 && !response.redirected && returned.origin === self.location.origin && returned.pathname === requested.pathname) event.waitUntil(caches.open(SHELL).then((cache) => cache.put(event.request, response.clone())));
           return response;
         })
         .catch(() => caches.match(event.request)),

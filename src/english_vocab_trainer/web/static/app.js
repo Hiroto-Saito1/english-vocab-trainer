@@ -9,6 +9,18 @@ const $ = (selector) => document.querySelector(selector);
 const card = $("#card"), term = $("#term"), transcript = $("#transcript"), audio = $("#audio");
 const known = $("#known"), unknown = $("#unknown"), continueButton = $("#continue"), undoButton = $("#undo");
 const startButton = $("#start"), progress = $("#progress"), status = $("#status");
+const logoutButton = $("#logout");
+
+function csrfToken() { return document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith("__Host-vocab-csrf=") || value.startsWith("vocab-csrf="))?.split("=").slice(1).join("="); }
+async function apiFetch(url, options = {}) {
+  const { redirectOn401 = true, ...requestOptions } = options;
+  const method = (requestOptions.method || "GET").toUpperCase();
+  const headers = new Headers(requestOptions.headers || {}), token = csrfToken();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && token) headers.set("X-CSRF-Token", token);
+  const response = await fetch(url, { ...requestOptions, headers });
+  if (redirectOn401 && response.status === 401 && navigator.onLine) location.assign("/login");
+  return response;
+}
 
 function openDb() { return new Promise((resolve, reject) => { const request = indexedDB.open(DB_NAME, 1); request.onupgradeneeded = () => { request.result.createObjectStore("events", { keyPath: "id" }); request.result.createObjectStore("state", { keyPath: "key" }); }; request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }); }
 async function transaction(storeName, mode, action) { const db = await openDb(); return new Promise((resolve, reject) => { const tx = db.transaction(storeName, mode); let value; tx.oncomplete = () => { db.close(); resolve(value); }; tx.onerror = () => { db.close(); reject(tx.error); }; tx.onabort = () => { db.close(); reject(tx.error); }; value = action(tx.objectStore(storeName)); }); }
@@ -104,7 +116,7 @@ function startPreload() {
 
 async function sync() {
   if (syncFlight) return syncFlight;
-  syncFlight = (async () => { const events = await allEvents(); if (!events.length || !navigator.onLine) return; try { const response = await fetch("/api/v1/review-events/batch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(events) }); if (!response.ok) { showStatus("Review sync will retry when online."); return; } const payload = await response.json(); await Promise.all(payload.acknowledged.map(removeEvent)); } catch (_) { showStatus("Review sync will retry when online."); } })();
+  syncFlight = (async () => { const events = await allEvents(); if (!events.length || !navigator.onLine) return; try { const response = await apiFetch("/api/v1/review-events/batch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(events) }); if (!response.ok) { showStatus("Review sync will retry when online."); return; } const payload = await response.json(); await Promise.all(payload.acknowledged.map(removeEvent)); } catch (_) { showStatus("Review sync will retry when online."); } })();
   try { await syncFlight; } finally { syncFlight = null; }
 }
 async function answer(action) {
@@ -123,7 +135,7 @@ async function undoLast() {
   const pending = (await allEvents()).some((item) => item.id === event.id);
   try {
     if (pending) await removeEvent(event.id);
-    else { const response = await fetch(`/api/v1/review-events/${event.id}/void`, { method: "POST" }); if (!response.ok) throw new Error("void failed"); }
+    else { const response = await apiFetch(`/api/v1/review-events/${event.id}/void`, { method: "POST" }); if (!response.ok) throw new Error("void failed"); }
     state.current = Math.max(0, state.current - (state.phase === "listening" ? 1 : 0)); state.phase = "listening"; state.event = null; state.undoDeadline = 0; clearUndoTimer(); await saveState(); render();
   } catch (_) { showStatus("Undo could not be completed. Please try again."); render(); }
   busy = false;
@@ -155,7 +167,7 @@ async function boot() {
     try { await configureAudioCache(false); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
   } else {
     try {
-      const response = await fetch("/api/v1/sessions?mode=daily");
+      const response = await apiFetch("/api/v1/sessions?mode=daily");
       if (!response.ok) throw new Error("session unavailable");
       const session = await response.json();
       state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, undoDeadline: 0 };
@@ -171,8 +183,18 @@ async function boot() {
   armUndoTimer(); render(); startPreload().catch(() => showStatus("Some audio could not be saved for offline listening.")); sync();
 }
 
+async function logout() {
+  logoutButton.disabled = true;
+  try { await window.clearPrivateCaches(); } catch (_) { showStatus("Private study data could not be cleared. Please try again."); logoutButton.disabled = false; return; }
+  try {
+    const response = await apiFetch("/auth/logout", { method: "POST", redirectOn401: false });
+    if (response.status === 204 || response.status === 401) { location.assign("/login"); return; }
+    showStatus("Reconnect to finish signing out.");
+  } catch (_) { showStatus("Reconnect to finish signing out."); }
+  logoutButton.disabled = false;
+}
 window.clearPrivateCaches = clearPrivateCaches;
 window.__pwa = { getAudioCacheState: () => ({ ...audioCacheState }), getState: () => ({ ...state }) };
-known.addEventListener("click", () => answer("known")); unknown.addEventListener("click", () => answer("unknown")); continueButton.addEventListener("click", continueStudy); undoButton.addEventListener("click", undoLast); startButton.addEventListener("click", play); addEventListener("online", sync);
+known.addEventListener("click", () => answer("known")); unknown.addEventListener("click", () => answer("unknown")); continueButton.addEventListener("click", continueStudy); undoButton.addEventListener("click", undoLast); startButton.addEventListener("click", play); logoutButton.addEventListener("click", logout); addEventListener("online", sync);
 if ("serviceWorker" in navigator) window.__pwa.serviceWorkerRegistration = navigator.serviceWorker.register("/sw.js").then(() => "ready", (error) => String(error));
 boot().catch(() => { render(); showStatus("Reconnect to start a new study session."); });

@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
+from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, S3LikeClient
 from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, AudioStore
 from english_vocab_trainer.ports.repositories import RepositoryProvider, VocabularyRepository
+from english_vocab_trainer.web.auth import AuthService
 
 
 class ConfigurationError(RuntimeError):
@@ -67,6 +69,32 @@ class AppContainer:
     audio: AudioStore
     environment: str
     local_user_id: str | None = None
+    auth: AuthService | None = None
+
+
+def auth_from_env(
+    environ: Mapping[str, str], database: Path, *, secure_cookies: bool
+) -> AuthService:
+    password_hash = environ.get("APP_PASSWORD_HASH")
+    secret = environ.get("SESSION_SIGNING_SECRET")
+    if not password_hash or not secret:
+        raise ConfigurationError("APP_PASSWORD_HASH and SESSION_SIGNING_SECRET are required")
+    try:
+        import base64
+
+        signing_secret = base64.b64decode(
+            secret + "=" * (-len(secret) % 4), altchars=b"-_", validate=True
+        )
+        if base64.urlsafe_b64encode(signing_secret).rstrip(b"=").decode("ascii") != secret:
+            raise ValueError("session signing secret is not canonical base64url")
+        return AuthService(
+            password_hash,
+            signing_secret,
+            SQLiteLoginAttemptLimiter(database),
+            secure_cookies=secure_cookies,
+        )
+    except Exception as exc:
+        raise ConfigurationError("authentication configuration is invalid") from exc
 
 
 class UnavailableRepositoryProvider:
