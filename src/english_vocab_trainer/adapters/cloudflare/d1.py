@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word, WordState
+from english_vocab_trainer.domain.models import Rating, ReviewEvent, Settings, Word, WordState
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -51,6 +51,10 @@ class D1VocabularyRepository:
     async def _count(self, sql: str, *params: object) -> int:
         row = await self._first(sql, *params)
         return int(cast(int | str, row["value"])) if row else 0
+
+    async def _run(self, sql: str, *params: object) -> object:
+        statement: Any = cast(Any, self.db).prepare(sql).bind(*params)
+        return await statement.run()
 
     async def get_word(self, word_id: str) -> Word | None:
         row = await self._first(
@@ -163,6 +167,12 @@ class D1VocabularyRepository:
             self.user_id,
         )
         return {"total": total, "due": due, "reviewed": reviewed}
+
+    async def get_settings(self) -> Settings:
+        row = await self._first(
+            "SELECT daily_target FROM user_settings WHERE user_id=?", self.user_id
+        )
+        return Settings(int(cast(int | str, row["daily_target"]))) if row else Settings()
 
     async def close(self) -> None:
         return None
