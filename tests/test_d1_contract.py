@@ -50,7 +50,8 @@ async def test_d1_transcript_update_and_missing() -> None:
     connection.execute("INSERT INTO words VALUES(?,?,?,?,?)", ("one", "one", 9, None, "one.mp3"))
     repo = D1VocabularyRepository(FakeD1(connection), "alice")
     assert (await repo.update_transcript("one", "English text")).transcript == "English text"
-    assert (await repo.get_word("one")).transcript == "English text"
+    stored = await repo.get_word("one")
+    assert stored is not None and stored.transcript == "English text"
     with pytest.raises(MissingError):
         await repo.update_transcript("missing", "English")
     connection.close()
@@ -68,5 +69,6 @@ async def test_d1_session_create_and_ordered_read() -> None:
     repo = D1VocabularyRepository(FakeD1(connection), "alice")
     session = await repo.create_session("s", "screen", ["b", "a"], datetime(2026, 1, 1, tzinfo=UTC))
     assert [word.id for word in session.words] == ["b", "a"]
-    assert [word.id for word in (await repo.get_session("s")).words] == ["b", "a"]
+    stored_session = await repo.get_session("s")
+    assert stored_session is not None and [word.id for word in stored_session.words] == ["b", "a"]
     connection.close()

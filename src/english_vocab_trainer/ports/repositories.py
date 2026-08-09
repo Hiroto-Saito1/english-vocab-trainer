@@ -30,10 +30,6 @@ class VocabularyRepository(Protocol):
     def progress(self, now: datetime) -> dict[str, int]: ...
 
 
-class RepositoryProvider(Protocol):
-    def for_user(self, user_id: str) -> VocabularyRepository: ...
-
-
 class AsyncVocabularyRepository(Protocol):
     async def list_words(
         self, *, levels: list[int] | None = None, limit: int = 100
@@ -57,3 +53,7 @@ class AsyncVocabularyRepository(Protocol):
 
 
 type AnyVocabularyRepository = VocabularyRepository | AsyncVocabularyRepository
+
+
+class RepositoryProvider(Protocol):
+    def for_user(self, user_id: str) -> AnyVocabularyRepository: ...

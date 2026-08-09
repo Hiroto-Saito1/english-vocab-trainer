@@ -30,7 +30,9 @@ def get_container(request: Request) -> AppContainer:
 
 def repository_for_user(request: Request, user_id: str) -> Iterator[VocabularyRepository]:
     try:
-        repository = get_container(request).repositories.for_user(user_id)
+        repository = cast(
+            VocabularyRepository, get_container(request).repositories.for_user(user_id)
+        )
     except ConfigurationError as exc:
         raise HTTPException(503, "repository is unavailable") from exc
     try:
