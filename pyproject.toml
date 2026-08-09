@@ -27,7 +27,7 @@ strict = true
 packages = ["english_vocab_trainer"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=english_vocab_trainer --cov-report=term-missing --cov-fail-under=85"
+addopts = "--cov=english_vocab_trainer --cov-branch --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
 
 [build-system]

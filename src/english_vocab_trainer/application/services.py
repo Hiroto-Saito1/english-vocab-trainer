@@ -44,9 +44,9 @@ def select_session_words(
         return new[:count]
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
-    due = repo.due_words(now, min(repo.get_settings().daily_target, 30))
+    due = repo.due_words(now, min(repo.get_settings().daily_target, 20))
     due_ids = {word.id for word in due}
-    return due + [word for word in new if word.id not in due_ids][:20]
+    return due + [word for word in new if word.id not in due_ids][: max(0, 20 - len(due))]
 
 
 def create_study_session(

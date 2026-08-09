@@ -24,4 +24,9 @@ def test_screen_session_is_persisted(tmp_path: Path) -> None:
     stored_repository = provider.for_user("local-user")
     stored = stored_repository.get_session(payload["id"])
     stored_repository.close()
-    assert response.status_code == 200 and len(payload["items"]) == 1 and stored is not None
+    assert (
+        response.status_code == 200
+        and len(payload["items"]) == 1
+        and payload["items"][0]["audio_url"] == "/api/v1/audio/one"
+        and stored is not None
+    )

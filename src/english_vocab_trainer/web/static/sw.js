@@ -1,1 +1,4 @@
-self.addEventListener("install",e=>e.waitUntil(caches.open("v1").then(c=>c.addAll(["/","/static/app.js"]))));self.addEventListener("fetch",e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(x=>{if(e.request.url.includes("/audio/"))caches.open("v1").then(c=>c.put(e.request,x.clone()));return x;}))));
+const SHELL = "m1-shell-v1";
+self.addEventListener("install", (event) => event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(["/", "/static/app.js", "/static/manifest.json"]))));
+self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (event) => event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => { if (event.request.url.includes("/audio/")) caches.open("m1-audio").then((cache) => cache.put(event.request, response.clone())); return response; }))));

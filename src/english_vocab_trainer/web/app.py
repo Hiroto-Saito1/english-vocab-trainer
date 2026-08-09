@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
-from english_vocab_trainer.domain.models import Rating, ReviewAction
+from english_vocab_trainer.domain.models import Rating, ReviewAction, Word
 from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.errors import (
     ConcurrentUpdateError,
@@ -83,7 +83,7 @@ class WordOut(BaseModel):
     term: str
     level: int | None
     transcript: str | None
-    audio_key: str
+    audio_url: str
 
 
 class WordListOut(BaseModel):
@@ -118,6 +118,17 @@ class VoidOut(BaseModel):
     version: int
 
 
+def word_out(word: Word) -> WordOut:
+    values = asdict(word)
+    return WordOut(
+        id=values["id"],
+        term=values["term"],
+        level=values["level"],
+        transcript=values["transcript"],
+        audio_url=f"/api/v1/audio/{values['id']}",
+    )
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -135,10 +146,23 @@ def sessions(
             id=session.id,
             mode=session.kind,
             created_at=session.created_at,
-            items=[WordOut(**asdict(word)) for word in session.words],
+            items=[word_out(word) for word in session.words],
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/api/v1/sessions/{session_id}", response_model=SessionOut)
+def get_session(session_id: str, _: Identity, repository: Repository) -> SessionOut:
+    session = repository.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "session not found")
+    return SessionOut(
+        id=session.id,
+        mode=session.kind,
+        created_at=session.created_at,
+        items=[word_out(word) for word in session.words],
+    )
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
@@ -259,16 +283,14 @@ def words(
     levels: Annotated[list[int] | None, Query()] = None,
 ) -> WordListOut:
     return WordListOut(
-        items=[
-            WordOut(**asdict(word)) for word in repository.list_words(levels=levels, limit=limit)
-        ]
+        items=[word_out(word) for word in repository.list_words(levels=levels, limit=limit)]
     )
 
 
 @router.patch("/api/v1/words/{word_id}/transcript", response_model=WordOut)
 def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
     try:
-        return WordOut(**asdict(repository.update_transcript(word_id, body.transcript)))
+        return word_out(repository.update_transcript(word_id, body.transcript))
     except (MissingError, KeyError) as exc:
         raise HTTPException(404, "word not found") from exc
 
