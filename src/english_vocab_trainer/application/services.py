@@ -9,6 +9,7 @@ from english_vocab_trainer.domain.models import (
     Rating,
     ReviewAction,
     ReviewEvent,
+    StudySession,
     Word,
     WordState,
     rating_for_action,
@@ -71,6 +72,18 @@ def select_session_words(
     due = repo.due_words(now, min(repo.get_settings().daily_target, 30))
     due_ids = {word.id for word in due}
     return due + [word for word in new if word.id not in due_ids][:20]
+
+
+def create_study_session(
+    repo: VocabularyRepository,
+    mode: str,
+    now: datetime,
+    session_id: str,
+    count: int | None,
+    rng: Random,
+) -> StudySession:
+    words = select_session_words(repo, mode, now, count, rng)
+    return repo.create_session(session_id, mode, [word.id for word in words], now)
 
 
 @dataclass(frozen=True, slots=True)
