@@ -19,8 +19,8 @@ from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.adapters.local.sqlite import MissingError
-from english_vocab_trainer.application.services import apply_events, create_study_session
-from english_vocab_trainer.domain.models import Rating, ReviewEvent
+from english_vocab_trainer.application.services import create_study_session, submit_review
+from english_vocab_trainer.domain.models import ReviewAction, ReviewEvent
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import (
     AppContainer,
@@ -42,7 +42,7 @@ router = APIRouter()
 class EventIn(BaseModel):
     id: UUID
     word_id: str
-    rating: Rating
+    action: ReviewAction
     reviewed_at: datetime
 
 
@@ -114,9 +114,17 @@ def sessions(
 
 
 @router.post("/api/v1/review-events/batch")
-def review_batch(events: list[EventIn], _: Identity) -> dict[str, list[str]]:
-    domain_events = [ReviewEvent(e.id, e.word_id, e.rating, e.reviewed_at) for e in events]
-    return {"applied": apply_events(repo, domain_events)}
+def review_batch(
+    events: list[EventIn], _: Identity, repository: Repository
+) -> dict[str, list[str]]:
+    if len(events) > 100:
+        raise HTTPException(422, "at most 100 events")
+    return {
+        "acknowledged": [
+            str(submit_review(repository, e.id, e.word_id, e.action, e.reviewed_at).id)
+            for e in events
+        ]
+    }
 
 
 @router.post("/api/v1/review-events/{event_id}/void")
