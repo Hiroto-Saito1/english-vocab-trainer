@@ -40,3 +40,18 @@ def test_audio_api_full_and_range(tmp_path: Path) -> None:
         and partial.content == b"bcd"
         and partial.headers["content-range"] == "bytes 1-3/5"
     )
+
+
+def test_audio_api_invalid_range_and_etag(tmp_path: Path) -> None:
+    (tmp_path / "x.mp3").write_bytes(b"abcde")
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.close()
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    with TestClient(app) as client:
+        full = client.get("/api/v1/audio/one")
+        invalid = client.get("/api/v1/audio/one", headers={"Range": "bytes=9-"})
+        cached = client.get("/api/v1/audio/one", headers={"If-None-Match": full.headers["etag"]})
+    assert invalid.status_code == 416 and invalid.headers["content-range"] == "bytes */5"
+    assert cached.status_code == 304 and cached.content == b""
