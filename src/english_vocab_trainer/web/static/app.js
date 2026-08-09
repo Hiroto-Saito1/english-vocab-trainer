@@ -7,6 +7,7 @@ let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", even
 let busy = false, syncFlight = null, undoTimer = null, learningTimer = null;
 let audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
 let audioCacheEpoch = 0, preloadFlight = null;
+let audioPresentation = null;
 const $ = (selector) => document.querySelector(selector);
 const card = $("#card"), term = $("#term"), tier = $("#tier"), transcript = $("#transcript"), audio = $("#audio");
 const known = $("#known"), unknown = $("#unknown"), continueButton = $("#continue"), undoButton = $("#undo");
@@ -49,6 +50,18 @@ function formatTier(word) {
 }
 function setActions(disabled) { known.disabled = disabled; unknown.disabled = disabled; continueButton.disabled = disabled; }
 function play() { audio.play().then(() => { startButton.hidden = true; }).catch(() => { startButton.hidden = false; }); }
+function presentAudio(word, revealed) {
+  const identity = `${word.id}:${revealed ? "revealed" : "listening"}`;
+  if (audioPresentation === identity) return;
+  audioPresentation = identity;
+  audio.src = word.audio_url;
+  audio.currentTime = 0;
+  play();
+}
+function clearAudioPresentation() {
+  audioPresentation = null;
+  audio.removeAttribute("src");
+}
 function clearUndoTimer() { if (undoTimer) clearTimeout(undoTimer); undoTimer = null; }
 function clearLearningTimer() { if (learningTimer) clearTimeout(learningTimer); learningTimer = null; }
 function armLearningTimer() {
@@ -60,11 +73,20 @@ function armLearningTimer() {
   if (earliest <= nowMs()) return;
   learningTimer = setTimeout(() => render(), Math.max(0, earliest - nowMs()));
 }
-function armUndoTimer() { clearUndoTimer(); const remaining = state.undoDeadline - nowMs(); if (remaining <= 0) { state.event = null; state.undoDeadline = 0; saveState(); return; } undoTimer = setTimeout(async () => { state.event = null; state.undoDeadline = 0; await saveState(); render(); }, remaining); }
+function updateUndoPresentation() { undoButton.hidden = !state.event || state.undoDeadline <= nowMs(); }
+function expireUndo() {
+  if (!state.event || state.undoDeadline > nowMs()) return false;
+  state.event = null; state.undoDeadline = 0; clearUndoTimer(); updateUndoPresentation(); saveState();
+  return true;
+}
+function armUndoTimer() {
+  clearUndoTimer();
+  const remaining = state.undoDeadline - nowMs();
+  if (remaining <= 0) { expireUndo(); return; }
+  undoTimer = setTimeout(() => { expireUndo(); }, remaining);
+}
 function render() {
-  if (state.event && state.undoDeadline <= nowMs()) {
-    state.event = null; state.undoDeadline = 0; clearUndoTimer(); saveState();
-  }
+  expireUndo();
   if (
     state.current >= state.cards.length
     && state.revealedLearningWordId
@@ -73,12 +95,12 @@ function render() {
   const word = currentWord();
   if (word && state.phase === "waiting") state.phase = "listening";
   const revealed = state.phase === "revealed";
-  if (state.phase === "unavailable") { card.textContent = "Reconnect to start your study session."; term.hidden = true; tier.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = "Offline"; return; }
+  if (state.phase === "unavailable") { card.textContent = "Reconnect to start your study session."; term.hidden = true; tier.hidden = true; transcript.hidden = true; clearAudioPresentation(); setActions(true); progress.textContent = "Offline"; return; }
   progress.textContent = `${Math.min(state.current + 1, state.cards.length)} of ${state.cards.length}`;
-  undoButton.hidden = !state.event || state.undoDeadline <= nowMs();
+  updateUndoPresentation();
   term.hidden = !revealed; tier.hidden = !revealed; transcript.hidden = !revealed; continueButton.hidden = !revealed;
   if (!word) {
-    term.hidden = true; tier.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true);
+    term.hidden = true; tier.hidden = true; transcript.hidden = true; clearAudioPresentation(); setActions(true);
     if (state.learningQueue.length) {
       state.phase = "waiting";
       const seconds = Math.max(0, Math.ceil((Math.min(...state.learningQueue.map((item) => item.due_at)) - nowMs()) / 1000));
@@ -89,8 +111,9 @@ function render() {
   }
   card.textContent = revealed ? "Review the word and continue when ready." : "Listen, then choose.";
   term.textContent = word.term; tier.textContent = formatTier(word); transcript.textContent = word.transcript || "Transcript is unavailable.";
-  if (!revealed) { audio.src = word.audio_url; audio.currentTime = 0; setActions(false); play(); }
-  else { setActions(true); continueButton.disabled = false; audio.currentTime = 0; play(); }
+  if (!revealed) setActions(false);
+  else { setActions(true); continueButton.disabled = false; }
+  presentAudio(word, revealed);
   armLearningTimer();
 }
 

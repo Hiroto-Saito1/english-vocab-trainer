@@ -248,6 +248,33 @@ def wait_for_outbox_ids(page: Page, expected: list[str]) -> None:
     assert matched is True, f"outbox IDs did not become {expected!r} within 10 seconds"
 
 
+def install_audio_presentation_spy(page: Page) -> None:
+    page.evaluate(
+        """() => {
+          const element = document.querySelector("#audio");
+          const currentTime = Object.getOwnPropertyDescriptor(
+            HTMLMediaElement.prototype, "currentTime"
+          );
+          if (!currentTime?.get || !currentTime.set) {
+            throw new Error("audio currentTime is unavailable");
+          }
+          const calls = { play: 0, pause: 0, seek: 0 };
+          const play = element.play.bind(element), pause = element.pause.bind(element);
+          element.play = (...args) => { calls.play += 1; return play(...args); };
+          element.pause = (...args) => { calls.pause += 1; return pause(...args); };
+          Object.defineProperty(element, "currentTime", {
+            configurable: true,
+            get: () => currentTime.get.call(element),
+            set: (value) => { calls.seek += 1; return currentTime.set.call(element, value); },
+          });
+          window.__audioPresentationSpy = {
+            calls,
+            reset: () => { calls.play = 0; calls.pause = 0; calls.seek = 0; },
+          };
+        }"""
+    )
+
+
 @pytest.mark.e2e
 def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[str, Path]) -> None:
     base_url, database = pwa_server
@@ -289,6 +316,45 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#progress")).to_have_text("3 of 3")
     assert len(event_rows(database)) == 3
     page.context.set_offline(False)
+
+
+@pytest.mark.e2e
+def test_undo_expiry_does_not_restart_revealed_audio(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    page.goto(base_url)
+    expect(page.locator("#progress")).to_have_text("1 of 3")
+    install_audio_presentation_spy(page)
+    page.evaluate("window.__audioPresentationSpy.reset()")
+
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#term")).to_be_visible()
+    assert page.evaluate("window.__audioPresentationSpy.calls") == {
+        "play": 1,
+        "pause": 1,
+        "seek": 1,
+    }
+
+    page.evaluate("window.__pwa.render()")
+    assert page.evaluate("window.__audioPresentationSpy.calls") == {
+        "play": 1,
+        "pause": 1,
+        "seek": 1,
+    }
+
+    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
+    page.evaluate(
+        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
+        "window.__pwa.render(); }",
+        undo_deadline,
+    )
+    assert page.evaluate("window.__pwa.getState().event") is None
+    assert page.evaluate("window.__audioPresentationSpy.calls") == {
+        "play": 1,
+        "pause": 1,
+        "seek": 1,
+    }
 
 
 @pytest.mark.e2e
