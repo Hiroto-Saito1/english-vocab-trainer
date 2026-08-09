@@ -337,13 +337,51 @@ def test_unknown_learning_replays_after_injected_ten_minute_clock(
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
     replayed = page.evaluate("window.__pwa.getState().learningQueue[0]")
     assert replayed["eventId"] == queued["eventId"]
+    # A learning retry remains revealable even after its five-second Undo data
+    # expires, and Continue never advances the initial admission cursor.
     page.get_by_role("button", name="Unknown", exact=True).click()
-    page.get_by_role("button", name="Undo", exact=True).click()
+    expect(page.locator("#continue")).to_be_visible()
+    retry = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
+    page.evaluate(
+        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
+        "window.__pwa.render(); }",
+        undo_deadline,
+    )
+    assert page.evaluate("window.__pwa.getState().event") is None
+    resumed = page.evaluate("window.__pwa.getState()")
+    assert resumed["revealedLearningWordId"], resumed
+    assert resumed["phase"] == "revealed", resumed
+    expect(page.locator("#continue")).to_be_visible()
+    page.get_by_role("button", name="Continue", exact=True).click()
+    assert page.evaluate("window.__pwa.getState().current") == page.evaluate(
+        "window.__pwa.getState().cards.length"
+    )
+    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
+    retry = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    page.evaluate(
+        "(due) => { window.__pwaTestClock = { now: () => due }; window.__pwa.render(); }",
+        retry["due_at"],
+    )
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
-    assert page.evaluate("window.__pwa.getState().learningQueue[0].eventId") == queued["eventId"]
-    # The restored original queue still replays the same word at the injected due time.
-    queued = page.evaluate("window.__pwa.getState().learningQueue[0]")
-    assert queued["word"]["id"] in {"word-0", "word-1", "word-2"}
+    # A second expired retry also leaves the cursor clamped at the initial total.
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#continue")).to_be_visible()
+    retry_again = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
+    page.evaluate(
+        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
+        "window.__pwa.render(); }",
+        undo_deadline,
+    )
+    page.get_by_role("button", name="Continue", exact=True).click()
+    assert page.evaluate("window.__pwa.getState().current") == page.evaluate(
+        "window.__pwa.getState().cards.length"
+    )
+    page.evaluate(
+        "(due) => { window.__pwaTestClock = { now: () => due }; window.__pwa.render(); }",
+        retry_again["due_at"],
+    )
     page.get_by_role("button", name="Known", exact=True).click()
     expect(page.locator("#card")).to_have_text("Daily study complete.")
 
