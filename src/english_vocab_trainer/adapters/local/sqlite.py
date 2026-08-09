@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+from english_vocab_trainer.adapters.local.migrations import apply_migrations
 from english_vocab_trainer.domain.models import (
     Rating,
     ReviewEvent,
@@ -24,18 +25,6 @@ from english_vocab_trainer.ports.errors import MissingError as PortMissingError
 ConflictError = EventConflictError
 MissingError = PortMissingError
 
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS words (id TEXT PRIMARY KEY, term TEXT NOT NULL, level INTEGER, transcript TEXT, audio_key TEXT NOT NULL UNIQUE);
-CREATE TABLE IF NOT EXISTS user_word_state (user_id TEXT NOT NULL, word_id TEXT NOT NULL REFERENCES words(id), due_at TEXT NOT NULL, stability REAL NOT NULL, difficulty REAL NOT NULL, card_json TEXT, first_seen_at TEXT, first_known_at TEXT, last_known_at TEXT, version INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,word_id));
-CREATE TABLE IF NOT EXISTS review_events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, word_id TEXT NOT NULL REFERENCES words(id), rating TEXT NOT NULL CHECK(rating IN ('again','good','easy')), reviewed_at TEXT NOT NULL, voided_at TEXT, payload TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY, daily_target INTEGER NOT NULL DEFAULT 30 CHECK(daily_target BETWEEN 1 AND 100));
-CREATE TABLE IF NOT EXISTS study_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('daily','screen')), created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS session_items (session_id TEXT NOT NULL REFERENCES study_sessions(id), word_id TEXT NOT NULL REFERENCES words(id), ordinal INTEGER NOT NULL, PRIMARY KEY(session_id,word_id), UNIQUE(session_id,ordinal));
-CREATE INDEX IF NOT EXISTS idx_state_due ON user_word_state(user_id,due_at);
-CREATE INDEX IF NOT EXISTS idx_events_user_word ON review_events(user_id,word_id,reviewed_at);
-"""
-
 
 def _dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
@@ -49,8 +38,7 @@ class SQLiteVocabularyRepository:
     def __init__(self, path: Path, user_id: str) -> None:
         self.user_id, self.db = user_id, sqlite3.connect(path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.executescript(SCHEMA)
+        apply_migrations(self.db, Path(__file__).parents[4] / "migrations")
 
     def close(self) -> None:
         self.db.close()

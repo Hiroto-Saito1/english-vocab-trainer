@@ -1,1 +1,0 @@
-"""Worker binding fakes."""

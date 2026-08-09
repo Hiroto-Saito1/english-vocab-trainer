@@ -8,6 +8,10 @@ __pycache__/
 .env
 .dev.vars*
 .wrangler/
+.wrangler-plan-*/
+pylock.toml
+python_modules/
+.venv-workers/
 dist/
 *.mp3
 *.wav

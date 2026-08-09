@@ -21,5 +21,7 @@ def test_screen_session_is_persisted(tmp_path: Path) -> None:
         assert client.get("/api/v1/sessions?mode=screen&count=19").status_code == 422
         assert client.get("/api/v1/sessions?mode=other").status_code == 422
     payload = response.json()
-    stored = provider.for_user("local-user").get_session(payload["id"])
+    stored_repository = provider.for_user("local-user")
+    stored = stored_repository.get_session(payload["id"])
+    stored_repository.close()
     assert response.status_code == 200 and len(payload["items"]) == 1 and stored is not None
