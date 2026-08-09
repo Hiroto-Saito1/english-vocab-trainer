@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,9 +15,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from english_vocab_trainer.adapters.cloudflare.auth import verify_access_jwt
 from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
+from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
+from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import apply_events, daily_study, screen_new_words
 from english_vocab_trainer.domain.models import Rating, ReviewEvent
-from english_vocab_trainer.web.container import AppContainer, UnavailableAudioStore
+from english_vocab_trainer.web.container import (
+    AppContainer,
+    ConfigurationError,
+    UnavailableAudioStore,
+    UnavailableRepositoryProvider,
+)
 
 ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
@@ -141,4 +149,21 @@ def create_app(container: AppContainer) -> FastAPI:
     return new_app
 
 
-app = create_app(AppContainer(repo, UnavailableAudioStore(), "test", "local-user"))
+def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
+    environment = environ.get("APP_ENV", "production")
+    if environment in {"local", "test"}:
+        try:
+            database = Path(environ["VOCAB_DB_PATH"])
+            audio = Path(environ["AUDIO_ROOT"])
+        except KeyError as exc:
+            raise ConfigurationError("VOCAB_DB_PATH and AUDIO_ROOT are required") from exc
+        return AppContainer(
+            SQLiteRepositoryProvider(database),
+            FilesystemAudioStore(audio),
+            environment,
+            environ.get("LOCAL_USER_ID", "local-user"),
+        )
+    return AppContainer(UnavailableRepositoryProvider(), UnavailableAudioStore(), "production")
+
+
+app = create_app(container_from_env())
