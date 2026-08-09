@@ -93,6 +93,7 @@ class ReviewResult:
     action: ReviewAction
     rating: Rating
     state: WordState
+    created: bool
     voided: bool = False
 
 
@@ -115,19 +116,27 @@ def submit_review(
         if not compatible:
             raise RuntimeError("review event conflict")
         return ReviewResult(
-            event_id,
-            word_id,
-            action,
-            existing.rating,
-            repo.state(word_id),
-            existing.voided_at is not None,
+            id=event_id,
+            word_id=word_id,
+            action=action,
+            rating=existing.rating,
+            state=repo.state(word_id),
+            created=False,
+            voided=existing.voided_at is not None,
         )
     rating = rating_for_action(action, repo.has_active_review(word_id))
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
     for _ in range(3):
         try:
             state = repo.append_event(event, repo.state(word_id).version)
-            return ReviewResult(event_id, word_id, action, rating, state)
+            return ReviewResult(
+                id=event_id,
+                word_id=word_id,
+                action=action,
+                rating=rating,
+                state=state,
+                created=True,
+            )
         except RuntimeError:
             continue
     raise RuntimeError("CAS retry exhausted")
