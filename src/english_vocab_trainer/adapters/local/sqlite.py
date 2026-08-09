@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
+
+from english_vocab_trainer.domain.models import (
+    Rating,
+    ReviewEvent,
+    Word,
+    WordState,
+    replay_word_state,
+)
+
+
+class ConflictError(RuntimeError):
+    pass
+
+
+class MissingError(RuntimeError):
+    pass
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS words(id TEXT PRIMARY KEY, term TEXT NOT NULL, level INTEGER, transcript TEXT, audio_key TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_word_state(user_id TEXT,word_id TEXT,due_at TEXT,stability REAL,difficulty REAL,card_json TEXT,first_seen_at TEXT,first_known_at TEXT,last_known_at TEXT,version INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(user_id,word_id));
+CREATE TABLE IF NOT EXISTS review_events(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,word_id TEXT NOT NULL,rating TEXT NOT NULL,reviewed_at TEXT NOT NULL,voided_at TEXT,payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_settings(user_id TEXT PRIMARY KEY,daily_target INTEGER NOT NULL DEFAULT 30);
+CREATE TABLE IF NOT EXISTS study_sessions(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS session_items(session_id TEXT,word_id TEXT,ordinal INTEGER,PRIMARY KEY(session_id,word_id));
+"""
+
+
+def _dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat() if value else None
+
+
+class SQLiteVocabularyRepository:
+    def __init__(self, path: Path, user_id: str) -> None:
+        self.user_id, self.db = user_id, sqlite3.connect(path, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(SCHEMA)
+
+    def for_user(self, user_id: str) -> SQLiteVocabularyRepository:
+        return SQLiteVocabularyRepository(
+            Path(self.db.execute("PRAGMA database_list").fetchone()[2]), user_id
+        )
+
+    def add_word(self, word: Word) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO words VALUES(?,?,?,?,?)",
+            (word.id, word.term, word.level, word.transcript, word.audio_key),
+        )
+
+    def get_word(self, word_id: str) -> Word | None:
+        r = self.db.execute("SELECT * FROM words WHERE id=?", (word_id,)).fetchone()
+        return Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) if r else None
+
+    def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
+        q = "SELECT w.* FROM words w WHERE NOT EXISTS(SELECT 1 FROM review_events e WHERE e.user_id=? AND e.word_id=w.id) ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
+        return [
+            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
+            for r in self.db.execute(q, (self.user_id, limit))
+        ]
+
+    def due_words(self, now: datetime, limit: int) -> list[Word]:
+        q = "SELECT w.* FROM user_word_state s JOIN words w ON w.id=s.word_id WHERE s.user_id=? AND s.due_at<=? ORDER BY s.due_at LIMIT ?"
+        return [
+            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
+            for r in self.db.execute(q, (self.user_id, _iso(now), limit))
+        ]
+
+    def _events(self, word_id: str) -> list[ReviewEvent]:
+        return [
+            ReviewEvent(
+                UUID(r["id"]),
+                word_id,
+                Rating(r["rating"]),
+                _dt(r["reviewed_at"]) or datetime.now(UTC),
+                _dt(r["voided_at"]),
+            )
+            for r in self.db.execute(
+                "SELECT * FROM review_events WHERE user_id=? AND word_id=?", (self.user_id, word_id)
+            )
+        ]
+
+    def state(self, word_id: str) -> WordState:
+        r = self.db.execute(
+            "SELECT * FROM user_word_state WHERE user_id=? AND word_id=?", (self.user_id, word_id)
+        ).fetchone()
+        return (
+            WordState(
+                word_id,
+                _dt(r["due_at"]) or datetime.min.replace(tzinfo=UTC),
+                r["stability"],
+                r["difficulty"],
+                _dt(r["first_seen_at"]),
+                _dt(r["first_known_at"]),
+                _dt(r["last_known_at"]),
+                r["version"],
+                r["card_json"],
+            )
+            if r
+            else WordState(word_id, datetime.min.replace(tzinfo=UTC))
+        )
+
+    def _save(self, state: WordState) -> None:
+        self.db.execute(
+            "INSERT INTO user_word_state VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,word_id) DO UPDATE SET due_at=excluded.due_at,stability=excluded.stability,difficulty=excluded.difficulty,card_json=excluded.card_json,first_seen_at=excluded.first_seen_at,first_known_at=excluded.first_known_at,last_known_at=excluded.last_known_at,version=excluded.version",
+            (
+                self.user_id,
+                state.word_id,
+                _iso(state.due_at),
+                state.stability,
+                state.difficulty,
+                state.card_json,
+                _iso(state.first_seen_at),
+                _iso(state.first_known_at),
+                _iso(state.last_known_at),
+                state.version,
+            ),
+        )
+
+    def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            old = self.db.execute(
+                "SELECT payload FROM review_events WHERE id=?", (str(event.id),)
+            ).fetchone()
+            payload = json.dumps([event.word_id, event.rating, event.reviewed_at.isoformat()])
+            if old:
+                if old[0] != payload:
+                    raise ConflictError("event UUID payload conflict")
+                self.db.execute("COMMIT")
+                return self.state(event.word_id)
+            state = self.state(event.word_id)
+            if state.version != expected_version:
+                raise ConflictError("CAS conflict")
+            self.db.execute(
+                "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
+                (
+                    str(event.id),
+                    self.user_id,
+                    event.word_id,
+                    event.rating,
+                    _iso(event.reviewed_at),
+                    None,
+                    payload,
+                ),
+            )
+            state = replay_word_state(event.word_id, self._events(event.word_id), state.version + 1)
+            self._save(state)
+            self.db.execute("COMMIT")
+            return state
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def void_event(self, event_id: UUID) -> WordState:
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            r = self.db.execute(
+                "SELECT word_id FROM review_events WHERE id=? AND user_id=?",
+                (str(event_id), self.user_id),
+            ).fetchone()
+            if not r:
+                raise MissingError("event not found")
+            self.db.execute(
+                "UPDATE review_events SET voided_at=? WHERE id=?",
+                (_iso(datetime.now(UTC)), str(event_id)),
+            )
+            prior = self.state(r[0])
+            state = replay_word_state(r[0], self._events(r[0]), prior.version + 1)
+            self._save(state)
+            self.db.execute("COMMIT")
+            return state
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise

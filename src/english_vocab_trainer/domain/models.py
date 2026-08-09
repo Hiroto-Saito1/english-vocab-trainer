@@ -73,3 +73,25 @@ def next_state(state: WordState, event: ReviewEvent) -> WordState:
     state.due_at = card.due
     state.version += 1
     return state
+
+
+def replay_word_state(word_id: str, events: list[ReviewEvent], revision: int = 0) -> WordState:
+    """Rebuild state from genesis. Ordering is stable even for offline arrivals."""
+    active = sorted(
+        (event for event in events if event.voided_at is None),
+        key=lambda event: (event.reviewed_at, event.id.int),
+    )
+    # Py-FSRS creates a time-based card id by default; seed it from word_id so
+    # offline replays have byte-for-byte deterministic card JSON.
+    seed = int.from_bytes(word_id.encode("utf-8"), "big") % 2_000_000_000
+    state = WordState(
+        word_id,
+        datetime.min.replace(tzinfo=UTC),
+        version=revision,
+        card_json=Card(card_id=seed).to_json(),
+    )
+    for event in active:
+        prior_revision = state.version
+        state = next_state(state, event)
+        state.version = prior_revision  # replay must not decrease the persistent CAS revision
+    return state
