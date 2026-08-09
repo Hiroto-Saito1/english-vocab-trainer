@@ -10,6 +10,7 @@ from english_vocab_trainer.domain.models import (
     Rating,
     ReviewEvent,
     Settings,
+    StudySession,
     Word,
     WordState,
     replay_word_state,
@@ -261,9 +262,22 @@ class SQLiteVocabularyRepository:
             self.db.execute("ROLLBACK")
             raise
 
-    def get_session(self, session_id: str) -> list[Word]:
+    def get_session(self, session_id: str) -> StudySession | None:
         q = "SELECT w.* FROM study_sessions s JOIN session_items i ON i.session_id=s.id JOIN words w ON w.id=i.word_id WHERE s.id=? AND s.user_id=? ORDER BY i.ordinal"
-        return [
-            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
-            for r in self.db.execute(q, (session_id, self.user_id))
-        ]
+        rows = list(self.db.execute(q, (session_id, self.user_id)))
+        if not rows:
+            return None
+        words = tuple(
+            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) for r in rows
+        )
+        meta = self.db.execute(
+            "SELECT kind,created_at FROM study_sessions WHERE id=? AND user_id=?",
+            (session_id, self.user_id),
+        ).fetchone()
+        assert meta is not None
+        return StudySession(
+            session_id,
+            meta["kind"],
+            _dt(meta["created_at"]) or datetime.min.replace(tzinfo=UTC),
+            words,
+        )

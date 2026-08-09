@@ -51,6 +51,14 @@ class Settings:
     daily_target: int = 30
 
 
+@dataclass(frozen=True, slots=True)
+class StudySession:
+    id: str
+    kind: str
+    created_at: datetime
+    words: tuple[Word, ...]
+
+
 def next_state(state: WordState, event: ReviewEvent) -> WordState:
     """Apply canonical Py-FSRS 6 scheduling; only the server runs this policy."""
     now = event.reviewed_at.astimezone(UTC)
