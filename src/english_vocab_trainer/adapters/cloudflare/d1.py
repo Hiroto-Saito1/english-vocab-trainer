@@ -4,7 +4,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from english_vocab_trainer.domain.models import Rating, ReviewEvent, Settings, Word, WordState
+from english_vocab_trainer.domain.models import (
+    Rating,
+    ReviewEvent,
+    Settings,
+    StudySession,
+    Word,
+    WordState,
+)
 from english_vocab_trainer.ports.errors import MissingError
 
 
@@ -192,6 +199,33 @@ class D1VocabularyRepository:
             raise MissingError("word not found")
         await self._run("UPDATE words SET transcript=? WHERE id=?", transcript, word_id)
         return Word(word.id, word.term, word.level, transcript, word.audio_key)
+
+    async def get_session(self, session_id: str) -> StudySession | None:
+        meta = await self._first(
+            "SELECT kind,created_at FROM study_sessions WHERE id=? AND user_id=?",
+            session_id,
+            self.user_id,
+        )
+        if meta is None:
+            return None
+        rows = await self._all(
+            "SELECT w.* FROM session_items i JOIN words w ON w.id=i.word_id "
+            "WHERE i.session_id=? ORDER BY i.ordinal",
+            session_id,
+        )
+        words = tuple(
+            Word(
+                str(row["id"]),
+                str(row["term"]),
+                cast(int | None, row["level"]),
+                cast(str | None, row["transcript"]),
+                str(row["audio_key"]),
+            )
+            for row in rows
+        )
+        created = _dt(cast(str | None, meta["created_at"]))
+        assert created is not None
+        return StudySession(session_id, str(meta["kind"]), created, words)
 
     async def close(self) -> None:
         return None
