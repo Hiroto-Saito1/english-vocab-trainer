@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from random import Random
 from uuid import UUID
 
 from english_vocab_trainer.domain.models import (
@@ -43,6 +44,18 @@ def apply_events(repo: VocabularyRepository, events: list[ReviewEvent]) -> list[
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def shuffle_within_level_bands(words: list[Word], rng: Random) -> list[Word]:
+    grouped: dict[int | None, list[Word]] = {}
+    for word in words:
+        grouped.setdefault(word.level, []).append(word)
+    result: list[Word] = []
+    for level in sorted(level for level in grouped if level is not None) + [None]:
+        band = list(grouped.get(level, []))
+        rng.shuffle(band)
+        result.extend(band)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
