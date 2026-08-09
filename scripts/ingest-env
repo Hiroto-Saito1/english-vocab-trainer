@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Run MLX ingestion from uv's cache, never from a Dropbox-synchronised .venv.
+set -euo pipefail
+
+project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+project_token="$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+  cache_root="$XDG_CACHE_HOME"
+elif cache_root="$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null)" && [[ -n "$cache_root" ]]; then
+  :
+else
+  cache_root="$(uv cache dir)"
+fi
+ingest_env="$cache_root/english-vocab-trainer/ingest-${project_token}"
+
+prepare() {
+  UV_PROJECT_ENVIRONMENT="$ingest_env" uv lock --check
+  UV_PROJECT_ENVIRONMENT="$ingest_env" uv sync --group ingest --frozen
+}
+
+workspace_diagnosis() {
+  local workspace_env="$project_dir/.venv"
+  if [[ ! -d "$workspace_env" ]]; then
+    printf '%s\n' "workspace .venv: absent (not inspected)"
+    return
+  fi
+  local dylib
+  dylib="$(find "$workspace_env/lib" -type f -path '*/site-packages/mlx/lib/libmlx.dylib' -print -quit 2>/dev/null || true)"
+  local conflict
+  conflict="$(find "$workspace_env/lib" -type f -iname "*conflicted copy*" -print -quit 2>/dev/null || true)"
+  if [[ -z "$dylib" ]]; then
+    printf '%s\n' "workspace .venv: incomplete MLX install (libmlx.dylib is missing)"
+  else
+    printf '%s\n' "workspace .venv: MLX dylib present"
+  fi
+  if [[ -n "$conflict" ]]; then
+    printf '%s\n' "workspace .venv: Dropbox conflict copies detected"
+  fi
+}
+
+doctor() {
+  workspace_diagnosis
+  prepare
+  UV_PROJECT_ENVIRONMENT="$ingest_env" uv run --group ingest python -c '
+from pathlib import Path
+import mlx.core
+import mlx_whisper
+
+dylib = Path(mlx.core.__file__).parent / "lib" / "libmlx.dylib"
+metallib = dylib.parent / "mlx.metallib"
+if not dylib.is_file() or not metallib.is_file():
+    raise SystemExit("isolated ingest environment is incomplete: MLX dylib or Metal library is missing")
+print("isolated ingest environment: healthy (MLX core, metal, and dylib available)")
+'
+}
+
+if [[ $# -eq 0 ]]; then
+  printf '%s\n' "usage: scripts/ingest-env doctor | scripts/ingest-env <vocab-ingest arguments>" >&2
+  exit 2
+fi
+
+if [[ $1 == "doctor" ]]; then
+  if [[ $# -ne 1 ]]; then
+    printf '%s\n' "doctor does not accept additional arguments" >&2
+    exit 2
+  fi
+  doctor
+  exit 0
+fi
+
+prepare
+exec env UV_PROJECT_ENVIRONMENT="$ingest_env" uv run --group ingest vocab-ingest "$@"
