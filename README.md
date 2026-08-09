@@ -44,6 +44,10 @@ M2a also includes a private, server-side R2 proxy. Set `AUDIO_BACKEND=r2`, `R2_E
 metadata. The browser only receives the authenticated `/api/v1/audio/{word_id}` proxy; neither
 R2 URLs nor credentials are exposed. Real R2 credentials and uploads have not yet been verified.
 
+The MVP proxy buffers one MP3 as bytes for each GET. The measured maximum across the approved
+2,000 audio sources is 797,946 bytes (about 0.8 MB), which is acceptable for this bounded slice.
+Before serving larger media, replace this with `StreamingResponse` and enforce a size cap.
+
 The web flow is audio first: term and transcript are hidden until **Unknown**, **Known** maps to
 Easy for a new word and Good for a reviewed word, and **Unknown** maps to Again. Events are
 idempotent UUIDs; Undo either removes an unsynchronised event or calls the void/replay endpoint.

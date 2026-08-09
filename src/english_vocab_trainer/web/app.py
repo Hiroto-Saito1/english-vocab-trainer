@@ -31,7 +31,11 @@ from english_vocab_trainer.ports.errors import (
 )
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.validation import validate_english_transcript
-from english_vocab_trainer.web.audio import build_audio_head_response, build_audio_response
+from english_vocab_trainer.web.audio import (
+    build_audio_head_response,
+    build_audio_response,
+    if_none_match_matches,
+)
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
@@ -236,13 +240,27 @@ def audio(
     word = repository.get_word(word_id)
     if word is None:
         raise HTTPException(404, "word not found")
-    if range_header is not None:
+    metadata = None
+    # RFC 7233 evaluates Range only after preconditions: a matching cache validator
+    # wins even over an otherwise invalid range and must not fetch the object body.
+    if if_none_match is not None:
         try:
             metadata = store.head(word.audio_key)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "audio not found") from exc
+        except (AudioStorageError, ConfigurationError) as exc:
+            raise HTTPException(502, "audio storage is unavailable") from exc
+        if if_none_match_matches(metadata.etag, if_none_match):
+            return build_audio_head_response(metadata, None, if_none_match)
+    if range_header is not None:
+        try:
+            metadata = metadata or store.head(word.audio_key)
+            assert metadata is not None
             parse_single_range(range_header, metadata.size)
         except FileNotFoundError as exc:
             raise HTTPException(404, "audio not found") from exc
         except InvalidRangeError:
+            assert metadata is not None
             return Response(
                 status_code=416,
                 headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},

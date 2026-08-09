@@ -1,11 +1,12 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.domain.models import Word
-from english_vocab_trainer.ports.audio import AudioResult
+from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.audio import build_audio_response
 from english_vocab_trainer.web.container import AppContainer
@@ -18,6 +19,7 @@ def test_audio_response_range_head_and_etag() -> None:
     assert build_audio_response(result, True, None).body == b""
     assert build_audio_response(result, False, '"tag"').status_code == 304
     assert build_audio_response(result, False, 'W/"tag"').status_code == 304
+    assert build_audio_response(result, False, '"other", W/"tag"').status_code == 304
 
 
 def test_audio_api_full_and_range(tmp_path: Path) -> None:
@@ -56,3 +58,53 @@ def test_audio_api_invalid_range_and_etag(tmp_path: Path) -> None:
         cached = client.get("/api/v1/audio/one", headers={"If-None-Match": full.headers["etag"]})
     assert invalid.status_code == 416 and invalid.headers["content-range"] == "bytes */5"
     assert cached.status_code == 304 and cached.content == b""
+
+
+class ConditionalStore:
+    def __init__(self) -> None:
+        self.head_calls = 0
+        self.get_calls = 0
+
+    def head(self, key: str) -> AudioMetadata:
+        self.head_calls += 1
+        return AudioMetadata(5, "a" * 64)
+
+    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+        self.get_calls += 1
+        return AudioResult(b"abcde", 5, "a" * 64, 0, 4, False)
+
+
+@pytest.mark.parametrize(
+    "validator",
+    [f'"{"a" * 64}"', f'W/"{"a" * 64}"', f'"other", W/"{"a" * 64}"'],
+)
+def test_conditional_audio_get_precedes_range_and_never_fetches_body(
+    tmp_path: Path, validator: str
+) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.close()
+    store = ConditionalStore()
+    app = create_app(AppContainer(provider, store, "test", "local-user"))
+    with TestClient(app) as client:
+        # A matching precondition takes precedence over Range, including an invalid Range.
+        cached = client.get(
+            "/api/v1/audio/one",
+            headers={"If-None-Match": validator, "Range": "bytes=99-"},
+        )
+    assert cached.status_code == 304 and cached.content == b""
+    assert store.head_calls == 1 and store.get_calls == 0
+
+
+def test_conditional_audio_get_fetches_when_validator_does_not_match(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.close()
+    store = ConditionalStore()
+    app = create_app(AppContainer(provider, store, "test", "local-user"))
+    with TestClient(app) as client:
+        response = client.get("/api/v1/audio/one", headers={"If-None-Match": '"other"'})
+    assert response.status_code == 200 and response.content == b"abcde"
+    assert store.head_calls == 1 and store.get_calls == 1
