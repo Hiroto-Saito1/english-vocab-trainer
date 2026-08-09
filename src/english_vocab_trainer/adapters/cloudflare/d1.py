@@ -53,6 +53,38 @@ class D1VocabularyRepository:
     def _prepare(self, sql: str, *params: object) -> object:
         return cast(Any, self.db).prepare(sql).bind(*params)
 
+    def _state_upsert(self, state: WordState, expected_version: int) -> object:
+        sql = """
+            INSERT INTO user_word_state(
+                user_id,word_id,due_at,stability,difficulty,card_json,
+                first_seen_at,first_known_at,last_known_at,version
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id,word_id) DO UPDATE SET
+                due_at=excluded.due_at,
+                stability=excluded.stability,
+                difficulty=excluded.difficulty,
+                card_json=excluded.card_json,
+                first_seen_at=excluded.first_seen_at,
+                first_known_at=excluded.first_known_at,
+                last_known_at=excluded.last_known_at,
+                version=excluded.version
+            WHERE user_word_state.version=?
+        """
+        return self._prepare(
+            sql,
+            self.user_id,
+            state.word_id,
+            _iso(state.due_at),
+            state.stability,
+            state.difficulty,
+            state.card_json,
+            _iso(state.first_seen_at),
+            _iso(state.first_known_at),
+            _iso(state.last_known_at),
+            state.version,
+            expected_version,
+        )
+
     async def _first(self, sql: str, *params: object) -> dict[str, object] | None:
         statement: Any = self._prepare(sql, *params)
         return _record(await statement.first())
