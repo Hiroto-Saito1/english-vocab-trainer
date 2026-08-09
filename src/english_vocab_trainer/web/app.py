@@ -21,6 +21,11 @@ from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvid
 from english_vocab_trainer.adapters.local.sqlite import MissingError
 from english_vocab_trainer.application.services import create_study_session, submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent
+from english_vocab_trainer.ports.errors import (
+    ConcurrentUpdateError,
+    EventConflictError,
+    MissingError,
+)
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import (
     AppContainer,
@@ -126,18 +131,39 @@ def sessions(
         raise HTTPException(422, str(exc)) from exc
 
 
-@router.post("/api/v1/review-events/batch")
-def review_batch(
-    events: list[EventIn], _: Identity, repository: Repository
-) -> dict[str, list[str]]:
+@router.post("/api/v1/review-events/batch", response_model=BatchOut)
+def review_batch(events: list[EventIn], _: Identity, repository: Repository) -> BatchOut:
     if len(events) > 100:
         raise HTTPException(422, "at most 100 events")
-    return {
-        "acknowledged": [
-            str(submit_review(repository, e.id, e.word_id, e.action, e.reviewed_at).id)
-            for e in events
-        ]
-    }
+    results: list[EventResultOut] = []
+    acknowledged: list[UUID] = []
+    for event in events:
+        try:
+            result = submit_review(
+                repository, event.id, event.word_id, event.action, event.reviewed_at
+            )
+            status: Literal["applied", "idempotent", "voided"] = (
+                "voided" if result.voided else "applied" if result.created else "idempotent"
+            )
+            results.append(
+                EventResultOut(
+                    id=event.id, word_id=event.word_id, status=status, rating=result.rating
+                )
+            )
+            acknowledged.append(event.id)
+        except (EventConflictError, ConcurrentUpdateError) as exc:
+            results.append(
+                EventResultOut(
+                    id=event.id, word_id=event.word_id, status="conflict", detail=str(exc)
+                )
+            )
+        except (MissingError, KeyError) as exc:
+            results.append(
+                EventResultOut(
+                    id=event.id, word_id=event.word_id, status="missing", detail=str(exc)
+                )
+            )
+    return BatchOut(results=results, acknowledged=acknowledged)
 
 
 @router.post("/api/v1/review-events/{event_id}/void")
@@ -192,7 +218,7 @@ def words(
 def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
     try:
         return WordOut(**asdict(repository.update_transcript(word_id, body.transcript)))
-    except (KeyError, MissingError) as exc:
+    except (KeyError) as exc:
         raise HTTPException(404, "word not found") from exc
 
 
