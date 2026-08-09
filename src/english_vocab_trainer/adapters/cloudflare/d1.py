@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -42,6 +43,10 @@ def _changes(result: object) -> int:
         meta = cast(dict[str, object], native.get("meta", {}))
         return int(cast(int | str, meta.get("changes", 0)))
     return int(cast(Any, native).meta.changes)
+
+
+def _event_payload(event: ReviewEvent) -> str:
+    return json.dumps([event.word_id, event.rating, event.reviewed_at.isoformat()])
 
 
 class D1VocabularyRepository:
