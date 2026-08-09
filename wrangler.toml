@@ -1,0 +1,17 @@
+name = "english-vocab-trainer"
+main = "src/english_vocab_trainer/worker.py"
+compatibility_date = "2026-08-09"
+compatibility_flags = ["python_workers"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "english-vocab-trainer"
+database_id = "REPLACE_ON_DEPLOY"
+
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "english-vocab-trainer-audio"
+
+[assets]
+binding = "ASSETS"
+directory = "src/english_vocab_trainer/web/static"

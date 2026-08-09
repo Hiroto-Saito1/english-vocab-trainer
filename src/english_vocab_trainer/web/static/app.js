@@ -1,0 +1,9 @@
+const outbox = "review-outbox";
+let cards = [], current = 0, undo = null;
+const card = document.querySelector("#card"), audio = document.querySelector("#audio"), text = document.querySelector("#transcript");
+async function queue(event) { const db = await new Promise(r => { const q=indexedDB.open(outbox,1); q.onupgradeneeded=()=>q.result.createObjectStore("events",{keyPath:"id"}); q.onsuccess=()=>r(q.result); }); db.transaction("events","readwrite").objectStore("events").put(event); }
+async function sync() { const db = await new Promise(r => { const q=indexedDB.open(outbox,1); q.onupgradeneeded=()=>q.result.createObjectStore("events",{keyPath:"id"}); q.onsuccess=()=>r(q.result); }); const store=db.transaction("events","readwrite").objectStore("events"), req=store.getAll(); req.onsuccess=async()=>{if(req.result.length){await fetch("/api/v1/review-events/batch",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(req.result)}); req.result.forEach(x=>store.delete(x.id));}}; }
+function show(){const w=cards[current]; if(!w){card.textContent="Daily study complete.";return;} card.textContent="Listen, then choose."; text.textContent=w.transcript||"Transcript unavailable."; text.hidden=true; audio.src=`/api/v1/audio/${w.id}`; audio.play().catch(()=>{});}
+function rate(rating){const w=cards[current]; if(!w)return; audio.pause(); queue({id:crypto.randomUUID(),word_id:w.id,rating,reviewed_at:new Date().toISOString()}); if(rating==="again"){text.hidden=false;audio.currentTime=0;audio.play().catch(()=>{});return;} undo=current; current++; show(); setTimeout(()=>undo=null,5000);}
+document.querySelector("#known").onclick=()=>rate("easy"); document.querySelector("#unknown").onclick=()=>rate("again");
+fetch("/api/v1/sessions").then(r=>r.json()).then(x=>{cards=x.items;show();}); addEventListener("online",sync); if("serviceWorker" in navigator)navigator.serviceWorker.register("/static/sw.js");

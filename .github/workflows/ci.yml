@@ -1,0 +1,14 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@ac388b0c1cba1c2f12d14f46fe0c26d1f8c85f0a # v5.4.0
+      - run: uv lock --check && uv sync --group dev --frozen
+      - run: uv run ruff format --check . && uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest
+      - run: "! git ls-files | grep -E '\\.(mp3|wav|m4a)$|catalog.*\\.(json|sql)'"
+      - run: npx --yes wrangler@4.31.0 deploy --dry-run || true

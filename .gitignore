@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.private/
+*.db
+.env
+.dev.vars*
+.wrangler/
+dist/
+*.mp3
+*.wav
+*.m4a
+catalog*.json*
+catalog*.sql
+node_modules/
