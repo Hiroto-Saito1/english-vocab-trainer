@@ -28,6 +28,13 @@ def get_container(request: Request) -> AppContainer:
     return cast(AppContainer, request.app.state.container)
 
 
+def _binding(request: Request, name: str) -> object | None:
+    environment = request.scope.get("env")
+    if isinstance(environment, dict):
+        return environment.get(name)
+    return getattr(environment, name, None)
+
+
 def repository_for_user(request: Request, user_id: str) -> Iterator[VocabularyRepository]:
     try:
         repository = cast(
