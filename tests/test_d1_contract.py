@@ -27,3 +27,16 @@ async def test_d1_reads_new_and_due_words() -> None:
     assert [word.id for word in await repo.list_words(levels=[9])] == ["nine"]
     assert [word.id for word in await repo.due_words(datetime.now(UTC), 10)] == ["nine"]
     connection.close()
+
+
+@pytest.mark.asyncio
+async def test_d1_settings_default_update_and_validation() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(SCHEMA)
+    repo = D1VocabularyRepository(FakeD1(connection), "alice")
+    assert (await repo.get_settings()).daily_target == 30
+    assert (await repo.update_settings(42)).daily_target == 42
+    assert (await repo.get_settings()).daily_target == 42
+    with pytest.raises(ValueError):
+        await repo.update_settings(0)
+    connection.close()
