@@ -5,10 +5,13 @@ const SHELL_ASSETS = ["/", "/static/app.js", "/static/manifest.json", "/static/i
 let activeAudioUrls = new Set();
 
 const audioRequest = (url) => new Request(url, { method: "GET" });
-const isAudio = (url) => new URL(url).pathname.startsWith("/api/v1/audio/");
+const isAudio = (url) => {
+  const parsed = new URL(url);
+  return parsed.origin === self.location.origin && parsed.pathname.startsWith("/api/v1/audio/");
+};
 const isShell = (request) => {
-  const path = new URL(request.url).pathname;
-  return request.method === "GET" && (path === "/" || path.startsWith("/static/"));
+  const parsed = new URL(request.url);
+  return parsed.origin === self.location.origin && request.method === "GET" && (parsed.pathname === "/" || parsed.pathname.startsWith("/static/"));
 };
 
 async function rotateAudioCache(urls, rotate) {
