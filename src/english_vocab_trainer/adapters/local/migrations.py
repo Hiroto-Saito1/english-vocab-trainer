@@ -9,6 +9,27 @@ class MigrationError(RuntimeError):
     pass
 
 
+def _statements(sql: str) -> list[str]:
+    """Split SQL only at boundaries recognised by SQLite.
+
+    ``sqlite3.complete_statement`` keeps trigger bodies together and does not
+    mistake semicolons inside quoted values for a statement terminator.
+    """
+    statements: list[str] = []
+    buffer = ""
+    for line in sql.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer)
+            buffer = ""
+    if buffer.strip():
+        # SQLite permits the last regular statement without a semicolon.  It
+        # also treats a comment-only tail as a no-op, so leave validation to
+        # SQLite instead of trying to parse SQL ourselves.
+        statements.append(buffer)
+    return statements
+
+
 def apply_migrations(connection: sqlite3.Connection, directory: Path) -> None:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(
@@ -27,12 +48,13 @@ def apply_migrations(connection: sqlite3.Connection, directory: Path) -> None:
                 raise MigrationError(f"checksum mismatch: {path.name}")
             continue
         try:
-            # sqlite3.executescript owns its transaction boundary; migration SQL
-            # itself is committed before the checksum record is inserted.
-            connection.executescript(sql)
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _statements(sql):
+                connection.execute(statement)
             connection.execute(
                 "INSERT INTO schema_migrations(version,checksum) VALUES(?,?)", (path.name, checksum)
             )
+            connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
