@@ -313,6 +313,36 @@ class D1VocabularyRepository:
             expected_version,
         )
 
+    async def void_event(self, event_id: UUID) -> WordState:
+        event = await self.get_event(event_id)
+        if event is None:
+            raise MissingError("event not found")
+        current = await self.state(event.word_id)
+        if event.voided_at is not None:
+            return current
+        now = datetime.now(UTC)
+        events = await self._events(event.word_id)
+        revised = [
+            ReviewEvent(
+                item.id,
+                item.word_id,
+                item.rating,
+                item.reviewed_at,
+                now if item.id == event_id else item.voided_at,
+            )
+            for item in events
+        ]
+        rebuilt = replay_word_state(event.word_id, revised, current.version + 1)
+        results = await self._batch(
+            [
+                self._void_update(event, now, current.version),
+                self._state_upsert(rebuilt, current.version),
+            ]
+        )
+        if len(results) != 2 or any(_changes(result) != 1 for result in results):
+            raise ConcurrentUpdateError("CAS conflict")
+        return rebuilt
+
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
         due = await self._count(
