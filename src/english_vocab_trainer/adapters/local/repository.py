@@ -69,6 +69,9 @@ class InMemoryVocabularyRepository:
         self.events[str(event.id)] = event
         return next_state(state, event)
 
+    def get_event(self, event_id: UUID) -> ReviewEvent | None:
+        return self.events.get(str(event_id))
+
     def void_event(self, event_id: UUID) -> WordState:
         event = self.events[str(event_id)]
         self.events[str(event_id)] = ReviewEvent(

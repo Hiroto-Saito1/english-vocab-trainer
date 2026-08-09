@@ -114,6 +114,18 @@ class SQLiteVocabularyRepository:
             )
         ]
 
+    def get_event(self, event_id: UUID) -> ReviewEvent | None:
+        row = self.db.execute(
+            "SELECT * FROM review_events WHERE id=? AND user_id=?", (str(event_id), self.user_id)
+        ).fetchone()
+        if row is None:
+            return None
+        reviewed = _dt(row["reviewed_at"])
+        assert reviewed is not None
+        return ReviewEvent(
+            event_id, row["word_id"], Rating(row["rating"]), reviewed, _dt(row["voided_at"])
+        )
+
     def state(self, word_id: str) -> WordState:
         r = self.db.execute(
             "SELECT * FROM user_word_state WHERE user_id=? AND word_id=?", (self.user_id, word_id)
