@@ -5,8 +5,9 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from random import Random
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -18,7 +19,7 @@ from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.adapters.local.sqlite import MissingError
-from english_vocab_trainer.application.services import apply_events, daily_study, screen_new_words
+from english_vocab_trainer.application.services import apply_events, create_study_session
 from english_vocab_trainer.domain.models import Rating, ReviewEvent
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import (
@@ -82,20 +83,32 @@ class WordListOut(BaseModel):
     items: list[WordOut]
 
 
+class SessionOut(BaseModel):
+    id: str
+    mode: str
+    created_at: datetime
+    items: list[WordOut]
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
 
 
-@router.get("/api/v1/sessions")
-def sessions(_: Identity) -> dict[str, object]:
-    return {"items": [asdict(word) for word in daily_study(repo, datetime.now(UTC))]}
-
-
-@router.get("/api/v1/sessions/new/{count}")
-def new_session(count: int, _: Identity) -> dict[str, object]:
+@router.get("/api/v1/sessions", response_model=SessionOut)
+def sessions(
+    _: Identity, repository: Repository, mode: str = "daily", count: int | None = None
+) -> SessionOut:
     try:
-        return {"items": [asdict(word) for word in screen_new_words(repo, count)]}
+        session = create_study_session(
+            repository, mode, datetime.now(UTC), str(uuid4()), count, Random()
+        )
+        return SessionOut(
+            id=session.id,
+            mode=session.kind,
+            created_at=session.created_at,
+            items=[WordOut(**asdict(word)) for word in session.words],
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
