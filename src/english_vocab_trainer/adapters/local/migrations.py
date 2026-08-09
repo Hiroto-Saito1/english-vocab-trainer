@@ -17,8 +17,8 @@ def _statements(sql: str) -> list[str]:
     """
     statements: list[str] = []
     buffer = ""
-    for line in sql.splitlines(keepends=True):
-        buffer += line
+    for character in sql:
+        buffer += character
         if sqlite3.complete_statement(buffer):
             statements.append(buffer)
             buffer = ""
