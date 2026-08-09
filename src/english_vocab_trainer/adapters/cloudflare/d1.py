@@ -294,6 +294,25 @@ class D1VocabularyRepository:
             raise ConcurrentUpdateError("CAS conflict")
         return rebuilt
 
+    def _void_update(
+        self, event: ReviewEvent, voided_at: datetime, expected_version: int
+    ) -> object:
+        sql = """
+            UPDATE review_events SET voided_at=?
+            WHERE id=? AND user_id=? AND voided_at IS NULL
+              AND COALESCE((SELECT version FROM user_word_state
+                WHERE user_id=? AND word_id=?),0)=?
+        """
+        return self._prepare(
+            sql,
+            _iso(voided_at),
+            str(event.id),
+            self.user_id,
+            self.user_id,
+            event.word_id,
+            expected_version,
+        )
+
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
         due = await self._count(
