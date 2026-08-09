@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -40,6 +40,13 @@ class CatalogRecord:
     term: str
     checksum: str
     transcript: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionSummary:
+    completed: int
+    skipped: int
+    total: int
 
 
 class Transcriber(Protocol):
@@ -184,15 +191,29 @@ def transcribe_records(
     return completed
 
 
-def transcribe_catalog(root: Path, catalog: Path, transcriber: Transcriber, *, force: bool) -> None:
+def transcribe_catalog(
+    root: Path,
+    catalog: Path,
+    transcriber: Transcriber,
+    *,
+    force: bool,
+    on_transcribed: Callable[[int, int, CatalogRecord], None] | None = None,
+) -> TranscriptionSummary:
     with catalog_lock(catalog):
         records = read_catalog(catalog)
+        total = len(records)
+        completed = 0 if force else sum(record.transcript is not None for record in records)
+        skipped = completed
         for index, record in enumerate(records):
             if record.transcript is not None and not force:
                 continue
             transcript = validate_transcript(transcriber.transcribe(root / record.audio_key))
             records[index] = replace(record, transcript=transcript)
             write_catalog(catalog, records)
+            completed += 1
+            if on_transcribed is not None:
+                on_transcribed(completed, total, records[index])
+        return TranscriptionSummary(completed, skipped, total)
 
 
 def validate_records(
@@ -254,8 +275,19 @@ def main() -> None:
                 f"would transcribe {sum(record.transcript is None for record in records)} records"
             )
         else:
-            transcribe_catalog(args.source, args.catalog, MlxWhisperTranscriber(), force=args.force)
-            print("updated private transcripts")
+            summary = transcribe_catalog(
+                args.source,
+                args.catalog,
+                MlxWhisperTranscriber(),
+                force=args.force,
+                on_transcribed=lambda completed, total, record: print(
+                    f"transcribed {completed}/{total}: {record.term}", flush=True
+                ),
+            )
+            print(
+                f"completed {summary.completed}/{summary.total}; skipped {summary.skipped}",
+                flush=True,
+            )
     elif args.command == "validate":
         print(
             f"valid: {len(validate_records(read_catalog(args.catalog)))} English transcript records"

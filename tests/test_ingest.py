@@ -257,8 +257,18 @@ def test_transcribe_checkpoints_and_resumes_after_failure(tmp_path: Path) -> Non
             return "An English definition with an example."
 
     resumed = ResumingTranscriber()
-    transcribe_catalog(tmp_path, catalog, resumed, force=False)
+    updates: list[tuple[int, int, str]] = []
+    summary = transcribe_catalog(
+        tmp_path,
+        catalog,
+        resumed,
+        force=False,
+        on_transcribed=lambda completed, total, record: updates.append(
+            (completed, total, record.term)
+        ),
+    )
     assert resumed.calls == 1 and all(record.transcript for record in read_catalog(catalog))
+    assert summary.completed == 2 and summary.skipped == 1 and updates == [(2, 2, "term 1")]
     with catalog_lock(catalog):
         with pytest.raises(RuntimeError, match="already"):
             with catalog_lock(catalog):
