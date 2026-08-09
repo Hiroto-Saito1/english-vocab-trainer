@@ -66,3 +66,25 @@ def test_ingest_wrapper_uses_external_cache_environment_and_frozen_lock(tmp_path
     expected_prefix = f"{cache}/english-vocab-trainer/ingest-"
     assert all(call.split("|", 1)[0].startswith(expected_prefix) for call in calls)
     assert all(".venv" not in call.split("|", 1)[0] for call in calls)
+
+
+def test_ingest_wrapper_rejects_project_local_cache(tmp_path: Path) -> None:
+    fake_bin, log, cache = _fake_uv(tmp_path)
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "XDG_CACHE_HOME": str(SCRIPT.parents[1] / ".cache"),
+        "FAKE_UV_LOG": str(log),
+        "FAKE_CACHE": str(cache),
+    }
+    rejected = subprocess.run(
+        ["bash", str(SCRIPT), "doctor"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert rejected.returncode != 0
+    assert rejected.stdout == ""
+    assert "must be outside the project directory" in rejected.stderr
+    assert not log.exists()

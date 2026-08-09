@@ -4,12 +4,33 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 project_token="$(printf '%s' "$project_dir" | cksum | awk '{print $1}')"
+
+physical_path() {
+  local candidate="$1"
+  if [[ -d "$candidate" ]]; then
+    (cd "$candidate" && pwd -P)
+    return
+  fi
+  local parent
+  parent="$(cd "$(dirname "$candidate")" && pwd -P)"
+  printf '%s/%s\n' "$parent" "$(basename "$candidate")"
+}
+
+is_project_path() {
+  [[ $1 == "$project_dir" || $1 == "$project_dir/"* ]]
+}
+
 if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
   cache_root="$XDG_CACHE_HOME"
 elif cache_root="$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null)" && [[ -n "$cache_root" ]]; then
   :
 else
   cache_root="$(uv cache dir)"
+fi
+cache_root="$(physical_path "$cache_root")"
+if is_project_path "$cache_root"; then
+  printf '%s\n' "ingest environment must be outside the project directory" >&2
+  exit 1
 fi
 ingest_env="$cache_root/english-vocab-trainer/ingest-${project_token}"
 
