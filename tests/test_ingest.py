@@ -14,6 +14,7 @@ from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyReposito
 from english_vocab_trainer.ingest import (
     CatalogRecord,
     MlxWhisperTranscriber,
+    _validate_catalog_records,
     catalog_lock,
     main,
     parse_audio_path,
@@ -112,17 +113,17 @@ def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> Non
     assert completed[0].transcript == record.transcript and fake.calls == 0
     forced = transcribe_records(tmp_path, [record], fake, force=True)
     assert forced[0].transcript is not None and fake.calls == 1
-    assert validate_records(_records(4), expected_count=4)
+    assert _validate_catalog_records(_records(4), expected_count=4)
     with pytest.raises(ValueError, match="missing transcript"):
-        validate_records([replace(record, transcript=None)], 1)
+        _validate_catalog_records([replace(record, transcript=None)], 1)
     with pytest.raises(ValueError, match="English only"):
         validate_transcript("これは English definition example")
     with pytest.raises(ValueError, match="too short"):
         validate_transcript("too short")
     with pytest.raises(ValueError, match="expected"):
-        validate_records([], expected_count=1)
+        _validate_catalog_records([], expected_count=1)
     with pytest.raises(ValueError, match="duplicate"):
-        validate_records([record, record], expected_count=2)
+        _validate_catalog_records([record, record], expected_count=2)
 
 
 def test_mlx_transcriber_uses_english_large_turbo(
@@ -144,7 +145,8 @@ def test_mlx_transcriber_uses_english_large_turbo(
 
 def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
     database = tmp_path / "vocab.db"
-    publish_records(database, _records())
+    records = _materialize_catalog_audio(tmp_path, _records())
+    publish_records(database, records, root=tmp_path)
     repository = SQLiteVocabularyRepository(database, "local-user")
     try:
         words = repository.list_words(limit=30)
@@ -155,8 +157,8 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
 
 def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_path: Path) -> None:
     database = tmp_path / "vocab.db"
-    records = _records()
-    publish_records(database, records, audio_backend="r2")
+    records = _materialize_catalog_audio(tmp_path, _records())
+    publish_records(database, records, audio_backend="r2", root=tmp_path)
     repository = SQLiteVocabularyRepository(database, "local-user")
     try:
         words = repository.list_words(limit=30)
@@ -177,7 +179,7 @@ def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_pa
             for record in records
         ]
         with pytest.raises(Exception, match="no"):
-            publish_records(database, changed, audio_backend="r2")
+            publish_records(database, changed, audio_backend="r2", root=tmp_path)
         assert repository.get_word(records[0].id) == prior
     finally:
         repository.close()
@@ -196,7 +198,7 @@ def test_catalog_integrity_rejects_tampering_and_canonical_key() -> None:
         replace(record, term="wrong"),
     ):
         with pytest.raises(ValueError):
-            validate_records([altered], expected_count=1)
+            _validate_catalog_records([altered], expected_count=1)
 
 
 class _UploadClient:
@@ -228,6 +230,34 @@ def test_upload_validates_all_files_before_any_network(tmp_path: Path) -> None:
     client = _UploadClient()
     with pytest.raises(ValueError, match="does not match"):
         upload_audio(tmp_path, [*records[:-1], bad], client, "private")
+
+
+def test_tampered_source_rejects_validate_and_publish_without_db_mutation(tmp_path: Path) -> None:
+    database = tmp_path / "vocab.db"
+    records = _materialize_catalog_audio(tmp_path, _records())
+    publish_records(database, records, root=tmp_path)
+    repository = SQLiteVocabularyRepository(database, "local-user")
+    try:
+        original = repository.get_word(records[0].id)
+        assert original is not None
+        (tmp_path / records[-1].audio_key).write_bytes(b"tampered")
+        with pytest.raises(ValueError, match="does not match"):
+            validate_records(records, root=tmp_path)
+        with pytest.raises(ValueError, match="does not match"):
+            publish_records(database, records, root=tmp_path)
+        assert repository.get_word(records[0].id) == original
+    finally:
+        repository.close()
+
+
+def test_publish_requires_source_root_and_rejects_source_mismatch(tmp_path: Path) -> None:
+    records = _materialize_catalog_audio(tmp_path, _records())
+    with pytest.raises(ValueError, match="requires a source root"):
+        publish_records(tmp_path / "vocab.db", records)
+    mismatched = replace(records[0], source="超上級SVL")
+    with pytest.raises(ValueError, match="source does not match"):
+        publish_records(tmp_path / "vocab.db", [mismatched, *records[1:]], root=tmp_path)
+    assert not (tmp_path / "vocab.db").exists()
 
 
 class _CliUploadClient:

@@ -167,9 +167,12 @@ class Boto3R2AudioUploader:
 
     def upload(self, key: str, path: Path, checksum: str, *, force: bool = False) -> bool:
         """Upload one object. Return true iff a PUT was issued."""
-        if _KEY.fullmatch(key) is None:
-            raise FileNotFoundError("invalid audio key")
-        size = path.stat().st_size
+        if _SHA256.fullmatch(checksum) is None or key != f"audio/{checksum}.mp3":
+            raise ValueError("invalid audio object identity")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise AudioStorageError("private audio source is unavailable") from exc
         existing = self._head(key)
         if existing is not None:
             if self._metadata_matches(existing, size, checksum):

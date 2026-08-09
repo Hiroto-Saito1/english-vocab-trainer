@@ -81,12 +81,14 @@ class FakeR2:
 class UploadR2:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.head_calls = 0
         self.put_calls = 0
         self.body: BinaryIO | None = None
         self.error: Exception | None = None
         self.bad_verify = False
 
     def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
+        self.head_calls += 1
         if self.error is not None:
             raise self.error
         try:
@@ -224,8 +226,13 @@ def test_r2_uploader_fails_closed_for_conflicts_errors_and_bad_verification(tmp_
     with pytest.raises(AudioStorageError, match="unavailable"):
         Boto3R2AudioUploader(unavailable, "private-audio").upload(key, path, digest)
 
-    with pytest.raises(FileNotFoundError, match="invalid audio key"):
-        uploader.upload("bad-key", path, digest)
+    invalid = UploadR2()
+    invalid_uploader = Boto3R2AudioUploader(invalid, "private-audio")
+    with pytest.raises(ValueError, match="invalid audio object identity"):
+        invalid_uploader.upload("bad-key", path, digest)
+    with pytest.raises(ValueError, match="invalid audio object identity"):
+        invalid_uploader.upload(f"audio/{digest}.mp3", path, "e" * 64)
+    assert invalid.head_calls == 0 and invalid.put_calls == 0
 
     class PutFailure(UploadR2):
         def put_object(

@@ -270,14 +270,19 @@ def _validate_record(record: CatalogRecord, root: Path | None) -> None:
             source_path.relative_to(resolved_root / record.source)
         except ValueError as exc:
             raise ValueError("audio key is outside approved source trees") from exc
+        if not source_path.is_file():
+            raise ValueError("catalog source audio is missing")
+        if checksum(source_path) != record.checksum:
+            raise ValueError("local audio does not match catalog checksum")
     if record.transcript is None:
         raise ValueError(f"missing transcript for {record.term}")
     validate_transcript(record.transcript)
 
 
-def validate_records(
+def _validate_catalog_records(
     records: Iterable[CatalogRecord], expected_count: int = 20, *, root: Path | None = None
 ) -> list[CatalogRecord]:
+    """Internal structural validator; root=None is only for catalog construction/tests."""
     result = list(records)
     if len(result) != expected_count:
         raise ValueError(f"expected {expected_count} records, found {len(result)}")
@@ -292,6 +297,13 @@ def validate_records(
     return result
 
 
+def validate_records(
+    records: Iterable[CatalogRecord], expected_count: int = 20, *, root: Path
+) -> list[CatalogRecord]:
+    """Validate a publishable catalog against its approved, immutable local source files."""
+    return _validate_catalog_records(records, expected_count, root=root)
+
+
 def publish_records(
     database: Path,
     records: Iterable[CatalogRecord],
@@ -301,6 +313,8 @@ def publish_records(
 ) -> None:
     if audio_backend not in {"filesystem", "r2"}:
         raise ValueError("audio backend must be filesystem or r2")
+    if root is None:
+        raise ValueError("publish requires a source root for file checksum validation")
     validated = validate_records(records, root=root)
     words = [
         Word(
@@ -330,15 +344,10 @@ def upload_audio(
 ) -> UploadSummary:
     """Validate all catalog entries then idempotently upload private R2 objects."""
     validated = validate_records(records, root=root)
-    paths: list[Path] = []
-    for record in validated:
-        path = root / Path(*_relative_audio_path(record.audio_key).parts)
-        if not path.is_file() or checksum(path) != record.checksum:
-            raise ValueError("local audio does not match catalog checksum")
-        paths.append(path)
     uploader = Boto3R2AudioUploader(client, bucket)
     uploaded = 0
-    for index, (record, path) in enumerate(zip(validated, paths, strict=True), start=1):
+    for index, record in enumerate(validated, start=1):
+        path = root / Path(*_relative_audio_path(record.audio_key).parts)
         changed = uploader.upload(r2_audio_key(record.checksum), path, record.checksum, force=force)
         uploaded += int(changed)
         if on_progress is not None:
@@ -407,11 +416,6 @@ def main() -> None:
         records = read_catalog(args.catalog)
         validated = validate_records(records, root=args.source)
         if args.dry_run:
-            for record in validated:
-                path = args.source / Path(*_relative_audio_path(record.audio_key).parts)
-                if not path.is_file() or checksum(path) != record.checksum:
-                    raise ValueError("local audio does not match catalog checksum")
-                r2_audio_key(record.checksum)
             print(f"would upload {len(validated)} private R2 audio objects")
         else:
             try:
