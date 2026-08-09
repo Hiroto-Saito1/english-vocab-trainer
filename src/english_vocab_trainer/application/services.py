@@ -93,6 +93,7 @@ class ReviewResult:
     action: ReviewAction
     rating: Rating
     state: WordState
+    voided: bool = False
 
 
 def submit_review(
@@ -102,6 +103,25 @@ def submit_review(
     action: ReviewAction,
     reviewed_at: datetime,
 ) -> ReviewResult:
+    existing = repo.get_event(event_id)
+    if existing is not None:
+        compatible = existing.word_id == word_id and existing.reviewed_at == reviewed_at
+        compatible = compatible and (
+            action is ReviewAction.UNKNOWN
+            and existing.rating is Rating.AGAIN
+            or action is ReviewAction.KNOWN
+            and existing.rating in {Rating.EASY, Rating.GOOD}
+        )
+        if not compatible:
+            raise RuntimeError("review event conflict")
+        return ReviewResult(
+            event_id,
+            word_id,
+            action,
+            existing.rating,
+            repo.state(word_id),
+            existing.voided_at is not None,
+        )
     rating = rating_for_action(action, repo.has_active_review(word_id))
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
     for _ in range(3):
