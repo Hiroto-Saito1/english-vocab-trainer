@@ -13,7 +13,7 @@ from english_vocab_trainer.domain.models import (
     Word,
     WordState,
 )
-from english_vocab_trainer.ports.errors import MissingError
+from english_vocab_trainer.ports.errors import EventConflictError, MissingError
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -237,6 +237,16 @@ class D1VocabularyRepository:
                 )
             )
         return events
+
+    async def _event_already_exists(self, event: ReviewEvent) -> bool:
+        row = await self._first(
+            "SELECT user_id,payload FROM review_events WHERE id=?", str(event.id)
+        )
+        if row is None:
+            return False
+        if row["user_id"] != self.user_id or row["payload"] != _event_payload(event):
+            raise EventConflictError("event UUID payload conflict")
+        return True
 
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
