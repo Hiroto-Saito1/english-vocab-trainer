@@ -34,6 +34,11 @@ class InMemoryVocabularyRepository:
     def state(self, word_id: str) -> WordState:
         return self.states.setdefault(word_id, WordState(word_id, datetime.min.replace(tzinfo=UTC)))
 
+    def has_active_review(self, word_id: str) -> bool:
+        return any(
+            event.word_id == word_id and event.voided_at is None for event in self.events.values()
+        )
+
     def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
         if str(event.id) in self.events:
             return self.state(event.word_id)

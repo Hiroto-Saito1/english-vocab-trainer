@@ -76,6 +76,16 @@ def test_active_review_excludes_and_void_reincludes_new(tmp_path: Path) -> None:
     assert "nine" not in [w.id for w in r.list_words()]
     r.void_event(e.id)
     assert "nine" in [w.id for w in r.list_words()]
+    assert not r.has_active_review("nine")
+
+
+def test_active_review_is_user_scoped(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    alice = repo(path)
+    words(alice)
+    assert not alice.has_active_review("nine")
+    alice.append_event(event("nine", datetime.now(UTC)), 0)
+    assert alice.has_active_review("nine") and not repo(path, "bob").has_active_review("nine")
 
 
 def test_due_is_current_user_and_past_only(tmp_path: Path) -> None:

@@ -134,6 +134,13 @@ class SQLiteVocabularyRepository:
             else WordState(word_id, datetime.min.replace(tzinfo=UTC))
         )
 
+    def has_active_review(self, word_id: str) -> bool:
+        row = self.db.execute(
+            "SELECT EXISTS(SELECT 1 FROM review_events WHERE user_id=? AND word_id=? AND voided_at IS NULL)",
+            (self.user_id, word_id),
+        ).fetchone()
+        return bool(int(row[0]))
+
     def _save(self, state: WordState) -> None:
         self.db.execute(
             "INSERT INTO user_word_state VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,word_id) DO UPDATE SET due_at=excluded.due_at,stability=excluded.stability,difficulty=excluded.difficulty,card_json=excluded.card_json,first_seen_at=excluded.first_seen_at,first_known_at=excluded.first_known_at,last_known_at=excluded.last_known_at,version=excluded.version",
