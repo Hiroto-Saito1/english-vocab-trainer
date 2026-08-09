@@ -12,8 +12,13 @@ from english_vocab_trainer.domain.models import (
     StudySession,
     Word,
     WordState,
+    replay_word_state,
 )
-from english_vocab_trainer.ports.errors import EventConflictError, MissingError
+from english_vocab_trainer.ports.errors import (
+    ConcurrentUpdateError,
+    EventConflictError,
+    MissingError,
+)
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -267,6 +272,27 @@ class D1VocabularyRepository:
             event.word_id,
             expected_version,
         )
+
+    async def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
+        if await self._event_already_exists(event):
+            return await self.state(event.word_id)
+        if await self.get_word(event.word_id) is None:
+            raise MissingError("word not found")
+        current = await self.state(event.word_id)
+        if current.version != expected_version:
+            raise ConcurrentUpdateError("CAS conflict")
+        rebuilt = replay_word_state(
+            event.word_id, [*await self._events(event.word_id), event], expected_version + 1
+        )
+        results = await self._batch(
+            [
+                self._event_insert(event, expected_version),
+                self._state_upsert(rebuilt, expected_version),
+            ]
+        )
+        if len(results) != 2 or any(_changes(result) != 1 for result in results):
+            raise ConcurrentUpdateError("CAS conflict")
+        return rebuilt
 
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
