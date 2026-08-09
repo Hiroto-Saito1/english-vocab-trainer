@@ -45,7 +45,17 @@ class SQLiteVocabularyRepository:
     def __init__(self, path: Path, user_id: str) -> None:
         self.user_id, self.db = user_id, sqlite3.connect(path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+
+    def close(self) -> None:
+        self.db.close()
+
+    def __enter__(self) -> SQLiteVocabularyRepository:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def for_user(self, user_id: str) -> SQLiteVocabularyRepository:
         return SQLiteVocabularyRepository(
@@ -63,10 +73,16 @@ class SQLiteVocabularyRepository:
         return Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) if r else None
 
     def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
-        q = "SELECT w.* FROM words w WHERE NOT EXISTS(SELECT 1 FROM review_events e WHERE e.user_id=? AND e.word_id=w.id) ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
+        q = "SELECT w.* FROM words w WHERE NOT EXISTS(SELECT 1 FROM review_events e WHERE e.user_id=? AND e.word_id=w.id AND e.voided_at IS NULL)"
+        args: list[object] = [self.user_id]
+        if levels is not None:
+            q += " AND w.level IN (" + ",".join("?" for _ in levels) + ")"
+            args.extend(levels)
+        q += " ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
+        args.append(limit)
         return [
             Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
-            for r in self.db.execute(q, (self.user_id, limit))
+            for r in self.db.execute(q, args)
         ]
 
     def due_words(self, now: datetime, limit: int) -> list[Word]:
@@ -131,14 +147,16 @@ class SQLiteVocabularyRepository:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             old = self.db.execute(
-                "SELECT payload FROM review_events WHERE id=?", (str(event.id),)
+                "SELECT user_id,payload FROM review_events WHERE id=?", (str(event.id),)
             ).fetchone()
             payload = json.dumps([event.word_id, event.rating, event.reviewed_at.isoformat()])
             if old:
-                if old[0] != payload:
+                if old["user_id"] != self.user_id or old["payload"] != payload:
                     raise ConflictError("event UUID payload conflict")
                 self.db.execute("COMMIT")
                 return self.state(event.word_id)
+            if self.get_word(event.word_id) is None:
+                raise MissingError("word not found")
             state = self.state(event.word_id)
             if state.version != expected_version:
                 raise ConflictError("CAS conflict")
@@ -166,11 +184,14 @@ class SQLiteVocabularyRepository:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             r = self.db.execute(
-                "SELECT word_id FROM review_events WHERE id=? AND user_id=?",
+                "SELECT word_id,voided_at FROM review_events WHERE id=? AND user_id=?",
                 (str(event_id), self.user_id),
             ).fetchone()
             if not r:
                 raise MissingError("event not found")
+            if r["voided_at"] is not None:
+                self.db.execute("COMMIT")
+                return self.state(r["word_id"])
             self.db.execute(
                 "UPDATE review_events SET voided_at=? WHERE id=?",
                 (_iso(datetime.now(UTC)), str(event_id)),
@@ -183,3 +204,63 @@ class SQLiteVocabularyRepository:
         except Exception:
             self.db.execute("ROLLBACK")
             raise
+
+    def update_transcript(self, word_id: str, transcript: str) -> Word:
+        if (
+            self.db.execute(
+                "UPDATE words SET transcript=? WHERE id=?", (transcript, word_id)
+            ).rowcount
+            != 1
+        ):
+            raise MissingError("word not found")
+        word = self.get_word(word_id)
+        assert word is not None
+        return word
+
+    def progress(self, now: datetime) -> dict[str, int]:
+        return {
+            "total": self.db.execute("SELECT count(*) FROM words").fetchone()[0],
+            "due": len(self.due_words(now, 100000)),
+            "reviewed": self.db.execute(
+                "SELECT count(*) FROM review_events WHERE user_id=? AND voided_at IS NULL",
+                (self.user_id,),
+            ).fetchone()[0],
+        }
+
+    def get_settings(self) -> dict[str, int]:
+        row = self.db.execute(
+            "SELECT daily_target FROM user_settings WHERE user_id=?", (self.user_id,)
+        ).fetchone()
+        return {"daily_target": row[0] if row else 30}
+
+    def update_settings(self, daily_target: int) -> dict[str, int]:
+        self.db.execute(
+            "INSERT INTO user_settings VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET daily_target=excluded.daily_target",
+            (self.user_id, daily_target),
+        )
+        return self.get_settings()
+
+    def create_session(
+        self, session_id: str, kind: str, words: list[str], created_at: datetime
+    ) -> None:
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute(
+                "INSERT INTO study_sessions VALUES(?,?,?,?)",
+                (session_id, self.user_id, kind, _iso(created_at)),
+            )
+            self.db.executemany(
+                "INSERT INTO session_items VALUES(?,?,?)",
+                [(session_id, word, index) for index, word in enumerate(words)],
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def get_session(self, session_id: str) -> list[Word]:
+        q = "SELECT w.* FROM study_sessions s JOIN session_items i ON i.session_id=s.id JOIN words w ON w.id=i.word_id WHERE s.id=? AND s.user_id=? ORDER BY i.ordinal"
+        return [
+            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
+            for r in self.db.execute(q, (session_id, self.user_id))
+        ]
