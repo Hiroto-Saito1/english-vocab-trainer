@@ -18,15 +18,11 @@ from english_vocab_trainer.domain.models import (
 
 # SQL DDL and parameterized statements are intentionally kept verbatim so that
 # the local adapter can be audited against the D1 migration.
+from english_vocab_trainer.ports.errors import EventConflictError
+from english_vocab_trainer.ports.errors import MissingError as PortMissingError
 
-
-class ConflictError(RuntimeError):
-    pass
-
-
-class MissingError(RuntimeError):
-    pass
-
+ConflictError = EventConflictError
+MissingError = PortMissingError
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -179,14 +175,14 @@ class SQLiteVocabularyRepository:
             payload = json.dumps([event.word_id, event.rating, event.reviewed_at.isoformat()])
             if old:
                 if old["user_id"] != self.user_id or old["payload"] != payload:
-                    raise ConflictError("event UUID payload conflict")
+                    raise EventConflictError("event UUID payload conflict")
                 self.db.execute("COMMIT")
                 return self.state(event.word_id)
             if self.get_word(event.word_id) is None:
                 raise MissingError("word not found")
             state = self.state(event.word_id)
             if state.version != expected_version:
-                raise ConflictError("CAS conflict")
+                raise EventConflictError("CAS conflict")
             self.db.execute(
                 "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
                 (
