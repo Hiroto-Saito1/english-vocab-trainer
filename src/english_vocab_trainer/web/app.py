@@ -15,14 +15,13 @@ from pydantic import BaseModel, Field, field_validator
 from english_vocab_trainer.adapters.cloudflare.auth import verify_access_jwt
 from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.application.services import apply_events, daily_study, screen_new_words
-from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word
+from english_vocab_trainer.domain.models import Rating, ReviewEvent
+from english_vocab_trainer.web.container import AppContainer, UnavailableAudioStore
 
 ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
-app = FastAPI(title="English Vocab Trainer", version="1.0.0")
 router = APIRouter()
-app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 
 class EventIn(BaseModel):
@@ -62,16 +61,6 @@ def identity(assertion: str | None = Header(None, alias="Cf-Access-Jwt-Assertion
         return str(claims["sub"])
     except (KeyError, ValueError, TypeError) as exc:
         raise HTTPException(403, "invalid Cloudflare Access assertion") from exc
-
-
-def wire_demo_data() -> None:
-    if not repo.words:
-        repo.words["demo-1"] = Word("demo-1", "example", 1, "An example sentence.", "demo-1.mp3")
-
-
-@router.on_event("startup")
-def startup() -> None:
-    wire_demo_data()
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -144,4 +133,12 @@ def transcript(word_id: str, body: TranscriptIn, _: str = identity()) -> dict[st
         raise HTTPException(404, "word not found") from exc
 
 
-app.include_router(router)
+def create_app(container: AppContainer) -> FastAPI:
+    new_app = FastAPI(title="English Vocab Trainer", version="1.0.0")
+    new_app.state.container = container
+    new_app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
+    new_app.include_router(router)
+    return new_app
+
+
+app = create_app(AppContainer(repo, UnavailableAudioStore(), "test", "local-user"))
