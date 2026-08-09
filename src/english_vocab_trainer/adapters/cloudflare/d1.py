@@ -121,5 +121,14 @@ class D1VocabularyRepository:
             cast(str | None, row["card_json"]),
         )
 
+    async def has_active_review(self, word_id: str) -> bool:
+        row = await self._first(
+            "SELECT EXISTS(SELECT 1 FROM review_events WHERE user_id=? AND word_id=? "
+            "AND voided_at IS NULL) AS active",
+            self.user_id,
+            word_id,
+        )
+        return bool(int(cast(int | str, row["active"]))) if row else False
+
     async def close(self) -> None:
         return None
