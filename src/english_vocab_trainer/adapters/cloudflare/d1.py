@@ -151,5 +151,18 @@ class D1VocabularyRepository:
             _dt(cast(str | None, row["voided_at"])),
         )
 
+    async def progress(self, now: datetime) -> dict[str, int]:
+        total = await self._count("SELECT count(*) AS value FROM words")
+        due = await self._count(
+            "SELECT count(*) AS value FROM user_word_state WHERE user_id=? AND due_at<=?",
+            self.user_id,
+            _iso(now),
+        )
+        reviewed = await self._count(
+            "SELECT count(*) AS value FROM review_events WHERE user_id=? AND voided_at IS NULL",
+            self.user_id,
+        )
+        return {"total": total, "due": due, "reviewed": reviewed}
+
     async def close(self) -> None:
         return None
