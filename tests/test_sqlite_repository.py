@@ -133,6 +133,23 @@ def test_progress_counts_active_reviews_due_and_user_scope(tmp_path: Path) -> No
     assert a.progress(now)["reviewed"] == 0 and a.progress(now)["due"] == 1
 
 
+def test_schema_rejects_invalid_checks(tmp_path: Path) -> None:
+    r=repo(tmp_path/"v.db")
+    with pytest.raises(Exception): r.db.execute("INSERT INTO user_settings VALUES('x',101)")
+    with pytest.raises(Exception): r.db.execute("INSERT INTO study_sessions VALUES('x','x','bad','now')")
+    with pytest.raises(Exception): r.db.execute("INSERT INTO review_events VALUES('x','x','no','bad','now',NULL,'x')")
+
+
+def test_schema_rejects_missing_foreign_key(tmp_path: Path) -> None:
+    r=repo(tmp_path/"v.db")
+    with pytest.raises(Exception): r.db.execute("INSERT INTO session_items VALUES('none','none',0)")
+
+
+def test_schema_rejects_duplicate_session_ordinal(tmp_path: Path) -> None:
+    r=repo(tmp_path/"v.db"); words(r); r.db.execute("INSERT INTO study_sessions VALUES('s','alice','daily','now')"); r.db.execute("INSERT INTO session_items VALUES('s','nine',0)")
+    with pytest.raises(Exception): r.db.execute("INSERT INTO session_items VALUES('s','ten',0)")
+
+
 def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:
     r = repo(tmp_path / "v.db")
     with pytest.raises(MissingError):
