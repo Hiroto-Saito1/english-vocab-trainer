@@ -26,6 +26,10 @@ python_version = "3.13"
 strict = true
 packages = ["english_vocab_trainer"]
 
+[[tool.mypy.overrides]]
+module = ["mlx_whisper"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 addopts = "--cov=english_vocab_trainer --cov-branch --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]

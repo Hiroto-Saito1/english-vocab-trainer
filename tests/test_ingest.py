@@ -11,12 +11,14 @@ from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyReposito
 from english_vocab_trainer.ingest import (
     CatalogRecord,
     MlxWhisperTranscriber,
+    catalog_lock,
     main,
     parse_audio_path,
     publish_records,
     read_catalog,
     records_from_audio,
     select_audio,
+    transcribe_catalog,
     transcribe_records,
     validate_records,
     validate_transcript,
@@ -227,3 +229,37 @@ def test_cli_dry_run_transcribe_and_publish(
     main()
     output = capsys.readouterr().out
     assert "would transcribe 0" in output and "would publish 20" in output
+
+
+def test_transcribe_checkpoints_and_resumes_after_failure(tmp_path: Path) -> None:
+    catalog = tmp_path / ".private" / "catalog.jsonl"
+    records = [replace(record, transcript=None) for record in _records(2)]
+    write_catalog(catalog, records)
+
+    class FailingTranscriber:
+        calls = 0
+
+        def transcribe(self, _: Path) -> str:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("interrupted")
+            return "An English definition with an example."
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        transcribe_catalog(tmp_path, catalog, FailingTranscriber(), force=False)
+    assert read_catalog(catalog)[0].transcript is not None
+
+    class ResumingTranscriber:
+        calls = 0
+
+        def transcribe(self, _: Path) -> str:
+            self.calls += 1
+            return "An English definition with an example."
+
+    resumed = ResumingTranscriber()
+    transcribe_catalog(tmp_path, catalog, resumed, force=False)
+    assert resumed.calls == 1 and all(record.transcript for record in read_catalog(catalog))
+    with catalog_lock(catalog):
+        with pytest.raises(RuntimeError, match="already"):
+            with catalog_lock(catalog):
+                pass

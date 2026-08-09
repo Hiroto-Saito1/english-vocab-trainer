@@ -26,6 +26,7 @@ from english_vocab_trainer.ports.errors import (
     MissingError,
 )
 from english_vocab_trainer.ports.repositories import VocabularyRepository
+from english_vocab_trainer.validation import validate_english_transcript
 from english_vocab_trainer.web.audio import build_audio_response
 from english_vocab_trainer.web.container import (
     AppContainer,
@@ -59,9 +60,7 @@ class TranscriptIn(BaseModel):
     @field_validator("transcript")
     @classmethod
     def english_only(cls, value: str) -> str:
-        if any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in value):
-            raise ValueError("transcript must be English only")
-        return value
+        return validate_english_transcript(value)
 
 
 class SettingsIn(BaseModel):

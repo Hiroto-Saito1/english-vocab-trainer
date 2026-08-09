@@ -49,7 +49,8 @@ def test_words_filter_and_transcript_validation(tmp_path: Path) -> None:
         assert client.get("/api/v1/words?levels=10&limit=1").json()["items"][0]["id"] == "ten"
         assert (
             client.patch(
-                "/api/v1/words/nine/transcript", json={"transcript": "English only."}
+                "/api/v1/words/nine/transcript",
+                json={"transcript": "An English definition example."},
             ).status_code
             == 200
         )
@@ -58,7 +59,10 @@ def test_words_filter_and_transcript_validation(tmp_path: Path) -> None:
             == 422
         )
         assert (
-            client.patch("/api/v1/words/no/transcript", json={"transcript": "English"}).status_code
+            client.patch(
+                "/api/v1/words/no/transcript",
+                json={"transcript": "An English definition example."},
+            ).status_code
             == 404
         )
 

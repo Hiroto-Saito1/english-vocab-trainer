@@ -1,1 +1,1 @@
-{"name":"English Vocab Trainer","short_name":"Vocab","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#102a43"}
+{"id":"/","name":"English Vocab Trainer","short_name":"Vocab","description":"An audio-first English vocabulary trainer.","start_url":"/","scope":"/","display":"standalone","background_color":"#ffffff","theme_color":"#102a43","icons":[{"src":"/static/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

@@ -5,18 +5,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.validation import validate_english_transcript
 
 APPROVED_SOURCES = ("上級SVL", "超上級SVL")
 _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
-_JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +28,7 @@ class AudioCandidate:
     source: str
     level: int | None
     term: str
-    checksum: str
+    checksum: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +53,7 @@ class MlxWhisperTranscriber:
 
     def transcribe(self, path: Path) -> str:
         try:
-            import mlx_whisper  # type: ignore[import-untyped]
+            import mlx_whisper
         except ImportError as exc:  # pragma: no cover - depends on optional group
             raise RuntimeError("install the ingest dependency group to transcribe audio") from exc
         result: Any = mlx_whisper.transcribe(str(path), path_or_hf_repo=self.model, language="en")
@@ -86,9 +88,7 @@ def select_audio(root: Path, limit_per_source: int = 10) -> list[AudioCandidate]
         for path in (root / source).rglob("*.mp3"):
             level, term = parse_audio_path(root, path)
             candidates.append(
-                AudioCandidate(
-                    path, path.relative_to(root).as_posix(), source, level, term, checksum(path)
-                )
+                AudioCandidate(path, path.relative_to(root).as_posix(), source, level, term)
             )
         candidates.sort(
             key=lambda item: (
@@ -97,7 +97,10 @@ def select_audio(root: Path, limit_per_source: int = 10) -> list[AudioCandidate]
                 item.audio_key,
             )
         )
-        selected.extend(candidates[:limit_per_source])
+        selected.extend(
+            replace(candidate, checksum=checksum(candidate.path))
+            for candidate in candidates[:limit_per_source]
+        )
     return selected
 
 
@@ -128,16 +131,31 @@ def read_catalog(path: Path) -> list[CatalogRecord]:
 def write_catalog(path: Path, records: Iterable[CatalogRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(json.dumps(asdict(record), sort_keys=True) + "\n" for record in records)
-    path.write_text(text, encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def validate_transcript(transcript: str) -> str:
-    value = transcript.strip()
-    if _JAPANESE.search(value):
-        raise ValueError("transcript must be English only")
-    if len(value) < 12 or len(value.split()) < 3:
-        raise ValueError("transcript is too short to contain a definition or example")
-    return value
+    return validate_english_transcript(transcript)
+
+
+@contextmanager
+def catalog_lock(path: Path) -> Iterator[None]:
+    """Fail fast if another transcriber owns this private catalog."""
+    import fcntl
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("catalog is already being transcribed") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def transcribe_records(
@@ -164,6 +182,17 @@ def transcribe_records(
             )
         )
     return completed
+
+
+def transcribe_catalog(root: Path, catalog: Path, transcriber: Transcriber, *, force: bool) -> None:
+    with catalog_lock(catalog):
+        records = read_catalog(catalog)
+        for index, record in enumerate(records):
+            if record.transcript is not None and not force:
+                continue
+            transcript = validate_transcript(transcriber.transcribe(root / record.audio_key))
+            records[index] = replace(record, transcript=transcript)
+            write_catalog(catalog, records)
 
 
 def validate_records(
@@ -225,10 +254,7 @@ def main() -> None:
                 f"would transcribe {sum(record.transcript is None for record in records)} records"
             )
         else:
-            write_catalog(
-                args.catalog,
-                transcribe_records(args.source, records, MlxWhisperTranscriber(), force=args.force),
-            )
+            transcribe_catalog(args.source, args.catalog, MlxWhisperTranscriber(), force=args.force)
             print("updated private transcripts")
     elif args.command == "validate":
         print(
