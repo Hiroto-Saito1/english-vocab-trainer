@@ -248,6 +248,26 @@ class D1VocabularyRepository:
             raise EventConflictError("event UUID payload conflict")
         return True
 
+    def _event_insert(self, event: ReviewEvent, expected_version: int) -> object:
+        sql = """
+            INSERT INTO review_events(id,user_id,word_id,rating,reviewed_at,voided_at,payload)
+            SELECT ?,?,?,?,?,NULL,?
+            WHERE COALESCE((SELECT version FROM user_word_state
+                WHERE user_id=? AND word_id=?),0)=?
+        """
+        return self._prepare(
+            sql,
+            str(event.id),
+            self.user_id,
+            event.word_id,
+            event.rating,
+            _iso(event.reviewed_at),
+            _event_payload(event),
+            self.user_id,
+            event.word_id,
+            expected_version,
+        )
+
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
         due = await self._count(
