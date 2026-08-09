@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import cast
+from typing import Annotated, cast
 
-from fastapi import HTTPException, Request
+from fastapi import Header, HTTPException, Request
 
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, ConfigurationError
+
+
+def identity(
+    request: Request,
+    assertion: Annotated[str | None, Header(alias="Cf-Access-Jwt-Assertion")] = None,
+) -> str:
+    container = get_container(request)
+    if container.environment in {"local", "test"}:
+        if container.local_user_id is None:
+            raise HTTPException(500, "local identity is not configured")
+        return container.local_user_id
+    if assertion is None:
+        raise HTTPException(403, "Cloudflare Access authentication required")
+    raise HTTPException(403, "Access verification is not configured")
 
 
 def get_container(request: Request) -> AppContainer:
