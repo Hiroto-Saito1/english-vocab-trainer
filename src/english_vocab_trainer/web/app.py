@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
+from english_vocab_trainer.adapters.local.sqlite import MissingError
 from english_vocab_trainer.application.services import apply_events, daily_study, screen_new_words
 from english_vocab_trainer.domain.models import Rating, ReviewEvent
 from english_vocab_trainer.ports.repositories import VocabularyRepository
@@ -153,11 +154,11 @@ def words(
     )
 
 
-@router.patch("/api/v1/words/{word_id}/transcript")
-def transcript(word_id: str, body: TranscriptIn, _: Identity) -> dict[str, object]:
+@router.patch("/api/v1/words/{word_id}/transcript", response_model=WordOut)
+def transcript(word_id: str, body: TranscriptIn, _: Identity, repository: Repository) -> WordOut:
     try:
-        return asdict(repo.update_transcript(word_id, body.transcript))
-    except KeyError as exc:
+        return WordOut(**asdict(repository.update_transcript(word_id, body.transcript)))
+    except (KeyError, MissingError) as exc:
         raise HTTPException(404, "word not found") from exc
 
 
