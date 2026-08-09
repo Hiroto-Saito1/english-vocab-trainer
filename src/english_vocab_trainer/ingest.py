@@ -17,11 +17,12 @@ from typing import Any, Protocol
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioUploader, S3LikeClient
-from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.validation import validate_english_transcript
 from english_vocab_trainer.web.container import ConfigurationError, r2_client_from_env
 
 APPROVED_SOURCES = ("上級SVL", "超上級SVL")
+_PUBLISHED_TIERS = {"上級SVL": Tier.UPPER, "超上級SVL": Tier.ULTRA}
 _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
 _TERM_VALUE = re.compile(r"[A-Za-z][A-Za-z '\-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -1044,6 +1045,7 @@ def publish_records(
             record.level,
             record.transcript,
             record.audio_key if audio_backend == "filesystem" else r2_audio_key(record.checksum),
+            _PUBLISHED_TIERS[record.source],
         )
         for record in validated
     ]

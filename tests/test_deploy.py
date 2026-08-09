@@ -142,7 +142,10 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
     live = tmp_path / "live.db"
     connection = sqlite3.connect(live)
     apply_migrations(connection)
-    connection.execute("INSERT INTO words VALUES('one','one',1,NULL,'one.mp3')")
+    connection.execute(
+        "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+        "VALUES('one','one',1,NULL,'one.mp3','upper')"
+    )
     connection.commit()
     connection.close()
     output = tmp_path / "drills" / "restored.db"

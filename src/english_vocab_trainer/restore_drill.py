@@ -52,7 +52,7 @@ def restore_drill(
             versions = {
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
-            expected = {"0001_initial.sql", "0002_auth.sql"}
+            expected = {"0001_initial.sql", "0002_auth.sql", "0003_tier.sql"}
             if not expected <= versions:
                 raise RestoreDrillError("restored database is missing expected migrations")
             return {

@@ -11,7 +11,7 @@ from english_vocab_trainer.adapters.local.sqlite import (
     SQLiteVocabularyRepository,
 )
 from english_vocab_trainer.application.services import submit_review
-from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Word
+from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Tier, Word
 from english_vocab_trainer.ports.errors import ConcurrentUpdateError
 
 _OPEN: list[SQLiteVocabularyRepository] = []
@@ -49,6 +49,13 @@ def test_reopen_persists_word_state_and_event(tmp_path: Path) -> None:
         r.append_event(event("nine", now), 0)
     with repo(path) as r:
         assert r.get_word("nine") is not None and r.state("nine").version == 1
+
+
+def test_word_tier_is_persisted_and_legacy_default_is_unknown(tmp_path: Path) -> None:
+    r = repo(tmp_path / "v.db")
+    r.add_word(Word("upper", "upper", 9, None, "upper.mp3", Tier.UPPER))
+    stored = r.get_word("upper")
+    assert stored is not None and stored.tier is Tier.UPPER
 
 
 def test_two_users_state_and_progress_are_isolated(tmp_path: Path) -> None:

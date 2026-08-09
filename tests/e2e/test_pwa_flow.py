@@ -17,7 +17,7 @@ from playwright.sync_api import Page, Route, expect
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
-from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import AppContainer
@@ -41,6 +41,7 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
                     2,
                     f"An English definition for word {index} includes an example.",
                     audio_key,
+                    Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
                 )
             )
     finally:
@@ -253,6 +254,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(base_url)
     expect(page.locator("#term")).to_be_hidden()
+    expect(page.locator("#tier")).to_be_hidden()
     expect(page.locator("#transcript")).to_be_hidden()
 
     page.get_by_role("button", name="Known", exact=True).click()
@@ -261,6 +263,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
 
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#term")).to_be_visible()
+    expect(page.locator("#tier")).to_contain_text("· SVL 2")
     expect(page.locator("#transcript")).to_contain_text("English definition")
     assert wait_for_rows(database, 2)[1]["rating"] == "again"
     page.reload()
@@ -280,7 +283,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
 
     page.context.set_offline(True)
     page.get_by_role("button", name="Known", exact=True).click()
-    expect(page.locator("#card")).to_have_text("Daily study complete.")
+    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
     page.get_by_role("button", name="Undo").click()
     expect(page.locator("#progress")).to_have_text("3 of 3")
     assert len(event_rows(database)) == 3
@@ -301,6 +304,48 @@ def test_mobile_pwa_empty_daily_session_says_all_caught_up(
     page.reload()
     expect(page.locator("#card")).to_have_text("All caught up / nothing due.")
     expect(page.locator("#progress")).to_have_text("0 of 0")
+
+
+@pytest.mark.e2e
+def test_unknown_learning_replays_after_injected_ten_minute_clock(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    page.goto(base_url)
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    page.get_by_role("button", name="Continue").click()
+    queued = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    initial_card = page.evaluate(
+        "window.__pwa.getState().cards[window.__pwa.getState().current].id"
+    )
+    page.evaluate(
+        "(due) => { window.__pwaTestClock = { now: () => due }; window.__pwa.render(); }",
+        queued["due_at"],
+    )
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    assert (
+        page.evaluate("window.__pwa.getState().cards[window.__pwa.getState().current].id")
+        == initial_card
+    )
+    page.wait_for_timeout(50)  # A due queue must not schedule render(0) while a card remains.
+    assert (
+        page.evaluate("window.__pwa.getState().cards[window.__pwa.getState().current].id")
+        == initial_card
+    )
+    page.get_by_role("button", name="Known", exact=True).click()
+    page.get_by_role("button", name="Known", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    replayed = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    assert replayed["eventId"] == queued["eventId"]
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    page.get_by_role("button", name="Undo", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    assert page.evaluate("window.__pwa.getState().learningQueue[0].eventId") == queued["eventId"]
+    # The restored original queue still replays the same word at the injected due time.
+    queued = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    assert queued["word"]["id"] in {"word-0", "word-1", "word-2"}
+    page.get_by_role("button", name="Known", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Daily study complete.")
 
 
 @pytest.mark.e2e
@@ -523,11 +568,18 @@ def test_offline_audio_outbox_rotation_and_private_reset(
 
     page.get_by_role("button", name="Known", exact=True).click()
     wait_for_rows(database, 3)
-    expect(page.locator("#card")).to_have_text("Daily study complete.")
+    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
     page.context.set_offline(True)
     page.reload(wait_until="domcontentloaded")
-    expect(page.locator("#status")).to_have_text("Reconnect to start a new study session.")
+    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
     page.context.set_offline(False)
+    queued = page.evaluate("window.__pwa.getState().learningQueue[0]")
+    page.evaluate(
+        "(due) => { window.__pwaTestClock = { now: () => due }; window.__pwa.render(); }",
+        queued["due_at"],
+    )
+    page.get_by_role("button", name="Known", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Daily study complete.")
     audio_root = database.parent / "audio"
     (audio_root / "word-new.mp3").write_bytes(b"ID3\x04\x00\x00new")
     provider = SQLiteRepositoryProvider(database)

@@ -3,12 +3,12 @@ const STATE_KEY = "active-session";
 const AUDIO_CACHE = "pwa-private-audio-v3";
 const AUDIO_PRELOAD_CONCURRENCY = 4;
 const SYNC_BATCH_SIZE = 100;
-let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, undoDeadline: 0 };
-let busy = false, syncFlight = null, undoTimer = null;
+let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, undoDeadline: 0, learningQueue: [], learningStepSeconds: 600 };
+let busy = false, syncFlight = null, undoTimer = null, learningTimer = null;
 let audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
 let audioCacheEpoch = 0, preloadFlight = null;
 const $ = (selector) => document.querySelector(selector);
-const card = $("#card"), term = $("#term"), transcript = $("#transcript"), audio = $("#audio");
+const card = $("#card"), term = $("#term"), tier = $("#tier"), transcript = $("#transcript"), audio = $("#audio");
 const known = $("#known"), unknown = $("#unknown"), continueButton = $("#continue"), undoButton = $("#undo");
 const startButton = $("#start"), progress = $("#progress"), status = $("#status");
 const logoutButton = $("#logout");
@@ -33,22 +33,51 @@ const removeEvent = (id) => transaction("events", "readwrite", (store) => store.
 const allEvents = () => transaction("events", "readonly", (store) => new Promise((resolve, reject) => { const request = store.getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); }));
 
 function showStatus(message) { status.textContent = message; }
-function currentWord() { return state.cards[state.current]; }
+function nowMs() { return window.__pwaTestClock?.now?.() ?? Date.now(); }
+function nextLearning() { return state.learningQueue.filter((item) => item.due_at <= nowMs()).sort((a, b) => a.due_at - b.due_at)[0]; }
+function currentLearning() { return state.current >= state.cards.length ? nextLearning() : undefined; }
+function currentWord() { return state.cards[state.current] || currentLearning()?.word; }
+function formatTier(word) {
+  const name = word.tier === "upper" ? "Upper" : word.tier === "ultra" ? "Ultra" : "Unknown";
+  return `${name} · ${word.level == null ? "level unknown" : `SVL ${word.level}`}`;
+}
 function setActions(disabled) { known.disabled = disabled; unknown.disabled = disabled; continueButton.disabled = disabled; }
 function play() { audio.play().then(() => { startButton.hidden = true; }).catch(() => { startButton.hidden = false; }); }
 function clearUndoTimer() { if (undoTimer) clearTimeout(undoTimer); undoTimer = null; }
-function armUndoTimer() { clearUndoTimer(); const remaining = state.undoDeadline - Date.now(); if (remaining <= 0) { state.event = null; state.undoDeadline = 0; saveState(); return; } undoTimer = setTimeout(async () => { state.event = null; state.undoDeadline = 0; await saveState(); render(); }, remaining); }
+function clearLearningTimer() { if (learningTimer) clearTimeout(learningTimer); learningTimer = null; }
+function armLearningTimer() {
+  clearLearningTimer();
+  // Do not let a due review interrupt an initial card or repeatedly render at
+  // zero delay while that card is on screen.
+  if (state.current < state.cards.length || currentLearning() || !state.learningQueue.length) return;
+  const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
+  if (earliest <= nowMs()) return;
+  learningTimer = setTimeout(() => render(), Math.max(0, earliest - nowMs()));
+}
+function armUndoTimer() { clearUndoTimer(); const remaining = state.undoDeadline - nowMs(); if (remaining <= 0) { state.event = null; state.undoDeadline = 0; saveState(); return; } undoTimer = setTimeout(async () => { state.event = null; state.undoDeadline = 0; await saveState(); render(); }, remaining); }
 function render() {
-  const word = currentWord(), revealed = state.phase === "revealed";
-  if (state.phase === "unavailable") { card.textContent = "Reconnect to start your study session."; term.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = "Offline"; return; }
+  const word = currentWord();
+  if (word && state.phase === "waiting") state.phase = "listening";
+  const revealed = state.phase === "revealed";
+  if (state.phase === "unavailable") { card.textContent = "Reconnect to start your study session."; term.hidden = true; tier.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = "Offline"; return; }
   progress.textContent = `${Math.min(state.current + 1, state.cards.length)} of ${state.cards.length}`;
-  undoButton.hidden = !state.event || state.undoDeadline <= Date.now();
-  term.hidden = !revealed; transcript.hidden = !revealed; continueButton.hidden = !revealed;
-  if (!word) { state.phase = "complete"; card.textContent = state.cards.length ? "Daily study complete." : "All caught up / nothing due."; term.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = `${state.cards.length} of ${state.cards.length}`; saveState(); return; }
+  undoButton.hidden = !state.event || state.undoDeadline <= nowMs();
+  term.hidden = !revealed; tier.hidden = !revealed; transcript.hidden = !revealed; continueButton.hidden = !revealed;
+  if (!word) {
+    term.hidden = true; tier.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true);
+    if (state.learningQueue.length) {
+      state.phase = "waiting";
+      const seconds = Math.max(0, Math.ceil((Math.min(...state.learningQueue.map((item) => item.due_at)) - nowMs()) / 1000));
+      card.textContent = `Waiting for the next review: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
+      progress.textContent = `${state.cards.length} of ${state.cards.length}`; armLearningTimer(); saveState(); return;
+    }
+    state.phase = "complete"; card.textContent = state.cards.length ? "Daily study complete." : "All caught up / nothing due."; progress.textContent = `${state.cards.length} of ${state.cards.length}`; saveState(); return;
+  }
   card.textContent = revealed ? "Review the word and continue when ready." : "Listen, then choose.";
-  term.textContent = word.term; transcript.textContent = word.transcript || "Transcript is unavailable.";
+  term.textContent = word.term; tier.textContent = formatTier(word); transcript.textContent = word.transcript || "Transcript is unavailable.";
   if (!revealed) { audio.src = word.audio_url; audio.currentTime = 0; setActions(false); play(); }
   else { setActions(true); continueButton.disabled = false; audio.currentTime = 0; play(); }
+  armLearningTimer();
 }
 
 function sendWorkerMessage(data) {
@@ -131,10 +160,24 @@ async function sync() {
       for (let offset = 0; offset < events.length; offset += SYNC_BATCH_SIZE) {
         const response = await apiFetch("/api/v1/review-events/batch", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify(events.slice(offset, offset + SYNC_BATCH_SIZE)),
+          body: JSON.stringify(events.slice(offset, offset + SYNC_BATCH_SIZE).map((event) => ({
+            id: event.id, word_id: event.word_id, action: event.action, reviewed_at: event.reviewed_at,
+          }))),
         });
         if (!response.ok) { showStatus("Review sync will retry when online."); return; }
         const payload = await response.json();
+        const eventById = new Map(events.slice(offset, offset + SYNC_BATCH_SIZE).map((event) => [event.id, event]));
+        for (const result of payload.results) {
+          const event = eventById.get(result.id);
+          if (!event || !["applied", "idempotent"].includes(result.status)) continue;
+          const dueAt = result.due_at ? Date.parse(result.due_at) : Number.NaN;
+          if (event.action === "unknown" && Number.isFinite(dueAt)) {
+            const queued = state.learningQueue.find((item) => item.eventId === event.id);
+            if (queued) queued.due_at = dueAt;
+          }
+        }
+        await saveState();
+        if (state.phase === "waiting") render(); else armLearningTimer();
         await Promise.all(payload.acknowledged.map(removeEvent));
         unresolved ||= payload.results.some((result) => result.status === "conflict" || result.status === "missing");
       }
@@ -146,21 +189,35 @@ async function sync() {
 async function answer(action) {
   if (busy || !currentWord() || state.phase !== "listening") return;
   busy = true; setActions(true); audio.pause();
-  state.event = { id: crypto.randomUUID(), word_id: currentWord().id, action, reviewed_at: new Date().toISOString() };
-  state.undoDeadline = Date.now() + 5000;
+  const word = currentWord(), learning = currentLearning();
+  state.event = { id: crypto.randomUUID(), word_id: word.id, action, reviewed_at: new Date(nowMs()).toISOString(), wasLearning: Boolean(learning), learningEntry: learning || null };
+  state.undoDeadline = nowMs() + 5000;
   await addEvent(state.event);
-  if (action === "known") { state.current += 1; state.phase = "listening"; } else { state.phase = "revealed"; }
+  if (action === "known") {
+    if (learning) state.learningQueue = state.learningQueue.filter((item) => item.word.id !== word.id);
+    else state.current += 1;
+    state.phase = "listening";
+  } else {
+    state.learningQueue = state.learningQueue.filter((item) => item.word.id !== word.id);
+    state.learningQueue.push({ eventId: state.event.id, word, due_at: nowMs() + state.learningStepSeconds * 1000 });
+    state.phase = "revealed";
+  }
   await saveState(); armUndoTimer(); render(); if (!currentWord()) await saveState(); busy = false; sync();
 }
-async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; state.current += 1; state.phase = "listening"; await saveState(); render(); if (!currentWord()) await saveState(); busy = false; }
+async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; if (!state.event?.wasLearning) state.current += 1; state.phase = "listening"; await saveState(); render(); if (!currentWord()) await saveState(); busy = false; }
 async function undoLast() {
-  if (busy || !state.event || state.undoDeadline <= Date.now()) return;
+  if (busy || !state.event || state.undoDeadline <= nowMs()) return;
   busy = true; setActions(true); const event = state.event; await sync();
   const pending = (await allEvents()).some((item) => item.id === event.id);
   try {
     if (pending) await removeEvent(event.id);
     else { const response = await apiFetch(`/api/v1/review-events/${event.id}/void`, { method: "POST" }); if (!response.ok) throw new Error("void failed"); }
-    state.current = Math.max(0, state.current - (state.phase === "listening" ? 1 : 0)); state.phase = "listening"; state.event = null; state.undoDeadline = 0; clearUndoTimer(); await saveState(); render();
+    if (event.action === "unknown") {
+      state.learningQueue = state.learningQueue.filter((item) => item.eventId !== event.id);
+      if (event.wasLearning && event.learningEntry) state.learningQueue.push(event.learningEntry);
+    }
+    if (event.action === "known" && event.learningEntry) state.learningQueue.push(event.learningEntry);
+    state.current = Math.max(0, state.current - (!event.wasLearning && state.phase === "listening" ? 1 : 0)); state.phase = "listening"; state.event = null; state.undoDeadline = 0; clearUndoTimer(); await saveState(); render();
   } catch (_) { showStatus("Undo could not be completed. Please try again."); render(); }
   busy = false;
 }
@@ -178,23 +235,23 @@ async function clearPrivateCaches() {
   // a live browser connection can otherwise block deleteDatabase indefinitely.
   await transaction("events", "readwrite", (store) => store.clear());
   await transaction("state", "readwrite", (store) => store.clear());
-  state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, undoDeadline: 0 };
+  state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, undoDeadline: 0, learningQueue: [], learningStepSeconds: 600 };
   audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
-  clearUndoTimer(); render(); showStatus("Private study data was cleared.");
+  clearUndoTimer(); clearLearningTimer(); render(); showStatus("Private study data was cleared.");
 }
 
 async function boot() {
   let saved = null;
   try { saved = await getState(); } catch (_) { showStatus("Local study storage is unavailable."); }
   if (saved && saved.cards && saved.phase !== "complete") {
-    state = saved;
+    state = { ...state, ...saved, learningQueue: Array.isArray(saved.learningQueue) ? saved.learningQueue.filter((item) => item && item.word && Number.isFinite(item.due_at)) : [], learningStepSeconds: Number.isFinite(saved.learningStepSeconds) ? saved.learningStepSeconds : 600 };
     try { await configureAudioCache(false); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
   } else {
     try {
       const response = await apiFetch("/api/v1/sessions?mode=daily");
       if (!response.ok) throw new Error("session unavailable");
       const session = await response.json();
-      state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, undoDeadline: 0 };
+      state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, undoDeadline: 0, learningQueue: [], learningStepSeconds: session.learning_step_seconds };
       try { await configureAudioCache(true); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
       await saveState();
     } catch (_) {
@@ -204,7 +261,7 @@ async function boot() {
       return;
     }
   }
-  armUndoTimer(); render(); startPreload().catch(() => showStatus("Some audio could not be saved for offline listening.")); sync();
+  armUndoTimer(); armLearningTimer(); render(); startPreload().catch(() => showStatus("Some audio could not be saved for offline listening.")); sync();
 }
 
 async function logout() {
@@ -218,7 +275,7 @@ async function logout() {
   logoutButton.disabled = false;
 }
 window.clearPrivateCaches = clearPrivateCaches;
-window.__pwa = { getAudioCacheState: () => ({ ...audioCacheState }), getState: () => ({ ...state }) };
+window.__pwa = { getAudioCacheState: () => ({ ...audioCacheState }), getState: () => ({ ...state }), render };
 known.addEventListener("click", () => answer("known")); unknown.addEventListener("click", () => answer("unknown")); continueButton.addEventListener("click", continueStudy); undoButton.addEventListener("click", undoLast); startButton.addEventListener("click", play); logoutButton.addEventListener("click", logout); addEventListener("online", sync);
 if ("serviceWorker" in navigator) window.__pwa.serviceWorkerRegistration = navigator.serviceWorker.register("/sw.js").then(() => "ready", (error) => String(error));
 boot().catch(() => { render(); showStatus("Reconnect to start a new study session."); });

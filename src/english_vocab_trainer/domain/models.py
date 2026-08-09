@@ -20,6 +20,19 @@ class ReviewAction(StrEnum):
     UNKNOWN = "unknown"
 
 
+class Tier(StrEnum):
+    """Public, English-only source tier for a published word."""
+
+    UPPER = "upper"
+    ULTRA = "ultra"
+    UNKNOWN = "unknown"  # Safe compatibility value for catalogs published before 0003.
+
+
+# This is both the scheduler's learning interval and the client contract.  Do
+# not duplicate the duration in a transport or UI policy.
+LEARNING_STEP = timedelta(minutes=10)
+
+
 def rating_for_action(action: ReviewAction, has_active_review: bool) -> Rating:
     if action is ReviewAction.UNKNOWN:
         return Rating.AGAIN
@@ -33,6 +46,7 @@ class Word:
     level: int | None
     transcript: str | None
     audio_key: str
+    tier: Tier = Tier.UNKNOWN
 
 
 @dataclass(slots=True)
@@ -77,8 +91,8 @@ def next_state(state: WordState, event: ReviewEvent) -> WordState:
     card = Card.from_json(state.card_json) if state.card_json else Card()
     scheduler = Scheduler(
         desired_retention=0.90,
-        learning_steps=(timedelta(minutes=10),),
-        relearning_steps=(timedelta(minutes=10),),
+        learning_steps=(LEARNING_STEP,),
+        relearning_steps=(LEARNING_STEP,),
         maximum_interval=365,
         # States are rebuilt for offline arrival and undo.  Random interval
         # fuzz would make the same event history produce a different card.

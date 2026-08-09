@@ -19,7 +19,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
-from english_vocab_trainer.domain.models import Rating, ReviewAction, Word
+from english_vocab_trainer.domain.models import LEARNING_STEP, Rating, ReviewAction, Tier, Word
 from english_vocab_trainer.ports.audio import (
     AudioStorageError,
     AudioStore,
@@ -96,6 +96,7 @@ class WordOut(BaseModel):
     level: int | None
     transcript: str | None
     audio_url: str
+    tier: Tier
 
 
 class WordListOut(BaseModel):
@@ -107,6 +108,7 @@ class SessionOut(BaseModel):
     mode: str
     created_at: datetime
     items: list[WordOut]
+    learning_step_seconds: int
 
 
 class EventResultOut(BaseModel):
@@ -115,6 +117,8 @@ class EventResultOut(BaseModel):
     status: Literal["applied", "idempotent", "voided", "conflict", "missing"]
     rating: Rating | None = None
     detail: str | None = None
+    due_at: datetime | None = None
+    version: int | None = None
 
 
 class BatchOut(BaseModel):
@@ -138,6 +142,7 @@ def word_out(word: Word) -> WordOut:
         level=values["level"],
         transcript=values["transcript"],
         audio_url=f"/api/v1/audio/{values['id']}",
+        tier=values["tier"],
     )
 
 
@@ -266,6 +271,7 @@ def sessions(
             mode=session.kind,
             created_at=session.created_at,
             items=[word_out(word) for word in session.words],
+            learning_step_seconds=int(LEARNING_STEP.total_seconds()),
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -281,6 +287,7 @@ def get_session(session_id: str, _: Identity, repository: Repository) -> Session
         mode=session.kind,
         created_at=session.created_at,
         items=[word_out(word) for word in session.words],
+        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
     )
 
 
@@ -300,7 +307,12 @@ def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repos
             )
             results.append(
                 EventResultOut(
-                    id=event.id, word_id=event.word_id, status=status, rating=result.rating
+                    id=event.id,
+                    word_id=event.word_id,
+                    status=status,
+                    rating=result.rating,
+                    due_at=result.state.due_at,
+                    version=result.state.version,
                 )
             )
             acknowledged.append(event.id)

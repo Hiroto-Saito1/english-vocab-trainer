@@ -10,6 +10,7 @@ from english_vocab_trainer.domain.models import (
     ReviewAction,
     ReviewEvent,
     StudySession,
+    Tier,
     Word,
     WordState,
     rating_for_action,
@@ -29,20 +30,50 @@ def shuffled(words: list[Word], rng: Random) -> list[Word]:
     return result
 
 
+def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]:
+    """Take new words without replacement, balancing the two published tiers.
+
+    Unknown legacy rows intentionally remain a last-resort pool: they must not
+    crowd out either tier in a catalog which has been republished with 0003.
+    """
+    pools = {
+        tier: shuffled([word for word in words if word.tier is tier], rng)
+        for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN)
+    }
+    # For an odd quota either tier may receive the extra slot; this avoids a
+    # persistent upper-first presentation bias while preserving a <= 1 split.
+    upper_quota = limit // 2 + rng.randrange(2 if limit % 2 else 1)
+    ultra_quota = limit - upper_quota
+    selected = pools[Tier.UPPER][:upper_quota] + pools[Tier.ULTRA][:ultra_quota]
+    selected_ids = {word.id for word in selected}
+    # If a tier is short, spill to the other real tier before the legacy pool.
+    for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN):
+        for word in pools[tier]:
+            if len(selected) >= limit:
+                break
+            if word.id not in selected_ids:
+                selected.append(word)
+                selected_ids.add(word.id)
+    return selected
+
+
 def select_session_words(
     repo: VocabularyRepository, mode: str, now: datetime, count: int | None, rng: Random
 ) -> list[Word]:
-    new = shuffled(repo.list_words(limit=10_000), rng)
+    new = repo.list_words(limit=10_000)
     if mode == "screen":
         if count not in {20, 50, 100}:
             raise ValueError("screen count must be 20, 50, or 100")
-        return new[:count]
+        return shuffled(balanced_new_words(new, count, rng), rng)
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
     target = repo.get_settings().daily_target
     due = repo.due_words(now, target)
     due_ids = {word.id for word in due}
-    selected = due + [word for word in new if word.id not in due_ids][: max(0, target - len(due))]
+    quota = max(0, target - len(due))
+    selected = due + balanced_new_words(
+        [word for word in new if word.id not in due_ids], quota, rng
+    )
     # Due cards win admission to the daily quota; their presentation order, and
     # the new cards' order, are still random so a level band cannot dominate.
     return shuffled(selected, rng)

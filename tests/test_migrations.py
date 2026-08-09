@@ -10,7 +10,7 @@ def test_packaged_migrations_and_connection_pragmas_work_without_a_checkout(tmp_
     connection = sqlite3.connect(tmp_path / "installed.db")
     apply_migrations(connection)
     versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
-    assert versions == {"0001_initial.sql", "0002_auth.sql"}
+    assert versions == {"0001_initial.sql", "0002_auth.sql", "0003_tier.sql"}
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -25,6 +25,25 @@ def test_migrations_are_idempotent_and_recorded(tmp_path: Path) -> None:
     apply_migrations(connection, directory)
     apply_migrations(connection, directory)
     assert connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 1
+    connection.close()
+
+
+def test_tier_migration_upgrades_an_existing_catalog_without_losing_rows(tmp_path: Path) -> None:
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    packaged = Path(__file__).parents[1] / "src/english_vocab_trainer/migrations"
+    for name in ("0001_initial.sql", "0002_auth.sql"):
+        (directory / name).write_text((packaged / name).read_text())
+    connection = sqlite3.connect(":memory:")
+    apply_migrations(connection, directory)
+    connection.execute(
+        "INSERT INTO words(id,term,level,transcript,audio_key) "
+        "VALUES('old','old',NULL,NULL,'old.mp3')"
+    )
+    connection.commit()
+    (directory / "0003_tier.sql").write_text((packaged / "0003_tier.sql").read_text())
+    apply_migrations(connection, directory)
+    assert connection.execute("SELECT tier FROM words WHERE id='old'").fetchone()[0] == "unknown"
     connection.close()
 
 

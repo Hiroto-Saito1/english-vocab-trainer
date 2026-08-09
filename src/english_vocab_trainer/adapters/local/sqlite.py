@@ -12,6 +12,7 @@ from english_vocab_trainer.domain.models import (
     ReviewEvent,
     Settings,
     StudySession,
+    Tier,
     Word,
     WordState,
     replay_word_state,
@@ -59,8 +60,8 @@ class SQLiteVocabularyRepository:
 
     def add_word(self, word: Word) -> None:
         self.db.execute(
-            "INSERT OR REPLACE INTO words VALUES(?,?,?,?,?)",
-            (word.id, word.term, word.level, word.transcript, word.audio_key),
+            "INSERT OR REPLACE INTO words(id,term,level,transcript,audio_key,tier) VALUES(?,?,?,?,?,?)",
+            (word.id, word.term, word.level, word.transcript, word.audio_key, word.tier.value),
         )
 
     def bulk_upsert_words(self, words: list[Word]) -> None:
@@ -68,11 +69,18 @@ class SQLiteVocabularyRepository:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self.db.executemany(
-                "INSERT INTO words(id,term,level,transcript,audio_key) VALUES(?,?,?,?,?) "
+                "INSERT INTO words(id,term,level,transcript,audio_key,tier) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
-                "transcript=excluded.transcript,audio_key=excluded.audio_key",
+                "transcript=excluded.transcript,audio_key=excluded.audio_key,tier=excluded.tier",
                 [
-                    (word.id, word.term, word.level, word.transcript, word.audio_key)
+                    (
+                        word.id,
+                        word.term,
+                        word.level,
+                        word.transcript,
+                        word.audio_key,
+                        word.tier.value,
+                    )
                     for word in words
                 ],
             )
@@ -83,7 +91,18 @@ class SQLiteVocabularyRepository:
 
     def get_word(self, word_id: str) -> Word | None:
         r = self.db.execute("SELECT * FROM words WHERE id=?", (word_id,)).fetchone()
-        return Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) if r else None
+        return self._word(r) if r else None
+
+    @staticmethod
+    def _word(row: sqlite3.Row) -> Word:
+        return Word(
+            row["id"],
+            row["term"],
+            row["level"],
+            row["transcript"],
+            row["audio_key"],
+            Tier(row["tier"]),
+        )
 
     def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
         q = "SELECT w.* FROM words w WHERE NOT EXISTS(SELECT 1 FROM review_events e WHERE e.user_id=? AND e.word_id=w.id AND e.voided_at IS NULL)"
@@ -93,17 +112,11 @@ class SQLiteVocabularyRepository:
             args.extend(levels)
         q += " ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
         args.append(limit)
-        return [
-            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
-            for r in self.db.execute(q, args)
-        ]
+        return [self._word(r) for r in self.db.execute(q, args)]
 
     def due_words(self, now: datetime, limit: int) -> list[Word]:
         q = "SELECT w.* FROM user_word_state s JOIN words w ON w.id=s.word_id WHERE s.user_id=? AND s.due_at<=? ORDER BY s.due_at LIMIT ?"
-        return [
-            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"])
-            for r in self.db.execute(q, (self.user_id, _iso(now), limit))
-        ]
+        return [self._word(r) for r in self.db.execute(q, (self.user_id, _iso(now), limit))]
 
     def _events(self, word_id: str) -> list[ReviewEvent]:
         return [
@@ -304,9 +317,7 @@ class SQLiteVocabularyRepository:
             return None
         q = "SELECT w.* FROM session_items i JOIN words w ON w.id=i.word_id WHERE i.session_id=? ORDER BY i.ordinal"
         rows = list(self.db.execute(q, (session_id,)))
-        words = tuple(
-            Word(r["id"], r["term"], r["level"], r["transcript"], r["audio_key"]) for r in rows
-        )
+        words = tuple(self._word(r) for r in rows)
         return StudySession(
             session_id,
             meta["kind"],

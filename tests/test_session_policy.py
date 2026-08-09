@@ -13,7 +13,14 @@ from english_vocab_trainer.application.services import (
     submit_review,
     utcnow,
 )
-from english_vocab_trainer.domain.models import ReviewAction, ReviewEvent, Settings, Word, WordState
+from english_vocab_trainer.domain.models import (
+    ReviewAction,
+    ReviewEvent,
+    Settings,
+    Tier,
+    Word,
+    WordState,
+)
 from english_vocab_trainer.ports.errors import ConcurrentUpdateError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
@@ -94,6 +101,40 @@ def test_screen_mode_keeps_its_existing_counts() -> None:
     assert len(select(repository, mode="screen", count=100)) == 100
     with pytest.raises(ValueError):
         select(repository, mode="screen", count=19)
+
+
+@pytest.mark.parametrize("target", [1, 30, 100])
+def test_new_words_are_evenly_drawn_from_published_tiers(target: int) -> None:
+    candidates = [
+        Word(str(index), f"upper {index}", 9, None, f"u{index}.mp3", Tier.UPPER)
+        for index in range(1_000)
+    ] + [
+        Word(str(1_000 + index), f"ultra {index}", 10, None, f"x{index}.mp3", Tier.ULTRA)
+        for index in range(1_000)
+    ]
+    first = select(SessionRepository(candidates, [], target), seed=11)
+    again = select(SessionRepository(candidates, [], target), seed=11)
+    different = select(SessionRepository(candidates, [], target), seed=12)
+    upper = sum(word.tier is Tier.UPPER for word in first)
+    ultra = sum(word.tier is Tier.ULTRA for word in first)
+    assert abs(upper - ultra) <= 1
+    assert len({word.id for word in first}) == target
+    assert [word.id for word in first] == [word.id for word in again]
+    assert [word.id for word in first] != [word.id for word in different]
+
+
+def test_new_tier_shortage_spills_before_legacy_unknown() -> None:
+    candidates = (
+        [Word("u", "upper", 9, None, "u.mp3", Tier.UPPER)]
+        + [
+            Word(str(index), f"ultra {index}", 10, None, f"x{index}.mp3", Tier.ULTRA)
+            for index in range(10)
+        ]
+        + [Word("legacy", "legacy", None, None, "legacy.mp3", Tier.UNKNOWN)]
+    )
+    result = select(SessionRepository(candidates, [], 6), seed=3)
+    assert sum(word.tier is Tier.UNKNOWN for word in result) == 0
+    assert sum(word.tier is Tier.ULTRA for word in result) == 5
 
 
 class RetryingReviewRepository:
