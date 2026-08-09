@@ -67,6 +67,24 @@ def test_auth_rejects_weak_config_and_malformed_csrf() -> None:
         service.user_from_session(cookies.session, "日本語", require_csrf=True)
 
 
+@pytest.mark.parametrize(
+    "session",
+    [
+        "v1.日本語.x",
+        "v1..x",
+        "v1.bad*.x",
+        "v1.e30.e30",  # a signed-looking empty JSON object
+        "v1.W10.e30",  # a JSON list rather than a session object
+        "v1.bnVsbA.e30",  # JSON null
+        "v1.eyJ2Ijp0cnVlfQ.e30",  # bool is not an integer version
+    ],
+)
+def test_malformed_session_strings_always_raise_authentication_error(session: str) -> None:
+    service = AuthService(PasswordHasher().hash("password"), b"x" * 32, Limiter())
+    with pytest.raises(AuthenticationError):
+        service.user_from_session(session)
+
+
 def test_sqlite_limiter_and_production_configuration(tmp_path: Path) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     limiter = SQLiteLoginAttemptLimiter(tmp_path / "v.db")
@@ -86,5 +104,16 @@ def test_sqlite_limiter_and_production_configuration(tmp_path: Path) -> None:
         }
     )
     assert container.auth is not None and container.local_user_id is None
+    non_bypass = container_from_env(
+        {
+            "APP_ENV": "staging-like-value",
+            "VOCAB_DB_PATH": str(tmp_path / "non-bypass.db"),
+            "AUDIO_BACKEND": "filesystem",
+            "AUDIO_ROOT": str(tmp_path),
+            "APP_PASSWORD_HASH": password_hash,
+            "SESSION_SIGNING_SECRET": "c" * 43,
+        }
+    )
+    assert non_bypass.environment == "production" and non_bypass.auth is not None
     with pytest.raises(ConfigurationError):
         container_from_env({"APP_ENV": "production"})

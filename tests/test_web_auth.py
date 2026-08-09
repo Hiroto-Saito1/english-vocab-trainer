@@ -69,3 +69,47 @@ def test_login_origin_and_global_throttle(tmp_path: Path) -> None:
         for _ in range(5):
             assert app.post("/login", data={"password": "wrong"}).status_code == 401
         assert app.post("/login", data={"password": "test-password"}).status_code == 401
+
+
+def test_malformed_cookie_and_csrf_never_become_server_errors(tmp_path: Path) -> None:
+    with client(tmp_path) as app:
+        for session in ("v1.bad*.x", "v1.e30.e30", "v1.W10.e30", "v1.bnVsbA.e30"):
+            response = app.get("/api/v1/progress", headers={"Cookie": f"vocab-session={session}"})
+            assert response.status_code == 401
+        login = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
+        assert login.status_code == 303
+        response = app.post("/auth/logout", headers={"X-CSRF-Token": "not-a-token*"})
+        assert response.status_code == 403
+
+
+def test_login_size_cap_and_production_cookie_attributes(tmp_path: Path) -> None:
+    with client(tmp_path) as app:
+        assert 'maxlength="1024"' in app.get("/login").text
+        assert app.post("/login", data={"password": "x" * 5_000}).status_code == 401
+
+    database = tmp_path / "secure.db"
+    auth = AuthService(
+        PasswordHasher().hash("test-password"),
+        b"s" * 32,
+        SQLiteLoginAttemptLimiter(database),
+        secure_cookies=True,
+    )
+    with TestClient(
+        create_app(
+            AppContainer(
+                SQLiteRepositoryProvider(database),
+                FilesystemAudioStore(tmp_path),
+                "production",
+                auth=auth,
+            )
+        )
+    ) as app:
+        response = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
+        assert response.status_code == 303
+        session, csrf = response.headers.get_list("set-cookie")
+        assert session.startswith("__Host-vocab-session=")
+        assert "HttpOnly" in session and "Secure" in session and "SameSite=strict" in session
+        assert "Path=/" in session and "Domain=" not in session
+        assert csrf.startswith("__Host-vocab-csrf=")
+        assert "HttpOnly" not in csrf and "Secure" in csrf and "SameSite=strict" in csrf
+        assert "Path=/" in csrf and "Domain=" not in csrf

@@ -10,12 +10,15 @@ from typing import cast
 
 import pytest
 import uvicorn
+from argon2 import PasswordHasher
 from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
+from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.domain.models import Word
 from english_vocab_trainer.web.app import create_app
+from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import AppContainer
 
 
@@ -48,6 +51,62 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         uvicorn.Config(
             create_app(
                 AppContainer(provider, FilesystemAudioStore(audio_root), "test", "local-user")
+            ),
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("uvicorn did not start")
+        time.sleep(0.02)
+    try:
+        yield f"http://127.0.0.1:{port}", database
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+@pytest.fixture
+def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """A live production-mode app; only the cookie Secure flag is relaxed for HTTP Chromium."""
+    database = tmp_path / "production.db"
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    provider = SQLiteRepositoryProvider(database)
+    repository = provider.for_user("primary")
+    try:
+        for index in range(2):
+            audio_key = f"protected-{index}.mp3"
+            (audio_root / audio_key).write_bytes(b"ID3\x04\x00\x00protected")
+            repository.add_word(
+                Word(
+                    f"protected-{index}",
+                    f"protected word {index}",
+                    2,
+                    f"An English definition for protected word {index}.",
+                    audio_key,
+                )
+            )
+    finally:
+        repository.close()
+    auth = AuthService(
+        PasswordHasher().hash("browser-password"),
+        b"p" * 32,
+        SQLiteLoginAttemptLimiter(database),
+        secure_cookies=False,
+    )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(
+                AppContainer(provider, FilesystemAudioStore(audio_root), "production", auth=auth)
             ),
             host="127.0.0.1",
             port=port,
@@ -506,3 +565,121 @@ def test_private_reset_cancels_an_inflight_audio_preload(
         ))])"""
     )
     assert remaining == 0
+
+
+@pytest.mark.e2e
+def test_mobile_production_login_csrf_and_logout_privacy_boundary(
+    page: Page, production_auth_server: tuple[str, Path]
+) -> None:
+    base_url, _ = production_auth_server
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(base_url)
+    expect(page).to_have_url(f"{base_url}/login")
+    expect(page.locator("h2")).to_have_text("Sign in")
+
+    page.locator("#password").fill("wrong-password")
+    page.get_by_role("button", name="Sign in").click()
+    expect(page.locator(".error")).to_have_text("Sign in failed. Please try again.")
+    assert "browser-password" not in page.content()
+
+    page.locator("#password").fill("browser-password")
+    page.get_by_role("button", name="Sign in").click()
+    expect(page).to_have_url(f"{base_url}/")
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    cached_urls = wait_for_audio_cache(page)
+    assert cached_urls == active_audio_urls(page)
+
+    session_status, audio_status, csrf_mutation = page.evaluate(
+        """async () => Promise.race([((async () => {
+          const state = window.__pwa.getState();
+          const token = document.cookie.split(";").map((value) => value.trim()).find(
+            (value) => value.startsWith("vocab-csrf=")
+          ).split("=").slice(1).join("=");
+          const session = await fetch("/api/v1/sessions?mode=daily");
+          const audio = await fetch(state.cards[0].audio_url);
+          const review = await fetch("/api/v1/review-events/batch", {
+            method: "POST",
+            headers: {"content-type": "application/json", "X-CSRF-Token": token},
+            body: JSON.stringify([{
+              id: crypto.randomUUID(), word_id: state.cards[0].id, action: "known",
+              reviewed_at: new Date().toISOString()
+            }])
+          });
+          return [session.status, audio.status, review.status];
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("production protected request timed out")), 10_000
+        ))])"""
+    )
+    assert [session_status, audio_status, csrf_mutation] == [200, 200, 200]
+
+    # Seed a durable event to show that logout clears both user stores, not just audio.
+    page.evaluate(
+        """async () => Promise.race([((async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("events", "readwrite");
+            tx.objectStore("events").put({
+              id: crypto.randomUUID(), word_id: "protected-0", action: "known",
+              reviewed_at: new Date().toISOString()
+            });
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+          });
+          db.close();
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("production outbox setup timed out")), 10_000
+        ))])"""
+    )
+    page.get_by_role("button", name="Logout", exact=True).click()
+    expect(page).to_have_url(f"{base_url}/login")
+    cookie_names = [cookie["name"] for cookie in page.context.cookies()]
+    assert "vocab-session" not in cookie_names and "vocab-csrf" not in cookie_names
+
+    private_keys, db_values, api_status = page.evaluate(
+        """async () => Promise.race([((async () => {
+          const privateKeys = (await caches.keys()).filter((key) =>
+            key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
+          );
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const values = await Promise.all(["events", "state"].map((name) =>
+            new Promise((resolve, reject) => {
+              const request = db.transaction(name).objectStore(name).getAll();
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            })
+          ));
+          db.close();
+          return [privateKeys, values, (await fetch("/api/v1/progress")).status];
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("production logout verification timed out")), 10_000
+        ))])"""
+    )
+    assert private_keys == []
+    assert db_values == [[], []]
+    assert api_status == 401
+    page.evaluate(
+        """async () => Promise.race([caches.open("pwa-shell-v3").then(
+          (cache) => cache.delete(new URL("/", location.origin).href)
+        ), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("shell cache reset timed out")), 10_000
+        ))])"""
+    )
+    page.goto(base_url)
+    expect(page).to_have_url(f"{base_url}/login")
+    cached_login_root = page.evaluate(
+        """async () => Promise.race([caches.open("pwa-shell-v3").then(
+          async (cache) => Boolean(await cache.match(new URL("/", location.origin).href))
+        ), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("redirect cache check timed out")), 10_000
+        ))])"""
+    )
+    assert cached_login_root is False

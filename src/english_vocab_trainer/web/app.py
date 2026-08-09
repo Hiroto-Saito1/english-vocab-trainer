@@ -176,8 +176,20 @@ async def login(request: Request) -> Response:
     origin = request.headers.get("Origin")
     if origin is not None and origin != str(request.base_url).rstrip("/"):
         raise HTTPException(403, "invalid origin")
-    form = await request.form()
-    password = form.get("password")
+    # Reject a surprisingly large form before multipart parsing.  We still call
+    # authenticate with a harmless value so the generic response consumes a
+    # limiter reservation; an attacker cannot bypass the global limiter by
+    # switching to an oversized request.
+    try:
+        oversized = int(request.headers.get("Content-Length", "0")) > 4_096
+    except ValueError:
+        oversized = True
+    password: object
+    if oversized:
+        password = ""
+    else:
+        form = await request.form()
+        password = form.get("password")
     cookies = container.auth.authenticate(password if isinstance(password, str) else "")
     if cookies is None:
         return templates.TemplateResponse(

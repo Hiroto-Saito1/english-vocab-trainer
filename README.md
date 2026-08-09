@@ -94,8 +94,8 @@ clears private audio/user caches and transactionally empties the local session a
 the transaction avoids a blocked IndexedDB database deletion caused by a live connection. This is
 the explicit device-local privacy reset boundary.
 
-No MP3, catalog, transcript, secret, or database belongs in Git. Production repository/auth
-remain fail-closed until M3; M2c is limited to the remaining offline/cache work.
+No MP3, catalog, transcript, secret, or database belongs in Git. M3a now provides the production
+SQLite repository and authentication boundary; the Fly/R2 deployment work remains M3b.
 
 Browser acceptance tests use a live local Uvicorn server and Chromium. Install and run them with:
 

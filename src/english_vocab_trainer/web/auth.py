@@ -129,24 +129,27 @@ class AuthService:
         parts = session.split(".")
         if len(parts) != 3 or parts[0] != "v1":
             raise AuthenticationError("invalid session")
+        try:
+            encoded_payload = _unb64(parts[1])
+            _unb64(parts[2])
+            payload = json.loads(encoded_payload)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, AuthenticationError) as exc:
+            raise AuthenticationError("invalid session") from exc
         expected = _b64(
             hmac.new(self.signing_secret, parts[1].encode("ascii"), hashlib.sha256).digest()
         )
-        if not hmac.compare_digest(expected, parts[2]):
+        if not hmac.compare_digest(expected, parts[2]) or not isinstance(payload, dict):
             raise AuthenticationError("invalid session")
-        try:
-            payload = json.loads(_unb64(parts[1]))
-        except (UnicodeDecodeError, json.JSONDecodeError, AuthenticationError) as exc:
-            raise AuthenticationError("invalid session") from exc
         if (
             set(payload) != {"v", "u", "iat", "exp", "c"}
             or payload["v"] != 1
             or payload["u"] != self.user_id
+            or not isinstance(payload["c"], str)
+            or len(payload["c"]) != 64
+            or any(character not in "0123456789abcdef" for character in payload["c"])
         ):
             raise AuthenticationError("invalid session")
-        if not all(type(payload[key]) is int for key in ("iat", "exp")) or not isinstance(
-            payload["c"], str
-        ):
+        if not all(type(payload[key]) is int for key in ("iat", "exp")):
             raise AuthenticationError("invalid session")
         now = int(self.clock().astimezone(UTC).timestamp())
         if (
