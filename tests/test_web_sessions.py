@@ -17,6 +17,9 @@ def test_screen_session_is_persisted(tmp_path: Path) -> None:
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:
         response = client.get("/api/v1/sessions?mode=screen&count=20")
+        assert client.get("/api/v1/sessions?mode=screen").status_code == 422
+        assert client.get("/api/v1/sessions?mode=screen&count=19").status_code == 422
+        assert client.get("/api/v1/sessions?mode=other").status_code == 422
     payload = response.json()
     stored = provider.for_user("local-user").get_session(payload["id"])
     assert response.status_code == 200 and len(payload["items"]) == 1 and stored is not None
