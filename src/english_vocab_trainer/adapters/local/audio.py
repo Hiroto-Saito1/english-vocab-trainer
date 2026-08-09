@@ -13,7 +13,10 @@ class FilesystemAudioStore:
         self.root = root.resolve()
 
     def _path(self, key: str) -> Path:
-        candidate = (self.root / key).resolve()
+        relative = Path(key)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise FileNotFoundError(key)
+        candidate = (self.root / relative).resolve()
         # Only canonical lower-case MP3 paths below the configured root are public.
         if candidate.suffix != ".mp3" or not candidate.is_relative_to(self.root):
             raise FileNotFoundError(key)

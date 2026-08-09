@@ -21,6 +21,8 @@ def test_audio_store_blocks_traversal(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         FilesystemAudioStore(tmp_path).get("../x.mp3")
     with pytest.raises(FileNotFoundError):
+        FilesystemAudioStore(tmp_path).get("nested/../x.mp3")
+    with pytest.raises(FileNotFoundError):
         FilesystemAudioStore(tmp_path).get("x.MP3")
 
 
