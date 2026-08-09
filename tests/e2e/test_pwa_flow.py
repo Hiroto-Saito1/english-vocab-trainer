@@ -172,8 +172,23 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
         }""",
         [acknowledged, conflicted],
     )
-    expect(page.locator("#status")).to_have_text("")
-    page.wait_for_timeout(100)
+    page.wait_for_function(
+        """async (id) => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const keys = await new Promise((resolve, reject) => {
+            const request = db.transaction("events").objectStore("events").getAllKeys();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          return keys.length === 1 && keys[0] === id;
+        }""",
+        arg=conflicted,
+        timeout=5_000,
+    )
     remaining = page.evaluate(
         """async () => {
           const db = await new Promise((resolve, reject) => {
