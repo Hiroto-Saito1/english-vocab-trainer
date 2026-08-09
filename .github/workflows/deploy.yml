@@ -5,6 +5,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: astral-sh/setup-uv@ac388b0c1cba1c2f12d14f46fe0c26d1f8c85f0a # v5.4.0
+      - uses: astral-sh/setup-uv@22695119d769bdb6f7032ad67b9bca0ef8c4a174 # v5.4.0
       - run: uv sync --frozen
       - run: npx --yes wrangler@4.31.0 deploy
