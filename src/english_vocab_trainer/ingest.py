@@ -2,7 +2,21 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 from pathlib import Path
+
+_TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
+
+
+def parse_audio_path(root: Path, path: Path) -> tuple[int | None, str]:
+    """Derive level and term from approved filenames, never CSV metadata."""
+    relative = path.relative_to(root)
+    level_part = relative.parts[1]  # approved tree / level / file
+    level = int(level_part) if level_part.isdecimal() else None
+    match = _TERM.search(path.name)
+    if not match:
+        raise ValueError(f"unrecognised audio filename: {path.name}")
+    return level, match.group(1).strip()
 
 
 def eligible_audio(root: Path) -> list[Path]:

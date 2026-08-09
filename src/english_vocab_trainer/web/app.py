@@ -10,7 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from english_vocab_trainer.adapters.cloudflare.auth import verify_access_jwt
 from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
@@ -33,6 +33,13 @@ class EventIn(BaseModel):
 
 class TranscriptIn(BaseModel):
     transcript: str = Field(min_length=1, max_length=20_000)
+
+    @field_validator("transcript")
+    @classmethod
+    def english_only(cls, value: str) -> str:
+        if any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" for char in value):
+            raise ValueError("transcript must be English only")
+        return value
 
 
 class SettingsIn(BaseModel):
