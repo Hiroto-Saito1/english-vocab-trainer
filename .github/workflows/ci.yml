@@ -8,7 +8,6 @@ jobs:
       - uses: astral-sh/setup-uv@22695119d769bdb6f7032ad67b9bca0ef8c4a174 # v5.4.0
       - run: uv lock --check && uv sync --group dev --frozen
       - run: uv run ruff format --check . && uv run ruff check .
-      - run: uv run mypy src
+      - run: uv run mypy src tests
       - run: uv run pytest
       - run: "! git ls-files | grep -E '\\.(mp3|wav|m4a)$|catalog.*\\.(json|sql)'"
-      - run: npx --yes wrangler@4.31.0 deploy --dry-run || true
