@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -21,6 +21,7 @@ ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 app = FastAPI(title="English Vocab Trainer", version="1.0.0")
+router = APIRouter()
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 
@@ -68,22 +69,22 @@ def wire_demo_data() -> None:
         repo.words["demo-1"] = Word("demo-1", "example", 1, "An example sentence.", "demo-1.mp3")
 
 
-@app.on_event("startup")
+@router.on_event("startup")
 def startup() -> None:
     wire_demo_data()
 
 
-@app.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
 
 
-@app.get("/api/v1/sessions")
+@router.get("/api/v1/sessions")
 def sessions(_: str = identity()) -> dict[str, object]:
     return {"items": [asdict(word) for word in daily_study(repo, datetime.now(UTC))]}
 
 
-@app.get("/api/v1/sessions/new/{count}")
+@router.get("/api/v1/sessions/new/{count}")
 def new_session(count: int, _: str = identity()) -> dict[str, object]:
     try:
         return {"items": [asdict(word) for word in screen_new_words(repo, count)]}
@@ -91,13 +92,13 @@ def new_session(count: int, _: str = identity()) -> dict[str, object]:
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/v1/review-events/batch")
+@router.post("/api/v1/review-events/batch")
 def review_batch(events: list[EventIn], _: str = identity()) -> dict[str, list[str]]:
     domain_events = [ReviewEvent(e.id, e.word_id, e.rating, e.reviewed_at) for e in events]
     return {"applied": apply_events(repo, domain_events)}
 
 
-@app.post("/api/v1/review-events/{event_id}/void")
+@router.post("/api/v1/review-events/{event_id}/void")
 def void_event(event_id: UUID, _: str = identity()) -> dict[str, str]:
     event = repo.events.get(str(event_id))
     if event is None:
@@ -108,36 +109,39 @@ def void_event(event_id: UUID, _: str = identity()) -> dict[str, str]:
     return {"id": str(event_id), "status": "voided"}
 
 
-@app.get("/api/v1/audio/{word_id}")
+@router.get("/api/v1/audio/{word_id}")
 def audio(word_id: str, _: str = identity()) -> Response:
     if repo.get_word(word_id) is None:
         raise HTTPException(404, "word not found")
     return Response(status_code=501, headers={"Accept-Ranges": "bytes"})
 
 
-@app.get("/api/v1/progress")
+@router.get("/api/v1/progress")
 def progress(_: str = identity()) -> dict[str, int]:
     return repo.progress(datetime.now(UTC))
 
 
-@app.get("/api/v1/settings")
+@router.get("/api/v1/settings")
 def get_settings(_: str = identity()) -> SettingsIn:
     return SettingsIn()
 
 
-@app.patch("/api/v1/settings")
+@router.patch("/api/v1/settings")
 def settings(settings: SettingsIn, _: str = identity()) -> SettingsIn:
     return settings
 
 
-@app.get("/api/v1/words")
+@router.get("/api/v1/words")
 def words(limit: int = 100, _: str = identity()) -> dict[str, object]:
     return {"items": [asdict(word) for word in repo.list_words(limit=limit)]}
 
 
-@app.patch("/api/v1/words/{word_id}/transcript")
+@router.patch("/api/v1/words/{word_id}/transcript")
 def transcript(word_id: str, body: TranscriptIn, _: str = identity()) -> dict[str, object]:
     try:
         return asdict(repo.update_transcript(word_id, body.transcript))
     except KeyError as exc:
         raise HTTPException(404, "word not found") from exc
+
+
+app.include_router(router)
