@@ -5,6 +5,7 @@ from typing import Annotated, cast
 
 from fastapi import Depends, Header, HTTPException, Request
 
+from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, ConfigurationError
 
@@ -42,3 +43,10 @@ def repository(
     request: Request, user_id: Annotated[str, Depends(identity)]
 ) -> Iterator[VocabularyRepository]:
     yield from repository_for_user(request, user_id)
+
+
+def audio_store(request: Request) -> AudioStore:
+    try:
+        return get_container(request).audio
+    except ConfigurationError as exc:
+        raise HTTPException(503, "audio store is unavailable") from exc

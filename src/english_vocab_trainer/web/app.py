@@ -18,9 +18,9 @@ from pydantic import BaseModel, Field, field_validator
 from english_vocab_trainer.adapters.local import InMemoryVocabularyRepository
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
-from english_vocab_trainer.adapters.local.sqlite import MissingError
 from english_vocab_trainer.application.services import create_study_session, submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction
+from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.errors import (
     ConcurrentUpdateError,
     EventConflictError,
@@ -33,11 +33,12 @@ from english_vocab_trainer.web.container import (
     UnavailableAudioStore,
     UnavailableRepositoryProvider,
 )
-from english_vocab_trainer.web.dependencies import identity
+from english_vocab_trainer.web.dependencies import audio_store, identity
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
 Identity = Annotated[str, Depends(identity)]
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
+Audio = Annotated[AudioStore, Depends(audio_store)]
 ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
