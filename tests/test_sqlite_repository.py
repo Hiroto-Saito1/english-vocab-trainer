@@ -105,6 +105,34 @@ def test_settings_default_validation_persistence_and_isolation(tmp_path: Path) -
     assert repo(path).get_settings().daily_target == 17
 
 
+def test_transcript_update_persists_and_missing_raises(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    r = repo(path)
+    words(r)
+    assert r.update_transcript("nine", "An English sentence.").transcript == "An English sentence."
+    stored = repo(path).get_word("nine")
+    assert stored is not None and stored.transcript == "An English sentence."
+    with pytest.raises(MissingError):
+        r.update_transcript("absent", "Nope")
+
+
+def test_progress_counts_active_reviews_due_and_user_scope(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    a = repo(path)
+    words(a)
+    now = datetime.now(UTC)
+    e = event("nine", now)
+    a.append_event(e, 0)
+    a.db.execute(
+        "UPDATE user_word_state SET due_at=? WHERE user_id=?",
+        ((now - timedelta(seconds=1)).isoformat(), "alice"),
+    )
+    assert a.progress(now) == {"total": 3, "due": 1, "reviewed": 1}
+    assert repo(path, "bob").progress(now) == {"total": 3, "due": 0, "reviewed": 0}
+    a.void_event(e.id)
+    assert a.progress(now)["reviewed"] == 0 and a.progress(now)["due"] == 1
+
+
 def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:
     r = repo(tmp_path / "v.db")
     with pytest.raises(MissingError):
