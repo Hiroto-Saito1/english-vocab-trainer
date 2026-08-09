@@ -10,6 +10,7 @@ jobs:
       - run: uv run ruff format --check . && uv run ruff check .
       - run: uv run mypy src tests
       - run: uv run pytest -m 'not e2e' -W error::ResourceWarning
+      - run: uv run coverage report --precision=2 --fail-under=90
       - run: uv run playwright install --with-deps chromium
       - run: uv run pytest -m e2e --no-cov -W error::ResourceWarning
       - run: uv build

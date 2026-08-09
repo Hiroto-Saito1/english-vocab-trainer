@@ -1,12 +1,18 @@
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.domain.models import Word
-from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult
+from english_vocab_trainer.ports.audio import (
+    AudioMetadata,
+    AudioResult,
+    AudioStorageError,
+    InvalidRangeError,
+)
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.audio import build_audio_response
 from english_vocab_trainer.web.container import AppContainer
@@ -108,3 +114,38 @@ def test_conditional_audio_get_fetches_when_validator_does_not_match(tmp_path: P
         response = client.get("/api/v1/audio/one", headers={"If-None-Match": '"other"'})
     assert response.status_code == 200 and response.content == b"abcde"
     assert store.head_calls == 1 and store.get_calls == 1
+
+
+class RacingRangeStore(ConditionalStore):
+    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+        self.get_calls += 1
+        raise InvalidRangeError("object changed after validation")
+
+
+class UnavailableGetStore(ConditionalStore):
+    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+        self.get_calls += 1
+        raise AudioStorageError("upstream secret=private")
+
+
+def _audio_app_with_store(tmp_path: Path, store: ConditionalStore) -> FastAPI:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.close()
+    return create_app(AppContainer(provider, store, "test", "local-user"))
+
+
+def test_audio_get_handles_upstream_range_race_and_storage_failure(tmp_path: Path) -> None:
+    racing = RacingRangeStore()
+    with TestClient(_audio_app_with_store(tmp_path, racing)) as client:
+        race = client.get("/api/v1/audio/one", headers={"Range": "bytes=0-1"})
+    assert race.status_code == 416 and race.headers["content-range"] == "bytes */5"
+    assert racing.head_calls == 2 and racing.get_calls == 1
+
+    unavailable = UnavailableGetStore()
+    with TestClient(_audio_app_with_store(tmp_path, unavailable)) as client:
+        failed = client.get("/api/v1/audio/one")
+        missing_word = client.get("/api/v1/audio/missing")
+    assert failed.status_code == 502 and "secret" not in failed.text
+    assert missing_word.status_code == 404

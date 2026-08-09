@@ -86,6 +86,7 @@ class UploadR2:
         self.body: BinaryIO | None = None
         self.error: Exception | None = None
         self.bad_verify = False
+        self.malformed_metadata = False
 
     def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
         self.head_calls += 1
@@ -97,7 +98,9 @@ class UploadR2:
             raise ClientError("NoSuchKey") from exc
         return {
             "ContentLength": len(value),
-            "Metadata": {"sha256": "b" * 64 if self.bad_verify else digest},
+            "Metadata": {"sha256": "not-a-checksum"}
+            if self.malformed_metadata
+            else {"sha256": "b" * 64 if self.bad_verify else digest},
         }
 
     def get_object(self, **kwargs: str) -> Mapping[str, Any]:
@@ -248,3 +251,30 @@ def test_r2_uploader_fails_closed_for_conflicts_errors_and_bad_verification(tmp_
 
     with pytest.raises(AudioStorageError, match="unavailable"):
         Boto3R2AudioUploader(PutFailure(), "private-audio").upload(key, path, digest)
+
+
+def test_r2_uploader_rejects_missing_source_and_malformed_existing_metadata(tmp_path: Path) -> None:
+    digest = "f" * 64
+    key = f"audio/{digest}.mp3"
+    client = UploadR2()
+    uploader = Boto3R2AudioUploader(client, "private-audio")
+    with pytest.raises(AudioStorageError, match="source is unavailable"):
+        uploader.upload(key, tmp_path / "gone.mp3", digest)
+    assert client.head_calls == 0 and client.put_calls == 0
+
+    path = tmp_path / "sample.mp3"
+    path.write_bytes(b"audio")
+    client.objects[key] = (b"audio", digest)
+    client.malformed_metadata = True
+    with pytest.raises(AudioStorageError, match="conflicts"):
+        uploader.upload(key, path, digest)
+    assert client.put_calls == 0
+
+
+def test_r2_head_rejects_malformed_metadata() -> None:
+    class MalformedHead(FakeR2):
+        def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
+            return {"ContentLength": "five", "Metadata": {"sha256": "bad"}}
+
+    with pytest.raises(AudioStorageError, match="unavailable"):
+        Boto3R2AudioStore(MalformedHead(), "private-audio").head(KEY)
