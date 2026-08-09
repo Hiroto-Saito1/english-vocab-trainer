@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Annotated, cast
 
 from fastapi import Depends, Header, HTTPException, Request
 
+from english_vocab_trainer.adapters.cloudflare.provider import D1RepositoryProvider
+from english_vocab_trainer.application.async_utils import as_async_repository
 from english_vocab_trainer.ports.audio import AudioStore
-from english_vocab_trainer.ports.repositories import VocabularyRepository
+from english_vocab_trainer.ports.repositories import AsyncVocabularyRepository, VocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, ConfigurationError
 
 
@@ -52,6 +54,22 @@ def repository(
     request: Request, user_id: Annotated[str, Depends(identity)]
 ) -> Iterator[VocabularyRepository]:
     yield from repository_for_user(request, user_id)
+
+
+async def async_repository(
+    request: Request, user_id: Annotated[str, Depends(identity)]
+) -> AsyncIterator[AsyncVocabularyRepository]:
+    database = _binding(request, "DB")
+    provider = (
+        D1RepositoryProvider(database)
+        if database is not None
+        else get_container(request).repositories
+    )
+    repository = as_async_repository(provider.for_user(user_id))
+    try:
+        yield repository
+    finally:
+        await repository.close()
 
 
 def audio_store(request: Request) -> AudioStore:
