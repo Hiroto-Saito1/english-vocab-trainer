@@ -34,8 +34,8 @@ _COMMON_ENGLISH_PUNCTUATION = str.maketrans(
         "\u2019": "'",  # right single quotation mark / apostrophe
         "\u201c": '"',  # left double quotation mark
         "\u201d": '"',  # right double quotation mark
-        "\u2013": "-",  # en dash
-        "\u2014": "-",  # em dash
+        "\u2013": " - ",  # en dash
+        "\u2014": " - ",  # em dash
         "\u2026": "...",  # ellipsis
     }
 )
@@ -631,6 +631,7 @@ def catalog_fingerprint(records: Iterable[CatalogRecord]) -> str:
 
 def validate_transcript(transcript: str) -> str:
     value = unicodedata.normalize("NFKC", transcript).translate(_COMMON_ENGLISH_PUNCTUATION)
+    value = re.sub(r"[ \t]+", " ", value)
     value = validate_english_transcript(value)
     preceding_latin = False
     for character in value:

@@ -238,6 +238,8 @@ use the external environment wrapper—never the Dropbox-synchronised project `.
 
 Repeat the bounded transcription command (or omit `--max-records` after monitoring the first
 batch). It uses the English-only `mlx-community/whisper-large-v3-turbo` model with `language=en`.
+It uses deterministic decoding (`temperature=0`, without previous-text conditioning) to reduce
+repetition hallucinations on the short approved clips; transcript quality checks still block bad output.
 The approved inventory is 7.783 hours of audio (maximum single file 35.344 seconds). Three warm M1
 checks completed in 0.54–0.82 seconds with exact expected text; that supports a rough 18–25 minute
 full-run estimate, not a performance guarantee. Start with a bounded batch and inspect its private

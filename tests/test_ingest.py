@@ -158,7 +158,7 @@ def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> Non
     assert validate_transcript("Café gives a clear English definition.")
     assert (
         validate_transcript("“Café”\u2014a useful definition\u2026 with an example.\u00a0")
-        == '"Café"-a useful definition... with an example.'
+        == '"Café" - a useful definition... with an example.'
     )
     with pytest.raises(ValueError, match="unsafe Unicode"):
         validate_transcript("A clear\x00 English definition sentence.")
