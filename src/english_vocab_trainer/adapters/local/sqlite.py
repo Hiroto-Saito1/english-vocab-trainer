@@ -259,7 +259,7 @@ class SQLiteVocabularyRepository:
 
     def create_session(
         self, session_id: str, kind: str, words: list[str], created_at: datetime
-    ) -> None:
+    ) -> StudySession:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self.db.execute(
@@ -271,6 +271,9 @@ class SQLiteVocabularyRepository:
                 [(session_id, word, index) for index, word in enumerate(words)],
             )
             self.db.execute("COMMIT")
+            session = self.get_session(session_id)
+            assert session is not None
+            return session
         except Exception:
             self.db.execute("ROLLBACK")
             raise

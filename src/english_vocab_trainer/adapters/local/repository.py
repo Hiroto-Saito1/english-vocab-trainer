@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
-from english_vocab_trainer.domain.models import ReviewEvent, Word, WordState, next_state
+from english_vocab_trainer.domain.models import (
+    ReviewEvent,
+    Settings,
+    StudySession,
+    Word,
+    WordState,
+    next_state,
+    replay_word_state,
+)
 
 
 class InMemoryVocabularyRepository:
@@ -10,6 +19,11 @@ class InMemoryVocabularyRepository:
         self.words = {word.id: word for word in words or []}
         self.states: dict[str, WordState] = {}
         self.events: dict[str, ReviewEvent] = {}
+        self.settings = Settings()
+        self.sessions: dict[str, StudySession] = {}
+
+    def for_user(self, user_id: str) -> InMemoryVocabularyRepository:
+        return self
 
     def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
         selected = [w for w in self.words.values() if levels is None or w.level in levels]
@@ -47,6 +61,40 @@ class InMemoryVocabularyRepository:
             raise RuntimeError("CAS conflict")
         self.events[str(event.id)] = event
         return next_state(state, event)
+
+    def void_event(self, event_id: UUID) -> WordState:
+        event = self.events[str(event_id)]
+        self.events[str(event_id)] = ReviewEvent(
+            event.id, event.word_id, event.rating, event.reviewed_at, datetime.now(UTC)
+        )
+        state = replay_word_state(
+            event.word_id,
+            [x for x in self.events.values() if x.word_id == event.word_id],
+            self.state(event.word_id).version + 1,
+        )
+        self.states[event.word_id] = state
+        return state
+
+    def get_settings(self) -> Settings:
+        return self.settings
+
+    def update_settings(self, daily_target: int) -> Settings:
+        if not 1 <= daily_target <= 100:
+            raise ValueError("daily_target must be between 1 and 100")
+        self.settings = Settings(daily_target)
+        return self.settings
+
+    def create_session(
+        self, session_id: str, kind: str, words: list[str], created_at: datetime
+    ) -> StudySession:
+        session = StudySession(
+            session_id, kind, created_at, tuple(self.words[word] for word in words)
+        )
+        self.sessions[session_id] = session
+        return session
+
+    def get_session(self, session_id: str) -> StudySession | None:
+        return self.sessions.get(session_id)
 
     def progress(self, now: datetime) -> dict[str, int]:
         return {
