@@ -10,7 +10,8 @@ from english_vocab_trainer.adapters.local.sqlite import (
     MissingError,
     SQLiteVocabularyRepository,
 )
-from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word
+from english_vocab_trainer.application.services import submit_review
+from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Word
 
 _OPEN: list[SQLiteVocabularyRepository] = []
 
@@ -167,6 +168,17 @@ def test_schema_rejects_duplicate_session_ordinal(tmp_path: Path) -> None:
     r.db.execute("INSERT INTO session_items VALUES('s','nine',0)")
     with pytest.raises(sqlite3.IntegrityError):
         r.db.execute("INSERT INTO session_items VALUES('s','ten',0)")
+
+
+def test_submit_known_retry_is_easy_and_idempotent(tmp_path: Path) -> None:
+    r = repo(tmp_path / "v.db")
+    words(r)
+    event_id, now = uuid4(), datetime.now(UTC)
+    first = submit_review(r, event_id, "nine", ReviewAction.KNOWN, now)
+    second = submit_review(r, event_id, "nine", ReviewAction.KNOWN, now)
+    assert first.rating is second.rating is Rating.EASY
+    assert first.state.version == second.state.version == 1
+    assert r.progress(now)["reviewed"] == 1
 
 
 def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:
