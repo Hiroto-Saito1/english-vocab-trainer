@@ -227,5 +227,25 @@ class D1VocabularyRepository:
         assert created is not None
         return StudySession(session_id, str(meta["kind"]), created, words)
 
+    async def create_session(
+        self, session_id: str, kind: str, words: list[str], created_at: datetime
+    ) -> StudySession:
+        db: Any = cast(Any, self.db)
+        statements = [
+            db.prepare(
+                "INSERT INTO study_sessions(id,user_id,kind,created_at) VALUES(?,?,?,?)"
+            ).bind(session_id, self.user_id, kind, _iso(created_at))
+        ]
+        statements.extend(
+            db.prepare("INSERT INTO session_items(session_id,word_id,ordinal) VALUES(?,?,?)").bind(
+                session_id, word, index
+            )
+            for index, word in enumerate(words)
+        )
+        await db.batch(statements)
+        session = await self.get_session(session_id)
+        assert session is not None
+        return session
+
     async def close(self) -> None:
         return None
