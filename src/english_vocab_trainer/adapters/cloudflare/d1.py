@@ -52,5 +52,28 @@ class D1VocabularyRepository:
             str(row["audio_key"]),
         )
 
+    async def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
+        query = (
+            "SELECT w.* FROM words w WHERE NOT EXISTS(SELECT 1 FROM review_events e "
+            "WHERE e.user_id=? AND e.word_id=w.id AND e.voided_at IS NULL)"
+        )
+        args: list[object] = [self.user_id]
+        if levels is not None:
+            query += " AND w.level IN (" + ",".join("?" for _ in levels) + ")"
+            args.extend(levels)
+        query += " ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
+        args.append(limit)
+        rows = await self._all(query, *args)
+        return [
+            Word(
+                str(row["id"]),
+                str(row["term"]),
+                cast(int | None, row["level"]),
+                cast(str | None, row["transcript"]),
+                str(row["audio_key"]),
+            )
+            for row in rows
+        ]
+
     async def close(self) -> None:
         return None
