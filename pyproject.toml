@@ -33,6 +33,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 addopts = "--cov=english_vocab_trainer --cov-branch --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
+markers = ["e2e: browser tests that require installed Chromium"]
 
 [build-system]
 requires = ["hatchling"]

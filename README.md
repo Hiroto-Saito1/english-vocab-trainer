@@ -45,3 +45,9 @@ The PWA retains its session and outbox in IndexedDB, deleting only server-acknow
 No MP3, catalog, transcript, secret, or database belongs in Git. Before a Fly deployment, set the
 database path and audio volume mount and configure production authentication; it currently fails
 closed until that later M2/M3 work is completed.
+
+Browser acceptance tests use a live local Uvicorn server and Chromium. Install and run them with:
+
+`uv run playwright install chromium`
+
+`uv run pytest -m e2e --no-cov -W error::ResourceWarning`

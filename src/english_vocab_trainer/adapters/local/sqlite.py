@@ -36,7 +36,10 @@ def _iso(value: datetime | None) -> str | None:
 
 class SQLiteVocabularyRepository:
     def __init__(self, path: Path, user_id: str) -> None:
-        self.user_id, self.db = user_id, sqlite3.connect(path, isolation_level=None)
+        self.user_id, self.db = (
+            user_id,
+            sqlite3.connect(path, isolation_level=None, check_same_thread=False),
+        )
         self.db.row_factory = sqlite3.Row
         apply_migrations(self.db, Path(__file__).parents[4] / "migrations")
 

@@ -9,5 +9,8 @@ jobs:
       - run: uv lock --check && uv sync --group dev --frozen
       - run: uv run ruff format --check . && uv run ruff check .
       - run: uv run mypy src tests
-      - run: uv run pytest
+      - run: uv run pytest -m 'not e2e' -W error::ResourceWarning
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest -m e2e --no-cov -W error::ResourceWarning
+      - run: uv build
       - run: "! git ls-files | grep -E '\\.(mp3|wav|m4a)$|catalog.*\\.(json|sql)'"
