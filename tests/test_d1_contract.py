@@ -60,7 +60,10 @@ async def test_d1_transcript_update_and_missing() -> None:
 async def test_d1_session_create_and_ordered_read() -> None:
     connection = sqlite3.connect(":memory:")
     connection.executescript(SCHEMA)
-    connection.executemany("INSERT INTO words VALUES(?,?,?,?,?)", [("a", "a", 9, None, "a.mp3"), ("b", "b", 9, None, "b.mp3")])
+    connection.executemany(
+        "INSERT INTO words VALUES(?,?,?,?,?)",
+        [("a", "a", 9, None, "a.mp3"), ("b", "b", 9, None, "b.mp3")],
+    )
     connection.commit()
     repo = D1VocabularyRepository(FakeD1(connection), "alice")
     session = await repo.create_session("s", "screen", ["b", "a"], datetime(2026, 1, 1, tzinfo=UTC))
