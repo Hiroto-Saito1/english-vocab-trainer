@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import UUID
 
-from english_vocab_trainer.domain.models import ReviewEvent, Word
+from english_vocab_trainer.domain.models import (
+    Rating,
+    ReviewAction,
+    ReviewEvent,
+    Word,
+    WordState,
+    rating_for_action,
+)
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
@@ -34,3 +43,30 @@ def apply_events(repo: VocabularyRepository, events: list[ReviewEvent]) -> list[
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewResult:
+    id: UUID
+    word_id: str
+    action: ReviewAction
+    rating: Rating
+    state: WordState
+
+
+def submit_review(
+    repo: VocabularyRepository,
+    event_id: UUID,
+    word_id: str,
+    action: ReviewAction,
+    reviewed_at: datetime,
+) -> ReviewResult:
+    rating = rating_for_action(action, repo.has_active_review(word_id))
+    event = ReviewEvent(event_id, word_id, rating, reviewed_at)
+    for _ in range(3):
+        try:
+            state = repo.append_event(event, repo.state(word_id).version)
+            return ReviewResult(event_id, word_id, action, rating, state)
+        except RuntimeError:
+            continue
+    raise RuntimeError("CAS retry exhausted")
