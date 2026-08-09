@@ -36,6 +36,14 @@ def _records(value: object) -> list[dict[str, object]]:
     return [cast(dict[str, object], row.to_py() if hasattr(row, "to_py") else row) for row in rows]
 
 
+def _changes(result: object) -> int:
+    native = result.to_py() if hasattr(result, "to_py") else result
+    if isinstance(native, dict):
+        meta = cast(dict[str, object], native.get("meta", {}))
+        return int(cast(int | str, meta.get("changes", 0)))
+    return int(cast(Any, native).meta.changes)
+
+
 class D1VocabularyRepository:
     """Async D1 boundary; all Worker FFI is isolated in this adapter."""
 
@@ -90,6 +98,7 @@ class D1VocabularyRepository:
         query += " ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
         args.append(limit)
         rows = await self._all(query, *args)
+
         return [
             Word(
                 str(row["id"]),
