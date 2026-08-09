@@ -211,3 +211,66 @@ The manual GitHub **Deploy** workflow is `workflow_dispatch` only, protected by 
 environment and uses `FLY_API_TOKEN`, `FLY_APP`, and `FLY_VOLUME` only at run time. CI never
 deploys; it builds the container, checks the pinned Litestream binary, and creates a migrated DB
 from the installed wheel and container package.
+
+## M3c-a: full private inventory and durable transcription
+
+The ingest CLI has explicit profiles. `mvp` remains the safe default (ten selected records per
+approved source unless `--limit-per-source` is supplied). `full` fails closed unless **each** of
+`上級SVL/` and `超上級SVL/` contains exactly 1,000 parseable MP3s; it computes all 2,000 checksums
+before accepting the inventory and rejects duplicate path, checksum, or term. Profile-derived
+counts are enforced by scan, validate, audit, publish, and upload, so the full catalog is never
+mistaken for the 20-record MVP.
+
+Use only ignored private output paths. A recommended full preparation sequence is:
+
+`uv run vocab-ingest scan --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
+
+The direct `uv` form above is safe for metadata-only scanning. Before any normal ingest command,
+use the external environment wrapper—never the Dropbox-synchronised project `.venv`:
+
+`scripts/ingest-env doctor`
+
+`scripts/ingest-env scan --profile full --source .. --catalog .private/full-catalog.jsonl`
+
+`scripts/ingest-env status --profile full --source .. --catalog .private/full-catalog.jsonl`
+
+`scripts/ingest-env transcribe --profile full --source .. --catalog .private/full-catalog.jsonl --max-records 100`
+
+Repeat the bounded transcription command (or omit `--max-records` after monitoring the first
+batch). It uses the English-only `mlx-community/whisper-large-v3-turbo` model with `language=en`.
+The approved inventory is 7.783 hours of audio (maximum single file 35.344 seconds). Three warm M1
+checks completed in 0.54–0.82 seconds with exact expected text; that supports a rough 18–25 minute
+full-run estimate, not a performance guarantee. Start with a bounded batch and inspect its private
+status/error report before increasing it.
+Each accepted transcript is append-only journaled and fsynced; normal completion atomically compacts
+the journal into the JSONL catalog. A crash can only lose a partial final journal line, which is
+ignored safely. Transcription resumes from its journal automatically. A versioned provenance manifest
+records the source digest, profile, model, and language; incompatible journal/catalog identities fail
+closed. A default scan refuses to replace any transcript, checkpoint, or unresolved-error state.
+Use `scan --resume` to scan immutable audio metadata again and carry forward only a validated
+transcript with the identical audio checksum; it reconciles unresolved errors only for still-missing
+current audio. `scan --force` is the explicit destructive reset of all transcript/error checkpoints.
+
+For unattended batches use `--continue-on-error`. Its private `.transcription-errors.jsonl` is a
+current checksum-keyed unresolved-error snapshot; an internal fsynced event journal makes retries
+crash-safe. Each current error has a whitelisted `reason` (for example a transcript quality/script
+failure or `runtime-failure`), never raw exception text, paths, secrets, or transcript content. A
+successful retry removes that checksum, and both files disappear when all errors are resolved. The
+command exits nonzero with an English summary while unresolved errors remain; use a deterministic
+quality reason to correct the source/transcript policy before retrying, and retry runtime failures
+after the environment is healthy. `audit` is blocking for inventory, checksum, unique identity, source presence,
+and English-only transcripts. It also writes a private machine-readable warning report for
+term-not-found, duplicate transcript, and unusual length cases. Correct flagged audio/transcripts
+manually, then rerun scan/audit before publishing:
+
+`scripts/ingest-env audit --profile full --source .. --catalog .private/full-catalog.jsonl`
+
+`scripts/ingest-env validate --profile full --source .. --catalog .private/full-catalog.jsonl`
+
+`scripts/ingest-env publish --profile full --source .. --catalog .private/full-catalog.jsonl --database ./vocab.db --audio-backend r2 --dry-run`
+
+`scripts/ingest-env upload-audio --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
+
+No catalog, manifest, journal, report, audio file, or generated SQLite database may be committed.
+The importer reads the source audio trees only; it never writes there. Do not start a 2,000-file
+Whisper run without monitoring its private reports and checkpoint progress.
