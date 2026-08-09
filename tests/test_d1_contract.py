@@ -54,3 +54,16 @@ async def test_d1_transcript_update_and_missing() -> None:
     with pytest.raises(MissingError):
         await repo.update_transcript("missing", "English")
     connection.close()
+
+
+@pytest.mark.asyncio
+async def test_d1_session_create_and_ordered_read() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(SCHEMA)
+    connection.executemany("INSERT INTO words VALUES(?,?,?,?,?)", [("a", "a", 9, None, "a.mp3"), ("b", "b", 9, None, "b.mp3")])
+    connection.commit()
+    repo = D1VocabularyRepository(FakeD1(connection), "alice")
+    session = await repo.create_session("s", "screen", ["b", "a"], datetime(2026, 1, 1, tzinfo=UTC))
+    assert [word.id for word in session.words] == ["b", "a"]
+    assert [word.id for word in (await repo.get_session("s")).words] == ["b", "a"]
+    connection.close()
