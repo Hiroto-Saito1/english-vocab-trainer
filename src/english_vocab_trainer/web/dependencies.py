@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Annotated, cast
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, ConfigurationError
@@ -36,3 +36,9 @@ def repository_for_user(request: Request, user_id: str) -> Iterator[VocabularyRe
         yield repository
     finally:
         repository.close()
+
+
+def repository(
+    request: Request, user_id: Annotated[str, Depends(identity)]
+) -> Iterator[VocabularyRepository]:
+    yield from repository_for_user(request, user_id)

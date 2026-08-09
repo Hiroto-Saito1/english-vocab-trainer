@@ -19,6 +19,7 @@ from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import apply_events, daily_study, screen_new_words
 from english_vocab_trainer.domain.models import Rating, ReviewEvent
+from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
@@ -26,8 +27,10 @@ from english_vocab_trainer.web.container import (
     UnavailableRepositoryProvider,
 )
 from english_vocab_trainer.web.dependencies import identity
+from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
 Identity = Annotated[str, Depends(identity)]
+Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
