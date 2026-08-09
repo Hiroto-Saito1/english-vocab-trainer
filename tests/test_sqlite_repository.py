@@ -11,7 +11,6 @@ from english_vocab_trainer.adapters.local.sqlite import (
 )
 from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word
 
-
 _OPEN: list[SQLiteVocabularyRepository] = []
 
 
@@ -92,6 +91,18 @@ def test_due_is_current_user_and_past_only(tmp_path: Path) -> None:
     assert [w.id for w in a.due_words(now, 10)] == ["nine"] and not repo(path, "bob").due_words(
         now, 10
     )
+
+
+def test_settings_default_validation_persistence_and_isolation(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    alice = repo(path)
+    bob = repo(path, "bob")
+    assert alice.get_settings().daily_target == 30
+    assert alice.update_settings(17).daily_target == 17
+    assert bob.get_settings().daily_target == 30
+    with pytest.raises(ValueError):
+        alice.update_settings(0)
+    assert repo(path).get_settings().daily_target == 17
 
 
 def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:

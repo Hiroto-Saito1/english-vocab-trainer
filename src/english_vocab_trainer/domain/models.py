@@ -46,6 +46,11 @@ class ReviewEvent:
     voided_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class Settings:
+    daily_target: int = 30
+
+
 def next_state(state: WordState, event: ReviewEvent) -> WordState:
     """Apply canonical Py-FSRS 6 scheduling; only the server runs this policy."""
     now = event.reviewed_at.astimezone(UTC)

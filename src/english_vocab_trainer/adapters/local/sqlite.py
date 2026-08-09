@@ -9,6 +9,7 @@ from uuid import UUID
 from english_vocab_trainer.domain.models import (
     Rating,
     ReviewEvent,
+    Settings,
     Word,
     WordState,
     replay_word_state,
@@ -227,13 +228,15 @@ class SQLiteVocabularyRepository:
             ).fetchone()[0],
         }
 
-    def get_settings(self) -> dict[str, int]:
+    def get_settings(self) -> Settings:
         row = self.db.execute(
             "SELECT daily_target FROM user_settings WHERE user_id=?", (self.user_id,)
         ).fetchone()
-        return {"daily_target": row[0] if row else 30}
+        return Settings(row[0] if row else 30)
 
-    def update_settings(self, daily_target: int) -> dict[str, int]:
+    def update_settings(self, daily_target: int) -> Settings:
+        if not 1 <= daily_target <= 100:
+            raise ValueError("daily_target must be between 1 and 100")
         self.db.execute(
             "INSERT INTO user_settings VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET daily_target=excluded.daily_target",
             (self.user_id, daily_target),
