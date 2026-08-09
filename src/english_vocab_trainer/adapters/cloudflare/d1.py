@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, cast
 
 from english_vocab_trainer.domain.models import Word
@@ -64,6 +65,25 @@ class D1VocabularyRepository:
         query += " ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
         args.append(limit)
         rows = await self._all(query, *args)
+        return [
+            Word(
+                str(row["id"]),
+                str(row["term"]),
+                cast(int | None, row["level"]),
+                cast(str | None, row["transcript"]),
+                str(row["audio_key"]),
+            )
+            for row in rows
+        ]
+
+    async def due_words(self, now: datetime, limit: int) -> list[Word]:
+        rows = await self._all(
+            "SELECT w.* FROM user_word_state s JOIN words w ON w.id=s.word_id "
+            "WHERE s.user_id=? AND s.due_at<=? ORDER BY s.due_at LIMIT ?",
+            self.user_id,
+            now.isoformat(),
+            limit,
+        )
         return [
             Word(
                 str(row["id"]),
