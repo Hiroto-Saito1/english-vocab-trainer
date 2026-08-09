@@ -21,6 +21,18 @@ def test_progress_uses_test_container(tmp_path: Path) -> None:
     assert response.status_code == 200 and response.json()["total"] == 1
 
 
+def test_service_worker_is_root_scoped(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    with TestClient(app) as client:
+        response = client.get("/sw.js")
+    assert (
+        response.status_code == 200
+        and response.headers["service-worker-allowed"] == "/"
+        and "cachedAudioRange" in response.text
+    )
+
+
 def test_settings_patch_persists_and_validates(tmp_path: Path) -> None:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))

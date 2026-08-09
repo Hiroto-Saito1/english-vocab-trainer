@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 import uvicorn
@@ -88,6 +89,104 @@ def wait_for_rows(database: Path, count: int) -> list[sqlite3.Row]:
     raise AssertionError(f"expected {count} review events, got {event_rows(database)}")
 
 
+def wait_for_audio_cache(page: Page) -> list[str]:
+    worker_ready = page.evaluate(
+        """async () => Promise.race([
+          navigator.serviceWorker.ready.then(() => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 10_000)),
+        ])"""
+    )
+    assert worker_ready is True, "service worker did not become ready within 10 seconds"
+    page.wait_for_function(
+        """() => {
+          if (!navigator.serviceWorker.controller || !window.__pwa) return false;
+          const state = window.__pwa.getState(), cache = window.__pwa.getAudioCacheState();
+          return Boolean(
+            state.sessionId && cache.ready && cache.sessionId === state.sessionId &&
+            cache.expected === state.cards.length && cache.cached === cache.expected &&
+            cache.failed === 0
+          );
+        }""",
+        timeout=10_000,
+    )
+    urls = page.evaluate(
+        """async () => caches.open("pwa-private-audio-v3")
+          .then((cache) => cache.keys())
+          .then((keys) => keys.map((key) => key.url).sort())"""
+    )
+    return cast(list[str], urls)
+
+
+def active_audio_urls(page: Page) -> list[str]:
+    return cast(
+        list[str],
+        page.evaluate(
+            """() => window.__pwa.getState().cards
+          .map((card) => new URL(card.audio_url, location.origin).href).sort()"""
+        ),
+    )
+
+
+def wait_for_empty_outbox(page: Page) -> None:
+    empty = page.evaluate(
+        """async () => {
+          const deadline = Date.now() + 10_000;
+          const eventCount = () => Promise.race([
+            new Promise((resolve, reject) => {
+              const request = indexedDB.open("english-vocab-trainer", 1);
+              request.onerror = () => reject(request.error);
+              request.onsuccess = () => {
+                const db = request.result;
+                const count = db.transaction("events").objectStore("events").count();
+                count.onerror = () => { db.close(); reject(count.error); };
+                count.onsuccess = () => { db.close(); resolve(count.result); };
+              };
+            }),
+            new Promise((_, reject) => setTimeout(
+              () => reject(new Error("outbox probe timed out")), 1_000
+            )),
+          ]);
+          while (Date.now() < deadline) {
+            if (await eventCount() === 0) return true;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return false;
+        }"""
+    )
+    assert empty is True, "outbox did not empty within 10 seconds"
+
+
+def wait_for_outbox_ids(page: Page, expected: list[str]) -> None:
+    matched = page.evaluate(
+        """async (expected) => {
+          const deadline = Date.now() + 10_000;
+          const eventIds = () => Promise.race([
+            new Promise((resolve, reject) => {
+              const request = indexedDB.open("english-vocab-trainer", 1);
+              request.onerror = () => reject(request.error);
+              request.onsuccess = () => {
+                const db = request.result;
+                const keys = db.transaction("events").objectStore("events").getAllKeys();
+                keys.onerror = () => { db.close(); reject(keys.error); };
+                keys.onsuccess = () => { db.close(); resolve(keys.result); };
+              };
+            }),
+            new Promise((_, reject) => setTimeout(
+              () => reject(new Error("outbox ID probe timed out")), 1_000
+            )),
+          ]);
+          while (Date.now() < deadline) {
+            const ids = await eventIds();
+            if (JSON.stringify(ids) === JSON.stringify(expected)) return true;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return false;
+        }""",
+        expected,
+    )
+    assert matched is True, f"outbox IDs did not become {expected!r} within 10 seconds"
+
+
 @pytest.mark.e2e
 def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[str, Path]) -> None:
     base_url, database = pwa_server
@@ -152,7 +251,7 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
     page.route("**/api/v1/review-events/batch", batch_response)
     page.goto(base_url)
     page.evaluate(
-        """async ([first, second]) => {
+        """async ([first, second]) => Promise.race([((async () => {
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("english-vocab-trainer", 1);
             request.onsuccess = () => resolve(request.result);
@@ -168,39 +267,242 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
             });
             tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
           });
+          db.close();
           window.dispatchEvent(new Event("online"));
-        }""",
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("conflict outbox setup timed out")), 10_000
+        ))])""",
         [acknowledged, conflicted],
     )
-    page.wait_for_function(
-        """async (id) => {
+    wait_for_outbox_ids(page, [conflicted])
+
+
+@pytest.mark.e2e
+def test_offline_audio_outbox_rotation_and_private_reset(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, database = pwa_server
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(base_url)
+    initial_cache_urls = wait_for_audio_cache(page)
+    initial_urls = active_audio_urls(page)
+    assert initial_cache_urls == initial_urls
+    shell_keys = page.evaluate(
+        """async () => Promise.race([
+          caches.open("pwa-shell-v3").then((cache) => cache.keys()).then(
+            (keys) => keys.map((key) => new URL(key.url).pathname)
+          ),
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error("shell cache inspection timed out")), 10_000
+          )),
+        ])"""
+    )
+    assert all(not key.startswith("/api/") for key in shell_keys)
+
+    page.context.set_offline(True)
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    assert wait_for_audio_cache(page) == initial_urls
+    cached_url = active_audio_urls(page)[0]
+    normal, sliced, open_ended, suffix = page.evaluate(
+        """async (url) => Promise.race([((async () => {
+          const whole = await fetch(url);
+          const range = await fetch(url, {headers: {Range: "bytes=1-3"}});
+          return [
+            {status: whole.status, bytes: [...new Uint8Array(await whole.arrayBuffer())]},
+            {
+              status: range.status, range: range.headers.get("Content-Range"),
+              length: range.headers.get("Content-Length"),
+              acceptRanges: range.headers.get("Accept-Ranges"),
+              contentType: range.headers.get("Content-Type"), etag: range.headers.get("ETag"),
+              bytes: [...new Uint8Array(await range.arrayBuffer())]
+            },
+            await fetch(url, {headers: {Range: "bytes=2-"}}).then(async (response) => ({
+              status: response.status, range: response.headers.get("Content-Range"),
+              bytes: [...new Uint8Array(await response.arrayBuffer())]
+            })),
+            await fetch(url, {headers: {Range: "bytes=-2"}}).then(async (response) => ({
+              status: response.status, range: response.headers.get("Content-Range"),
+              bytes: [...new Uint8Array(await response.arrayBuffer())]
+            }))
+          ];
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("offline audio fetch timed out")), 10_000
+        ))])""",
+        cached_url,
+    )
+    assert normal["status"] == 200
+    audio_size = len(normal["bytes"])
+    assert sliced == {
+        "status": 206,
+        "range": f"bytes 1-3/{audio_size}",
+        "length": "3",
+        "acceptRanges": "bytes",
+        "contentType": "audio/mpeg",
+        "etag": sliced["etag"],
+        "bytes": normal["bytes"][1:4],
+    }
+    assert sliced["etag"]
+    assert open_ended == {
+        "status": 206,
+        "range": f"bytes 2-{audio_size - 1}/{audio_size}",
+        "bytes": normal["bytes"][2:],
+    }
+    assert suffix == {
+        "status": 206,
+        "range": f"bytes {audio_size - 2}-{audio_size - 1}/{audio_size}",
+        "bytes": normal["bytes"][-2:],
+    }
+    invalid = page.evaluate(
+        """async (url) => Promise.race([((async () => {
+          return Promise.all(["bytes=0-1,3-4", "bytes=999-1000", "not-a-range"].map(
+            async (value) => {
+              const response = await fetch(url, {headers: {Range: value}});
+              return [response.status, response.headers.get("Content-Range")];
+            }
+          ));
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("offline range fetch timed out")), 10_000
+        ))])""",
+        cached_url,
+    )
+    assert invalid == [[416, f"bytes */{audio_size}"]] * 3
+
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#term")).to_be_visible()
+    page.get_by_role("button", name="Continue").click()
+    page.get_by_role("button", name="Known", exact=True).click()
+    assert event_rows(database) == []
+
+    page.context.set_offline(False)
+    page.evaluate("window.dispatchEvent(new Event('online'))")
+    rows = wait_for_rows(database, 2)
+    assert [row["rating"] for row in rows] == ["again", "easy"]
+    wait_for_empty_outbox(page)
+    page.evaluate("window.dispatchEvent(new Event('online'))")
+    wait_for_empty_outbox(page)
+    assert len(event_rows(database)) == 2
+
+    page.get_by_role("button", name="Known", exact=True).click()
+    wait_for_rows(database, 3)
+    expect(page.locator("#card")).to_have_text("Daily study complete.")
+    page.context.set_offline(True)
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#status")).to_have_text("Reconnect to start a new study session.")
+    page.context.set_offline(False)
+    audio_root = database.parent / "audio"
+    (audio_root / "word-new.mp3").write_bytes(b"ID3\x04\x00\x00new")
+    provider = SQLiteRepositoryProvider(database)
+    repository = provider.for_user("local-user")
+    try:
+        repository.add_word(
+            Word("word-new", "new word", 2, "An English definition for a new word.", "word-new.mp3")
+        )
+    finally:
+        repository.close()
+
+    page.reload()
+    cache_urls = wait_for_audio_cache(page)
+    next_urls = active_audio_urls(page)
+    assert cache_urls == next_urls
+    assert any(url.endswith("word-new") for url in next_urls)
+    assert not set(initial_urls).difference(next_urls).intersection(cache_urls)
+
+    page.context.set_offline(True)
+    page.evaluate(
+        """async () => Promise.race([((async () => {
           const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open("english-vocab-trainer", 1);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
           });
-          const keys = await new Promise((resolve, reject) => {
-            const request = db.transaction("events").objectStore("events").getAllKeys();
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("events", "readwrite");
+            tx.objectStore("events").put({
+              id: crypto.randomUUID(), word_id: "word-new", action: "known",
+              reviewed_at: new Date().toISOString()
+            });
+            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+          });
+          db.close();
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("outbox setup timed out")), 10_000
+        ))])"""
+    )
+    page.evaluate(
+        """async () => Promise.race([
+          window.clearPrivateCaches(),
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error("private reset timed out")), 10_000
+          )),
+        ])"""
+    )
+    private_keys, db_state = page.evaluate(
+        """async () => Promise.race([((async () => {
+          const privateKeys = (await caches.keys()).filter((key) =>
+            key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
+          );
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
           });
-          return keys.length === 1 && keys[0] === id;
+          const values = await Promise.all(["events", "state"].map((name) =>
+            new Promise((resolve, reject) => {
+              const request = db.transaction(name).objectStore(name).getAll();
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            })
+          ));
+          db.close();
+          return [privateKeys, values];
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("private reset verification timed out")), 10_000
+        ))])"""
+    )
+    assert private_keys == []
+    assert db_state == [[], []]
+    page.reload(wait_until="domcontentloaded")
+    expect(page.locator("#status")).to_have_text("Reconnect to start a new study session.")
+
+
+@pytest.mark.e2e
+def test_private_reset_cancels_an_inflight_audio_preload(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    page.add_init_script(
+        """(() => {
+          const nativeFetch = window.fetch.bind(window);
+          let release;
+          const gate = new Promise((resolve) => { release = resolve; });
+          window.__releaseAudioPreload = release;
+          window.fetch = (input, init) => {
+            const url = typeof input === "string" ? input : input.url;
+            return url.includes("/api/v1/audio/")
+              ? gate.then(() => nativeFetch(input, init))
+              : nativeFetch(input, init);
+          };
+        })()"""
+    )
+    page.goto(base_url)
+    page.wait_for_function(
+        """() => {
+          const cache = window.__pwa.getAudioCacheState();
+          return Boolean(cache.sessionId && cache.expected > 0 && !cache.ready);
         }""",
-        arg=conflicted,
-        timeout=5_000,
+        timeout=10_000,
     )
     remaining = page.evaluate(
-        """async () => {
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          return await new Promise((resolve, reject) => {
-            const request = db.transaction("events").objectStore("events").getAllKeys();
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-        }"""
+        """async () => Promise.race([((async () => {
+          const reset = window.clearPrivateCaches();
+          window.__releaseAudioPreload();
+          await reset;
+          return (await caches.open("pwa-private-audio-v3")).keys().then(
+            (keys) => keys.length
+          );
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("inflight private reset timed out")), 10_000
+        ))])"""
     )
-    assert remaining == [conflicted]
+    assert remaining == 0

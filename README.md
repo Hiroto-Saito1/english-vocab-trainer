@@ -72,6 +72,28 @@ Easy for a new word and Good for a reviewed word, and **Unknown** maps to Again.
 idempotent UUIDs; Undo either removes an unsynchronised event or calls the void/replay endpoint.
 The web client retains its session and outbox in IndexedDB, deleting only server-acknowledged event IDs.
 
+## M2c: offline and local privacy boundary
+
+After an online session is created, the PWA waits for every full `200` audio response to be written
+to a private Cache Storage cache. The status line reports whether the set is ready for offline
+listening; a cache failure is non-fatal and leaves online listening available. Only the active
+session's audio URLs are retained. Fetching a new session clears the prior audio cache before its
+preload begins; reopening an unfinished saved session retains its matching audio. The service
+worker never stores API, review, or authentication JSON, and it never stores upstream `206` range
+responses. Static shell files use a network-first cache fallback only.
+
+Once full audio is cached, an offline reload can resume the saved listening flow. Normal audio GETs
+are served from the full response; a single offline byte range is synthesized as a correct `206`
+response. Review actions continue into the IndexedDB outbox and are sent exactly once when the
+browser reconnects. A first visit made offline, or a completed session that needs a new session,
+keeps existing local data and says to reconnect instead of failing the page.
+
+Audio cache rotation deliberately does **not** erase the IndexedDB session or outbox. For the M3
+logout boundary, `window.clearPrivateCaches()` is available but is not called automatically. It
+clears private audio/user caches and transactionally empties the local session and outbox stores;
+the transaction avoids a blocked IndexedDB database deletion caused by a live connection. This is
+the explicit device-local privacy reset boundary.
+
 No MP3, catalog, transcript, secret, or database belongs in Git. Production repository/auth
 remain fail-closed until M3; M2c is limited to the remaining offline/cache work.
 
@@ -80,3 +102,6 @@ Browser acceptance tests use a live local Uvicorn server and Chromium. Install a
 `uv run playwright install chromium`
 
 `uv run pytest -m e2e --no-cov -W error::ResourceWarning`
+
+M2c browser coverage waits for the service worker, cache-readiness state, and browser conditions;
+it does not depend on fixed sleeps for PWA/cache timing.
