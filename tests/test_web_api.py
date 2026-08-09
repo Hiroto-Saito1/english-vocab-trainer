@@ -73,6 +73,9 @@ def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
     with TestClient(app) as client:
         first = client.post("/api/v1/review-events/batch", json=[event]).json()
         second = client.post("/api/v1/review-events/batch", json=[event]).json()
+        later = dict(event, id=str(UUID(int=10)), reviewed_at="2026-01-02T00:00:00Z")
+        third = client.post("/api/v1/review-events/batch", json=[later]).json()
         progress = client.get("/api/v1/progress").json()
     assert first["results"][0]["status"] == "applied" and first["results"][0]["rating"] == "easy"
-    assert second["results"][0]["status"] == "idempotent" and progress["reviewed"] == 1
+    assert second["results"][0]["status"] == "idempotent" and progress["reviewed"] == 2
+    assert third["results"][0]["rating"] == "good"
