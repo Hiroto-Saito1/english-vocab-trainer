@@ -223,6 +223,20 @@ def audio(
     return build_audio_response(result, False, if_none_match)
 
 
+@router.head("/api/v1/audio/{word_id}")
+def audio_head(
+    word_id: str,
+    _: Identity,
+    repository: Repository,
+    store: Audio,
+    range_header: RangeHeader = None,
+    if_none_match: IfNoneMatch = None,
+) -> Response:
+    response = audio(word_id, _, repository, store, range_header, if_none_match)
+    response.body = b""
+    return response
+
+
 @router.get("/api/v1/progress", response_model=ProgressOut)
 def progress(_: Identity, repository: Repository) -> ProgressOut:
     return ProgressOut(**repository.progress(datetime.now(UTC)))
