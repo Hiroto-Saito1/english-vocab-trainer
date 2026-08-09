@@ -76,17 +76,17 @@ function armLearningTimer() {
 function updateUndoPresentation() { undoButton.hidden = !state.event || state.undoDeadline <= nowMs(); }
 function expireUndo() {
   if (!state.event || state.undoDeadline > nowMs()) return false;
-  state.event = null; state.undoDeadline = 0; clearUndoTimer(); updateUndoPresentation(); saveState();
+  state.event = null; state.undoDeadline = 0; clearUndoTimer(); updateUndoPresentation();
   return true;
 }
 function armUndoTimer() {
   clearUndoTimer();
   const remaining = state.undoDeadline - nowMs();
-  if (remaining <= 0) { expireUndo(); return; }
-  undoTimer = setTimeout(() => { expireUndo(); }, remaining);
+  if (remaining <= 0) { if (expireUndo()) saveState(); return; }
+  undoTimer = setTimeout(async () => { if (expireUndo()) await saveState(); }, remaining);
 }
 function render() {
-  expireUndo();
+  if (expireUndo()) saveState();
   if (
     state.current >= state.cards.length
     && state.revealedLearningWordId

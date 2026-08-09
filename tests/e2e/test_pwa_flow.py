@@ -335,6 +335,8 @@ def test_undo_expiry_does_not_restart_revealed_audio(
         "pause": 1,
         "seek": 1,
     }
+    audio_source = page.locator("#audio").get_attribute("src")
+    assert audio_source
 
     page.evaluate("window.__pwa.render()")
     assert page.evaluate("window.__audioPresentationSpy.calls") == {
@@ -350,6 +352,8 @@ def test_undo_expiry_does_not_restart_revealed_audio(
         undo_deadline,
     )
     assert page.evaluate("window.__pwa.getState().event") is None
+    assert page.locator("#undo").is_hidden()
+    assert page.locator("#audio").get_attribute("src") == audio_source
     assert page.evaluate("window.__audioPresentationSpy.calls") == {
         "play": 1,
         "pause": 1,
