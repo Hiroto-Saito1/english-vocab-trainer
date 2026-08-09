@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import uvicorn
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
@@ -126,3 +126,66 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#progress")).to_have_text("3 of 3")
     assert len(event_rows(database)) == 3
     page.context.set_offline(False)
+
+
+@pytest.mark.e2e
+def test_sync_keeps_only_conflicted_indexeddb_events(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    acknowledged = "00000000-0000-0000-0000-000000000101"
+    conflicted = "00000000-0000-0000-0000-000000000102"
+
+    def batch_response(route: Route) -> None:
+        # This is the only mocked request: it models a mixed server batch
+        # result while the page/session/audio still use the live ASGI server.
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '{"results":[{"id":"' + acknowledged + '","word_id":"word-0","status":"applied"},'
+                '{"id":"' + conflicted + '","word_id":"word-1","status":"conflict"}],'
+                '"acknowledged":["' + acknowledged + '"]}'
+            ),
+        )
+
+    page.route("**/api/v1/review-events/batch", batch_response)
+    page.goto(base_url)
+    page.evaluate(
+        """async ([first, second]) => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("events", "readwrite");
+            tx.objectStore("events").put({
+              id:first, word_id:"word-0", action:"known", reviewed_at:"2026-01-01T00:00:00Z"
+            });
+            tx.objectStore("events").put({
+              id:second, word_id:"word-1", action:"unknown", reviewed_at:"2026-01-01T00:00:01Z"
+            });
+            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+          });
+          window.dispatchEvent(new Event("online"));
+        }""",
+        [acknowledged, conflicted],
+    )
+    expect(page.locator("#status")).to_have_text("")
+    page.wait_for_timeout(100)
+    remaining = page.evaluate(
+        """async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          return await new Promise((resolve, reject) => {
+            const request = db.transaction("events").objectStore("events").getAllKeys();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+        }"""
+    )
+    assert remaining == [conflicted]
