@@ -1,18 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 
-
-@dataclass(frozen=True, slots=True)
-class AudioResult:
-    body: bytes
-    size: int
-    etag: str
-    start: int
-    end: int
-    partial: bool
+from english_vocab_trainer.ports.audio import AudioResult
 
 
 def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
