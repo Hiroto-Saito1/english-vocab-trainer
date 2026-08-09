@@ -69,16 +69,47 @@ def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
     repository.add_word(Word("one", "one", 9, None, "one.mp3"))
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
-    event = {"id": str(UUID(int=9)), "word_id": "one", "action": "known", "reviewed_at": "2026-01-01T00:00:00Z"}
+    event = {
+        "id": str(UUID(int=9)),
+        "word_id": "one",
+        "action": "known",
+        "reviewed_at": "2026-01-01T00:00:00Z",
+    }
     with TestClient(app) as client:
         first = client.post("/api/v1/review-events/batch", json=[event]).json()
         second = client.post("/api/v1/review-events/batch", json=[event]).json()
         later = dict(event, id=str(UUID(int=10)), reviewed_at="2026-01-02T00:00:00Z")
         third = client.post("/api/v1/review-events/batch", json=[later]).json()
-        unknown = dict(later, id=str(UUID(int=11)), action="unknown", reviewed_at="2026-01-03T00:00:00Z")
+        unknown = dict(
+            later, id=str(UUID(int=11)), action="unknown", reviewed_at="2026-01-03T00:00:00Z"
+        )
         fourth = client.post("/api/v1/review-events/batch", json=[unknown]).json()
         progress = client.get("/api/v1/progress").json()
     assert first["results"][0]["status"] == "applied" and first["results"][0]["rating"] == "easy"
     assert second["results"][0]["status"] == "idempotent" and progress["reviewed"] == 3
     assert third["results"][0]["rating"] == "good"
     assert fourth["results"][0]["rating"] == "again"
+
+
+def test_review_batch_reports_missing_and_conflict(tmp_path: Path) -> None:
+    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
+    repository = provider.for_user("local-user")
+    repository.add_word(Word("one", "one", 9, None, "one.mp3"))
+    repository.close()
+    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+    event = {
+        "id": str(UUID(int=12)),
+        "word_id": "one",
+        "action": "known",
+        "reviewed_at": "2026-01-01T00:00:00Z",
+    }
+    with TestClient(app) as client:
+        missing = client.post(
+            "/api/v1/review-events/batch", json=[dict(event, word_id="missing")]
+        ).json()
+        client.post("/api/v1/review-events/batch", json=[event])
+        conflict = client.post(
+            "/api/v1/review-events/batch", json=[dict(event, action="unknown")]
+        ).json()
+    assert missing["results"][0]["status"] == "missing" and missing["acknowledged"] == []
+    assert conflict["results"][0]["status"] == "conflict" and conflict["acknowledged"] == []
