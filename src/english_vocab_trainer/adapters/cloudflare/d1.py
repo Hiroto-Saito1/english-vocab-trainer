@@ -50,12 +50,15 @@ class D1VocabularyRepository:
     def __init__(self, db: object, user_id: str) -> None:
         self.db, self.user_id = db, user_id
 
+    def _prepare(self, sql: str, *params: object) -> object:
+        return cast(Any, self.db).prepare(sql).bind(*params)
+
     async def _first(self, sql: str, *params: object) -> dict[str, object] | None:
-        statement: Any = cast(Any, self.db).prepare(sql).bind(*params)
+        statement: Any = self._prepare(sql, *params)
         return _record(await statement.first())
 
     async def _all(self, sql: str, *params: object) -> list[dict[str, object]]:
-        statement: Any = cast(Any, self.db).prepare(sql).bind(*params)
+        statement: Any = self._prepare(sql, *params)
         result: object = await statement.run()
         rows = (
             result.get("results", [])
@@ -69,7 +72,7 @@ class D1VocabularyRepository:
         return int(cast(int | str, row["value"])) if row else 0
 
     async def _run(self, sql: str, *params: object) -> object:
-        statement: Any = cast(Any, self.db).prepare(sql).bind(*params)
+        statement: Any = self._prepare(sql, *params)
         return await statement.run()
 
     async def get_word(self, word_id: str) -> Word | None:
