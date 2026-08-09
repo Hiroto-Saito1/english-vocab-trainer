@@ -9,7 +9,7 @@ from random import Random
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -27,6 +27,7 @@ from english_vocab_trainer.ports.errors import (
     MissingError,
 )
 from english_vocab_trainer.ports.repositories import VocabularyRepository
+from english_vocab_trainer.web.audio import build_audio_response
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
@@ -39,6 +40,8 @@ from english_vocab_trainer.web.dependencies import repository as repository_depe
 Identity = Annotated[str, Depends(identity)]
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 Audio = Annotated[AudioStore, Depends(audio_store)]
+RangeHeader = Annotated[str | None, Header(alias="Range")]
+IfNoneMatch = Annotated[str | None, Header(alias="If-None-Match")]
 ROOT = Path(__file__).parent
 repo = InMemoryVocabularyRepository()
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
@@ -196,10 +199,28 @@ def void_event(event_id: UUID, _: Identity, repository: Repository) -> VoidOut:
 
 
 @router.get("/api/v1/audio/{word_id}")
-def audio(word_id: str, _: Identity) -> Response:
-    if repo.get_word(word_id) is None:
+def audio(
+    word_id: str,
+    _: Identity,
+    repository: Repository,
+    store: Audio,
+    range_header: RangeHeader = None,
+    if_none_match: IfNoneMatch = None,
+) -> Response:
+    word = repository.get_word(word_id)
+    if word is None:
         raise HTTPException(404, "word not found")
-    return Response(status_code=501, headers={"Accept-Ranges": "bytes"})
+    try:
+        result = store.get(word.audio_key, range_header)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "audio not found") from exc
+    except ValueError:
+        full = store.get(word.audio_key, None)
+        return Response(
+            status_code=416,
+            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{full.size}"},
+        )
+    return build_audio_response(result, False, if_none_match)
 
 
 @router.get("/api/v1/progress", response_model=ProgressOut)
