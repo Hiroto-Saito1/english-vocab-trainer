@@ -65,6 +65,10 @@ class ProgressOut(BaseModel):
     reviewed: int
 
 
+class SettingsOut(BaseModel):
+    daily_target: int
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -112,14 +116,15 @@ def progress(_: Identity, repository: Repository) -> ProgressOut:
     return ProgressOut(**repository.progress(datetime.now(UTC)))
 
 
-@router.get("/api/v1/settings")
-def get_settings(_: Identity) -> SettingsIn:
-    return SettingsIn()
+@router.get("/api/v1/settings", response_model=SettingsOut)
+def get_settings(_: Identity, repository: Repository) -> SettingsOut:
+    return SettingsOut(daily_target=repository.get_settings().daily_target)
 
 
-@router.patch("/api/v1/settings")
-def settings(settings: SettingsIn, _: Identity) -> SettingsIn:
-    return settings
+@router.patch("/api/v1/settings", response_model=SettingsOut)
+def settings(settings: SettingsIn, _: Identity, repository: Repository) -> SettingsOut:
+    updated = repository.update_settings(settings.daily_target)
+    return SettingsOut(daily_target=updated.daily_target)
 
 
 @router.get("/api/v1/words")
