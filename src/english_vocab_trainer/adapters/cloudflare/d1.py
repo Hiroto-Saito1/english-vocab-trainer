@@ -163,6 +163,27 @@ class D1VocabularyRepository:
             _dt(cast(str | None, row["voided_at"])),
         )
 
+    async def _events(self, word_id: str) -> list[ReviewEvent]:
+        rows = await self._all(
+            "SELECT * FROM review_events WHERE user_id=? AND word_id=? ORDER BY reviewed_at,id",
+            self.user_id,
+            word_id,
+        )
+        events: list[ReviewEvent] = []
+        for row in rows:
+            reviewed = _dt(cast(str | None, row["reviewed_at"]))
+            assert reviewed is not None
+            events.append(
+                ReviewEvent(
+                    UUID(str(row["id"])),
+                    word_id,
+                    Rating(str(row["rating"])),
+                    reviewed,
+                    _dt(cast(str | None, row["voided_at"])),
+                )
+            )
+        return events
+
     async def progress(self, now: datetime) -> dict[str, int]:
         total = await self._count("SELECT count(*) AS value FROM words")
         due = await self._count(
