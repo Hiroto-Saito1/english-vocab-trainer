@@ -7,6 +7,7 @@ import pytest
 
 from english_vocab_trainer.adapters.cloudflare.d1 import D1VocabularyRepository
 from english_vocab_trainer.adapters.local.sqlite import SCHEMA
+from english_vocab_trainer.ports.errors import MissingError
 from tests.fakes.d1 import FakeD1
 
 
@@ -39,4 +40,17 @@ async def test_d1_settings_default_update_and_validation() -> None:
     assert (await repo.get_settings()).daily_target == 42
     with pytest.raises(ValueError):
         await repo.update_settings(0)
+    connection.close()
+
+
+@pytest.mark.asyncio
+async def test_d1_transcript_update_and_missing() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(SCHEMA)
+    connection.execute("INSERT INTO words VALUES(?,?,?,?,?)", ("one", "one", 9, None, "one.mp3"))
+    repo = D1VocabularyRepository(FakeD1(connection), "alice")
+    assert (await repo.update_transcript("one", "English text")).transcript == "English text"
+    assert (await repo.get_word("one")).transcript == "English text"
+    with pytest.raises(MissingError):
+        await repo.update_transcript("missing", "English")
     connection.close()
