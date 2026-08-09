@@ -16,6 +16,9 @@ from english_vocab_trainer.domain.models import (
     replay_word_state,
 )
 
+# SQL DDL and parameterized statements are intentionally kept verbatim so that
+# the local adapter can be audited against the D1 migration.
+
 
 class ConflictError(RuntimeError):
     pass
