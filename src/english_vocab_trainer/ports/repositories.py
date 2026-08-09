@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from english_vocab_trainer.domain.models import ReviewEvent, Settings, StudySession, Word, WordState
+
+type MaybeAwaitable[T] = T | Awaitable[T]
 
 
 class VocabularyRepository(Protocol):
