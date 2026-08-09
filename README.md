@@ -183,6 +183,15 @@ name; these restrictions prevent environment expansion from changing Litestream 
 prepare an ignored file containing `NAME=value` entries and run `fly secrets import --app
 "$FLY_APP" < .private/fly-production.env`.
 
+Before the first production deploy, prepare a pristine private R2-key seed in this exact order:
+audit and validate the full catalog; upload and verify all 2,000 private audio objects (including
+their SHA-256 metadata and sizes, with safe reruns); publish a new pristine R2-key SQLite seed; and
+then either seed the Fly volume or initialise and verify the Litestream replica from that seed.
+Only then perform the first deploy. Do not use a local acceptance database with review state as a
+production seed. `restore-if-db-not-exists` restores an existing replica, but without a verified
+seed or replica it allows the app to migrate an empty database; that first boot must be treated as
+blocked, not as a successful catalog deployment.
+
 Use three different least-privilege R2 credential pairs. The app's audio-read pair needs only
 object read/HEAD access to the private audio bucket. The offline upload/publish pair needs object write
 for the audio prefix (and only the explicit overwrite permission if force publishing is desired).
@@ -199,7 +208,7 @@ Run a restore drill against a **new** path while retaining the live database:
 
 The command refuses the live DB and its WAL/SHM paths or any existing output. It asks Litestream to
 restore into the new file, runs `PRAGMA quick_check`, verifies migrations `0001_initial.sql` and
-`0002_auth.sql`, and prints only word/review counts. Rehearse this manually against backup R2
+`0002_auth.sql` and `0003_tier.sql`, and prints only word/review counts. Rehearse this manually against backup R2
 credentials before relying on it. Actual disaster recovery requires stopping the app and attaching
 or swapping in a recovered volume/database; it never overwrites a live DB in place. Restore time
 depends on backup size and R2 availability, so this single-Machine personal setup has downtime and
@@ -269,9 +278,14 @@ manually, then rerun scan/audit before publishing:
 
 `scripts/ingest-env validate --profile full --source .. --catalog .private/full-catalog.jsonl`
 
+`scripts/ingest-env upload-audio --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
+
 `scripts/ingest-env publish --profile full --source .. --catalog .private/full-catalog.jsonl --database ./vocab.db --audio-backend r2 --dry-run`
 
-`scripts/ingest-env upload-audio --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
+These dry-runs only inspect the full plan; they neither upload audio nor create a seed database.
+For an actual production seed, upload and verify every audio object before publishing the pristine
+R2-key database, then seed the volume or initialise and verify the Litestream replica before first
+deploy as described in M3b.
 
 No catalog, manifest, journal, report, audio file, or generated SQLite database may be committed.
 The importer reads the source audio trees only; it never writes there. Do not start a 2,000-file
