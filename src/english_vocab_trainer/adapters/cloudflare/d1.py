@@ -174,5 +174,16 @@ class D1VocabularyRepository:
         )
         return Settings(int(cast(int | str, row["daily_target"]))) if row else Settings()
 
+    async def update_settings(self, daily_target: int) -> Settings:
+        if not 1 <= daily_target <= 100:
+            raise ValueError("daily_target must be between 1 and 100")
+        await self._run(
+            "INSERT INTO user_settings(user_id,daily_target) VALUES(?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET daily_target=excluded.daily_target",
+            self.user_id,
+            daily_target,
+        )
+        return Settings(daily_target)
+
     async def close(self) -> None:
         return None
