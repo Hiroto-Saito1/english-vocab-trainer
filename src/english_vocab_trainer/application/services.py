@@ -22,31 +22,30 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def shuffle_within_level_bands(words: list[Word], rng: Random) -> list[Word]:
-    grouped: dict[int | None, list[Word]] = {}
-    for word in words:
-        grouped.setdefault(word.level, []).append(word)
-    result: list[Word] = []
-    for level in sorted(level for level in grouped if level is not None) + [None]:
-        band = list(grouped.get(level, []))
-        rng.shuffle(band)
-        result.extend(band)
+def shuffled(words: list[Word], rng: Random) -> list[Word]:
+    """Return a random, without-replacement presentation order."""
+    result = list(words)
+    rng.shuffle(result)
     return result
 
 
 def select_session_words(
     repo: VocabularyRepository, mode: str, now: datetime, count: int | None, rng: Random
 ) -> list[Word]:
-    new = shuffle_within_level_bands(repo.list_words(limit=10_000), rng)
+    new = shuffled(repo.list_words(limit=10_000), rng)
     if mode == "screen":
         if count not in {20, 50, 100}:
             raise ValueError("screen count must be 20, 50, or 100")
         return new[:count]
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
-    due = repo.due_words(now, min(repo.get_settings().daily_target, 20))
+    target = repo.get_settings().daily_target
+    due = repo.due_words(now, target)
     due_ids = {word.id for word in due}
-    return due + [word for word in new if word.id not in due_ids][: max(0, 20 - len(due))]
+    selected = due + [word for word in new if word.id not in due_ids][: max(0, target - len(due))]
+    # Due cards win admission to the daily quota; their presentation order, and
+    # the new cards' order, are still random so a level band cannot dominate.
+    return shuffled(selected, rng)
 
 
 def create_study_session(

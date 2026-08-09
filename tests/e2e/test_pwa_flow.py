@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from json import dumps
 from pathlib import Path
 from typing import cast
 
@@ -287,6 +288,22 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
 
 
 @pytest.mark.e2e
+def test_mobile_pwa_empty_daily_session_says_all_caught_up(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, database = pwa_server
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(base_url)
+    for count in range(1, 4):
+        page.get_by_role("button", name="Known", exact=True).click()
+        wait_for_rows(database, count)
+    expect(page.locator("#card")).to_have_text("Daily study complete.")
+    page.reload()
+    expect(page.locator("#card")).to_have_text("All caught up / nothing due.")
+    expect(page.locator("#progress")).to_have_text("0 of 0")
+
+
+@pytest.mark.e2e
 def test_sync_keeps_only_conflicted_indexeddb_events(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
@@ -309,6 +326,7 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
 
     page.route("**/api/v1/review-events/batch", batch_response)
     page.goto(base_url)
+    wait_for_audio_cache(page)
     page.evaluate(
         """async ([first, second]) => Promise.race([((async () => {
           const db = await new Promise((resolve, reject) => {
@@ -334,6 +352,67 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
         [acknowledged, conflicted],
     )
     wait_for_outbox_ids(page, [conflicted])
+    expect(page.locator("#status")).to_have_text(
+        "Some review updates need attention and remain on this device."
+    )
+
+
+@pytest.mark.e2e
+def test_online_reconnect_chunks_more_than_two_hundred_outbox_events(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    batches: list[int] = []
+
+    def acknowledge(route: Route) -> None:
+        events = route.request.post_data_json
+        assert isinstance(events, list)
+        batches.append(len(events))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=dumps(
+                {
+                    "results": [
+                        {"id": event["id"], "word_id": event["word_id"], "status": "applied"}
+                        for event in events
+                    ],
+                    "acknowledged": [event["id"] for event in events],
+                }
+            ),
+        )
+
+    page.route("**/api/v1/review-events/batch", acknowledge)
+    page.goto(base_url)
+    wait_for_audio_cache(page)
+    page.context.set_offline(True)
+    events = [
+        {
+            "id": f"00000000-0000-0000-0000-{index:012d}",
+            "word_id": "word-0",
+            "action": "known",
+            "reviewed_at": "2026-01-01T00:00:00Z",
+        }
+        for index in range(1, 206)
+    ]
+    page.evaluate(
+        """async (events) => new Promise((resolve, reject) => {
+          const request = indexedDB.open("english-vocab-trainer", 1);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction("events", "readwrite");
+            events.forEach((event) => tx.objectStore("events").put(event));
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = () => { db.close(); reject(tx.error); };
+          };
+        })""",
+        events,
+    )
+    page.context.set_offline(False)
+    page.evaluate("window.dispatchEvent(new Event('online'))")
+    wait_for_empty_outbox(page)
+    assert batches == [100, 100, 5]
 
 
 @pytest.mark.e2e

@@ -80,7 +80,9 @@ def next_state(state: WordState, event: ReviewEvent) -> WordState:
         learning_steps=(timedelta(minutes=10),),
         relearning_steps=(timedelta(minutes=10),),
         maximum_interval=365,
-        enable_fuzzing=True,
+        # States are rebuilt for offline arrival and undo.  Random interval
+        # fuzz would make the same event history produce a different card.
+        enable_fuzzing=False,
     )
     rating = {
         Rating.AGAIN: FsrsRating.Again,

@@ -1,6 +1,8 @@
 const DB_NAME = "english-vocab-trainer";
 const STATE_KEY = "active-session";
 const AUDIO_CACHE = "pwa-private-audio-v3";
+const AUDIO_PRELOAD_CONCURRENCY = 4;
+const SYNC_BATCH_SIZE = 100;
 let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, undoDeadline: 0 };
 let busy = false, syncFlight = null, undoTimer = null;
 let audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
@@ -42,7 +44,7 @@ function render() {
   progress.textContent = `${Math.min(state.current + 1, state.cards.length)} of ${state.cards.length}`;
   undoButton.hidden = !state.event || state.undoDeadline <= Date.now();
   term.hidden = !revealed; transcript.hidden = !revealed; continueButton.hidden = !revealed;
-  if (!word) { state.phase = "complete"; card.textContent = "Daily study complete."; term.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = `${state.cards.length} of ${state.cards.length}`; saveState(); return; }
+  if (!word) { state.phase = "complete"; card.textContent = state.cards.length ? "Daily study complete." : "All caught up / nothing due."; term.hidden = true; transcript.hidden = true; audio.removeAttribute("src"); setActions(true); progress.textContent = `${state.cards.length} of ${state.cards.length}`; saveState(); return; }
   card.textContent = revealed ? "Review the word and continue when ready." : "Listen, then choose.";
   term.textContent = word.term; transcript.textContent = word.transcript || "Transcript is unavailable.";
   if (!revealed) { audio.src = word.audio_url; audio.currentTime = 0; setActions(false); play(); }
@@ -91,14 +93,19 @@ async function preload() {
   const sessionId = state.sessionId, epoch = audioCacheEpoch, urls = state.cards.map((word) => word.audio_url);
   audioCacheState = { sessionId, expected: urls.length, cached: 0, ready: false, failed: 0 };
   const cache = await caches.open(AUDIO_CACHE);
-  await Promise.all(urls.map(async (url) => {
-    try {
-      const response = await window.fetch(url);
-      if (audioCacheEpoch !== epoch || state.sessionId !== sessionId || response.status !== 200) throw new Error("audio unavailable");
-      await cache.put(new Request(url, { method: "GET" }), response.clone());
-      audioCacheState.cached += 1;
-    } catch (_) { audioCacheState.failed += 1; }
-  }));
+  let next = 0;
+  const load = async () => {
+    while (next < urls.length) {
+      const url = urls[next++];
+      try {
+        const response = await window.fetch(url);
+        if (audioCacheEpoch !== epoch || state.sessionId !== sessionId || response.status !== 200) throw new Error("audio unavailable");
+        await cache.put(new Request(url, { method: "GET" }), response.clone());
+        audioCacheState.cached += 1;
+      } catch (_) { audioCacheState.failed += 1; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(AUDIO_PRELOAD_CONCURRENCY, urls.length) }, load));
   audioCacheState.ready = true;
   if (audioCacheState.failed) showStatus("Some audio could not be saved for offline listening.");
   else showStatus("Audio is ready for offline listening.");
@@ -116,7 +123,24 @@ function startPreload() {
 
 async function sync() {
   if (syncFlight) return syncFlight;
-  syncFlight = (async () => { const events = await allEvents(); if (!events.length || !navigator.onLine) return; try { const response = await apiFetch("/api/v1/review-events/batch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(events) }); if (!response.ok) { showStatus("Review sync will retry when online."); return; } const payload = await response.json(); await Promise.all(payload.acknowledged.map(removeEvent)); } catch (_) { showStatus("Review sync will retry when online."); } })();
+  syncFlight = (async () => {
+    const events = await allEvents();
+    if (!events.length || !navigator.onLine) return;
+    let unresolved = false;
+    try {
+      for (let offset = 0; offset < events.length; offset += SYNC_BATCH_SIZE) {
+        const response = await apiFetch("/api/v1/review-events/batch", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(events.slice(offset, offset + SYNC_BATCH_SIZE)),
+        });
+        if (!response.ok) { showStatus("Review sync will retry when online."); return; }
+        const payload = await response.json();
+        await Promise.all(payload.acknowledged.map(removeEvent));
+        unresolved ||= payload.results.some((result) => result.status === "conflict" || result.status === "missing");
+      }
+      if (unresolved) showStatus("Some review updates need attention and remain on this device.");
+    } catch (_) { showStatus("Review sync will retry when online."); }
+  })();
   try { await syncFlight; } finally { syncFlight = null; }
 }
 async function answer(action) {
