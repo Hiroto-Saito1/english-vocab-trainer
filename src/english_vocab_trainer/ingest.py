@@ -27,6 +27,18 @@ _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
 _TERM_VALUE = re.compile(r"[A-Za-z][A-Za-z '\-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _WORDS = re.compile(r"[^\W\d_]+", re.UNICODE)
+_COMMON_ENGLISH_PUNCTUATION = str.maketrans(
+    {
+        "\u00a0": " ",  # non-breaking space
+        "\u2018": "'",  # left single quotation mark
+        "\u2019": "'",  # right single quotation mark / apostrophe
+        "\u201c": '"',  # left double quotation mark
+        "\u201d": '"',  # right double quotation mark
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2026": "...",  # ellipsis
+    }
+)
 CATALOG_SCHEMA_VERSION = 1
 _ERROR_REASONS = frozenset(
     {
@@ -118,6 +130,8 @@ class MlxWhisperTranscriber:
     """Lazy MLX wrapper so scan/publish do not require a downloaded model."""
 
     model = "mlx-community/whisper-large-v3-turbo"
+    temperature = 0.0
+    condition_on_previous_text = False
 
     def transcribe(self, path: Path) -> str:
         try:
@@ -130,7 +144,13 @@ class MlxWhisperTranscriber:
             raise RuntimeError(
                 "MLX could not load; run scripts/ingest-env doctor before transcription"
             ) from None
-        result: Any = mlx_whisper.transcribe(str(path), path_or_hf_repo=self.model, language="en")
+        result: Any = mlx_whisper.transcribe(
+            str(path),
+            path_or_hf_repo=self.model,
+            language="en",
+            temperature=self.temperature,
+            condition_on_previous_text=self.condition_on_previous_text,
+        )
         return str(result["text"]).strip()
 
 
@@ -610,7 +630,8 @@ def catalog_fingerprint(records: Iterable[CatalogRecord]) -> str:
 
 
 def validate_transcript(transcript: str) -> str:
-    value = validate_english_transcript(transcript)
+    value = unicodedata.normalize("NFKC", transcript).translate(_COMMON_ENGLISH_PUNCTUATION)
+    value = validate_english_transcript(value)
     preceding_latin = False
     for character in value:
         category = unicodedata.category(character)

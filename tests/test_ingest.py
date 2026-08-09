@@ -156,10 +156,16 @@ def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> Non
         with pytest.raises(ValueError, match="Latin|English only"):
             validate_transcript(non_latin)
     assert validate_transcript("Café gives a clear English definition.")
+    assert (
+        validate_transcript("“Café”\u2014a useful definition\u2026 with an example.\u00a0")
+        == '"Café"-a useful definition... with an example.'
+    )
     with pytest.raises(ValueError, match="unsafe Unicode"):
         validate_transcript("A clear\x00 English definition sentence.")
     with pytest.raises(ValueError, match="ASCII punctuation"):
         validate_transcript("A clear English definition sentence. 😀")
+    with pytest.raises(ValueError, match="English only|ASCII punctuation"):
+        validate_transcript("A clear English definition。 sentence.")
     with pytest.raises(ValueError, match="repeated-word"):
         validate_transcript("An English definition says on on on on on on on on for too long.")
     with pytest.raises(ValueError, match="repeated-phrase"):
@@ -188,6 +194,8 @@ def test_mlx_transcriber_uses_english_large_turbo(
     assert result == "English definition and example."
     assert calls["language"] == "en"
     assert calls["path_or_hf_repo"] == "mlx-community/whisper-large-v3-turbo"
+    assert calls["temperature"] == 0.0
+    assert calls["condition_on_previous_text"] is False
 
 
 def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
