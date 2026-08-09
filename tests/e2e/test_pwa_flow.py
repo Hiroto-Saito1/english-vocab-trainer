@@ -373,6 +373,62 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
 
 
 @pytest.mark.e2e
+def test_final_known_undo_restores_the_final_card(page: Page, pwa_server: tuple[str, Path]) -> None:
+    base_url, database = pwa_server
+    page.goto(base_url)
+    for count in range(1, 3):
+        page.get_by_role("button", name="Known", exact=True).click()
+        wait_for_rows(database, count)
+    expect(page.locator("#progress")).to_have_text("3 of 3")
+
+    page.get_by_role("button", name="Known", exact=True).click()
+    assert len(wait_for_rows(database, 3)) == 3
+    expect(page.locator("#card")).to_have_text("Daily study complete.")
+    expect(page.locator("#undo")).to_be_enabled()
+
+    page.get_by_role("button", name="Undo", exact=True).click()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and event_rows(database)[2]["voided_at"] is None:
+        time.sleep(0.03)
+    assert event_rows(database)[2]["voided_at"] is not None
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    expect(page.locator("#progress")).to_have_text("3 of 3")
+    expect(page.locator("#undo")).to_be_disabled()
+    restored = page.evaluate("window.__pwa.getState()")
+    assert restored["event"] is None
+    assert restored["learningQueue"] == []
+
+
+@pytest.mark.e2e
+def test_final_offline_unknown_continue_undo_restores_the_final_card(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, database = pwa_server
+    page.goto(base_url)
+    for count in range(1, 3):
+        page.get_by_role("button", name="Known", exact=True).click()
+        wait_for_rows(database, count)
+    expect(page.locator("#progress")).to_have_text("3 of 3")
+
+    page.context.set_offline(True)
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#term")).to_be_visible()
+    page.get_by_role("button", name="Continue", exact=True).click()
+    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
+    expect(page.locator("#undo")).to_be_enabled()
+
+    page.get_by_role("button", name="Undo", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    expect(page.locator("#progress")).to_have_text("3 of 3")
+    expect(page.locator("#undo")).to_be_disabled()
+    wait_for_empty_outbox(page)
+    assert len(event_rows(database)) == 2
+    restored = page.evaluate("window.__pwa.getState()")
+    assert restored["event"] is None
+    assert restored["learningQueue"] == []
+
+
+@pytest.mark.e2e
 def test_undo_persists_after_clock_jump_without_replaying_audio(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:

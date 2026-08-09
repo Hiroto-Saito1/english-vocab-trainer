@@ -244,7 +244,11 @@ async function undoLast() {
       if (event.wasLearning && event.learningEntry) state.learningQueue.push(event.learningEntry);
     }
     if (event.action === "known" && event.learningEntry) state.learningQueue.push(event.learningEntry);
-    state.current = Math.max(0, state.current - (!event.wasLearning && state.phase === "listening" ? 1 : 0)); state.revealedLearningWordId = null; state.phase = "listening"; state.event = null; await saveState(); render();
+    // An initial-card answer advances its cursor immediately for Known and on
+    // Continue for Unknown.  A revealed Unknown has not advanced yet; all
+    // other non-learning phases (including waiting and complete) have.
+    const restoreInitialCursor = !event.wasLearning && state.phase !== "revealed";
+    state.current = Math.max(0, state.current - (restoreInitialCursor ? 1 : 0)); state.revealedLearningWordId = null; state.phase = "listening"; state.event = null; await saveState(); render();
   } catch (_) { showStatus("Undo could not be completed. Please try again."); render(); }
   busy = false;
 }
