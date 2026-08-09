@@ -10,9 +10,9 @@ from english_vocab_trainer.adapters.local.sqlite import (
     MissingError,
     SQLiteVocabularyRepository,
 )
-from english_vocab_trainer.ports.errors import ConcurrentUpdateError
 from english_vocab_trainer.application.services import submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Word
+from english_vocab_trainer.ports.errors import ConcurrentUpdateError
 
 _OPEN: list[SQLiteVocabularyRepository] = []
 

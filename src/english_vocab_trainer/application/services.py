@@ -14,6 +14,7 @@ from english_vocab_trainer.domain.models import (
     WordState,
     rating_for_action,
 )
+from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConflictError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
@@ -114,7 +115,7 @@ def submit_review(
             and existing.rating in {Rating.EASY, Rating.GOOD}
         )
         if not compatible:
-            raise RuntimeError("review event conflict")
+            raise EventConflictError("review event conflict")
         return ReviewResult(
             id=event_id,
             word_id=word_id,
@@ -137,6 +138,6 @@ def submit_review(
                 state=state,
                 created=True,
             )
-        except RuntimeError:
+        except ConcurrentUpdateError:
             continue
-    raise RuntimeError("CAS retry exhausted")
+    raise ConcurrentUpdateError("CAS retry exhausted")
