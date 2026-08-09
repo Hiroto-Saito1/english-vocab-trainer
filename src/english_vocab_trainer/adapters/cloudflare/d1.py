@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from english_vocab_trainer.domain.models import Word
@@ -11,6 +11,14 @@ def _record(value: object) -> dict[str, object] | None:
         return None
     native = value.to_py() if hasattr(value, "to_py") else value
     return cast(dict[str, object], native)
+
+
+def _dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat() if value else None
 
 
 def _records(value: object) -> list[dict[str, object]]:
