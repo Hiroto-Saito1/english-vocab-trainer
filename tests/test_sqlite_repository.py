@@ -10,6 +10,7 @@ from english_vocab_trainer.adapters.local.sqlite import (
     MissingError,
     SQLiteVocabularyRepository,
 )
+from english_vocab_trainer.ports.errors import ConcurrentUpdateError
 from english_vocab_trainer.application.services import submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Word
 
@@ -194,7 +195,7 @@ def test_stale_cas_has_no_partial_event(tmp_path: Path) -> None:
     r = repo(tmp_path / "v.db")
     words(r)
     r.append_event(event("nine", datetime.now(UTC)), 0)
-    with pytest.raises(ConflictError):
+    with pytest.raises(ConcurrentUpdateError):
         r.append_event(event("nine", datetime.now(UTC)), 0)
     assert r.progress(datetime.now(UTC))["reviewed"] == 1
     r.close()

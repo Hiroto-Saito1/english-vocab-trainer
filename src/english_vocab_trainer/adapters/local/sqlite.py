@@ -18,7 +18,7 @@ from english_vocab_trainer.domain.models import (
 
 # SQL DDL and parameterized statements are intentionally kept verbatim so that
 # the local adapter can be audited against the D1 migration.
-from english_vocab_trainer.ports.errors import EventConflictError
+from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConflictError
 from english_vocab_trainer.ports.errors import MissingError as PortMissingError
 
 ConflictError = EventConflictError
@@ -182,7 +182,7 @@ class SQLiteVocabularyRepository:
                 raise MissingError("word not found")
             state = self.state(event.word_id)
             if state.version != expected_version:
-                raise EventConflictError("CAS conflict")
+                raise ConcurrentUpdateError("CAS conflict")
             self.db.execute(
                 "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
                 (
