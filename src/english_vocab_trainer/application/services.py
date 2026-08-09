@@ -58,6 +58,21 @@ def shuffle_within_level_bands(words: list[Word], rng: Random) -> list[Word]:
     return result
 
 
+def select_session_words(
+    repo: VocabularyRepository, mode: str, now: datetime, count: int | None, rng: Random
+) -> list[Word]:
+    new = shuffle_within_level_bands(repo.list_words(limit=10_000), rng)
+    if mode == "screen":
+        if count not in {20, 50, 100}:
+            raise ValueError("screen count must be 20, 50, or 100")
+        return new[:count]
+    if mode != "daily":
+        raise ValueError("mode must be daily or screen")
+    due = repo.due_words(now, min(repo.get_settings().daily_target, 30))
+    due_ids = {word.id for word in due}
+    return due + [word for word in new if word.id not in due_ids][:20]
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewResult:
     id: UUID

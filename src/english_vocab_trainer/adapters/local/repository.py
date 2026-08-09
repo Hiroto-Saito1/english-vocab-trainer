@@ -26,7 +26,11 @@ class InMemoryVocabularyRepository:
         return self
 
     def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
-        selected = [w for w in self.words.values() if levels is None or w.level in levels]
+        selected = [
+            w
+            for w in self.words.values()
+            if not self.has_active_review(w.id) and (levels is None or w.level in levels)
+        ]
         return sorted(selected, key=lambda w: (w.level is None, w.level or 99, w.id))[:limit]
 
     def due_words(self, now: datetime, limit: int) -> list[Word]:
