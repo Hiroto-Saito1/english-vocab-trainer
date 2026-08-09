@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.domain.models import Word, WordState
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -102,6 +102,24 @@ class D1VocabularyRepository:
             )
             for row in rows
         ]
+
+    async def state(self, word_id: str) -> WordState:
+        row = await self._first(
+            "SELECT * FROM user_word_state WHERE user_id=? AND word_id=?", self.user_id, word_id
+        )
+        if row is None:
+            return WordState(word_id, datetime.min.replace(tzinfo=UTC))
+        return WordState(
+            word_id,
+            _dt(cast(str | None, row["due_at"])) or datetime.min.replace(tzinfo=UTC),
+            float(cast(float | str, row["stability"])),
+            float(cast(float | str, row["difficulty"])),
+            _dt(cast(str | None, row["first_seen_at"])),
+            _dt(cast(str | None, row["first_known_at"])),
+            _dt(cast(str | None, row["last_known_at"])),
+            int(cast(int | str, row["version"])),
+            cast(str | None, row["card_json"]),
+        )
 
     async def close(self) -> None:
         return None
