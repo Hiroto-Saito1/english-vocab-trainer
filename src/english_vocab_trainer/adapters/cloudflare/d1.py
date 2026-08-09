@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import UUID
 
-from english_vocab_trainer.domain.models import Word, WordState
+from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word, WordState
 
 
 def _record(value: object) -> dict[str, object] | None:
@@ -129,6 +130,22 @@ class D1VocabularyRepository:
             word_id,
         )
         return bool(int(cast(int | str, row["active"]))) if row else False
+
+    async def get_event(self, event_id: UUID) -> ReviewEvent | None:
+        row = await self._first(
+            "SELECT * FROM review_events WHERE id=? AND user_id=?", str(event_id), self.user_id
+        )
+        if row is None:
+            return None
+        reviewed = _dt(cast(str | None, row["reviewed_at"]))
+        assert reviewed is not None
+        return ReviewEvent(
+            event_id,
+            str(row["word_id"]),
+            Rating(str(row["rating"])),
+            reviewed,
+            _dt(cast(str | None, row["voided_at"])),
+        )
 
     async def close(self) -> None:
         return None
