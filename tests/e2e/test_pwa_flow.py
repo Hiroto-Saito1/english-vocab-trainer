@@ -275,34 +275,35 @@ def install_audio_presentation_spy(page: Page) -> None:
     )
 
 
-def wait_for_persisted_undo_expiry(page: Page) -> None:
-    persisted = page.evaluate(
-        """async () => {
-          const deadline = Date.now() + 2_000;
-          const savedState = () => Promise.race([
-            new Promise((resolve, reject) => {
-              const request = indexedDB.open("english-vocab-trainer", 1);
-              request.onerror = () => reject(request.error);
-              request.onsuccess = () => {
-                const db = request.result;
-                const get = db.transaction("state").objectStore("state").get("active-session");
-                get.onerror = () => { db.close(); reject(get.error); };
-                get.onsuccess = () => { db.close(); resolve(get.result?.value); };
-              };
-            }),
-            new Promise((_, reject) => setTimeout(
-              () => reject(new Error("state probe timed out")), 500
-            )),
-          ]);
-          while (Date.now() < deadline) {
-            const state = await savedState();
-            if (state && state.event === null && state.undoDeadline === 0) return true;
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-          return false;
-        }"""
+def store_legacy_undo_metadata(page: Page) -> None:
+    updated = page.evaluate(
+        """async () => Promise.race([((async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("state", "readwrite");
+            const store = tx.objectStore("state"), request = store.get("active-session");
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+              const saved = request.result;
+              if (!saved?.value?.event) return reject(new Error("missing saved event"));
+              saved.value.undoDeadline = 1;
+              store.put(saved);
+            };
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+          });
+          db.close();
+          return true;
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("legacy state update timed out")), 10_000
+        ))])"""
     )
-    assert persisted is True, "Undo expiry was not persisted to IndexedDB within two seconds"
+    assert updated is True
 
 
 @pytest.mark.e2e
@@ -314,22 +315,40 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#tier")).to_be_hidden()
     expect(page.locator("#transcript")).to_be_hidden()
     expect(page.locator("#progress")).to_have_text("1 of 3")
-
-    page.get_by_role("button", name="Known", exact=True).click()
-    expect(page.locator("#progress")).to_have_text("2 of 3")
-    assert wait_for_rows(database, 1)[0]["rating"] == "easy"
+    expect(page.locator("#undo")).to_be_visible()
+    expect(page.locator("#undo")).to_be_disabled()
 
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#term")).to_be_visible()
     expect(page.locator("#tier")).to_contain_text("· SVL 2")
     expect(page.locator("#transcript")).to_contain_text("English definition")
-    assert wait_for_rows(database, 2)[1]["rating"] == "again"
+    expect(page.locator("#undo")).to_be_enabled()
+    assert wait_for_rows(database, 1)[0]["rating"] == "again"
+    # A persisted deadline from the previous implementation is intentionally
+    # ignored: the latest saved event stays undoable after reload.
+    store_legacy_undo_metadata(page)
     page.reload()
     expect(page.locator("#term")).to_be_visible()
-    assert len(event_rows(database)) == 2
+    expect(page.locator("#undo")).to_be_enabled()
+    assert len(event_rows(database)) == 1
 
     page.get_by_role("button", name="Continue").click()
-    expect(page.locator("#progress")).to_have_text("3 of 3")
+    expect(page.locator("#progress")).to_have_text("2 of 3")
+    expect(page.locator("#undo")).to_be_enabled()
+    page.get_by_role("button", name="Undo").click()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and event_rows(database)[0]["voided_at"] is None:
+        time.sleep(0.03)
+    assert event_rows(database)[0]["voided_at"] is not None
+    expect(page.locator("#progress")).to_have_text("1 of 3")
+    expect(page.locator("#undo")).to_be_disabled()
+    assert page.evaluate("window.__pwa.getState().learningQueue") == []
+
+    # A new answer replaces the single Undo target.  Undoing the newer answer
+    # must not void the earlier acknowledged Known answer.
+    page.get_by_role("button", name="Known", exact=True).click()
+    assert wait_for_rows(database, 2)[1]["rating"] == "easy"
+    expect(page.locator("#undo")).to_be_enabled()
     page.get_by_role("button", name="Unknown", exact=True).click()
     assert len(wait_for_rows(database, 3)) == 3
     page.get_by_role("button", name="Undo").click()
@@ -337,19 +356,24 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     while time.monotonic() < deadline and event_rows(database)[2]["voided_at"] is None:
         time.sleep(0.03)
     assert event_rows(database)[2]["voided_at"] is not None
-    expect(page.locator("#progress")).to_have_text("3 of 3")
+    assert event_rows(database)[1]["voided_at"] is None
+    expect(page.locator("#progress")).to_have_text("2 of 3")
+    expect(page.locator("#undo")).to_be_disabled()
 
+    # Pending offline events are removable too, without adding a server row.
     page.context.set_offline(True)
     page.get_by_role("button", name="Known", exact=True).click()
-    expect(page.locator("#card")).to_contain_text("Waiting for the next review:")
-    page.get_by_role("button", name="Undo").click()
     expect(page.locator("#progress")).to_have_text("3 of 3")
+    expect(page.locator("#undo")).to_be_enabled()
+    page.get_by_role("button", name="Undo").click()
+    expect(page.locator("#progress")).to_have_text("2 of 3")
+    expect(page.locator("#undo")).to_be_disabled()
     assert len(event_rows(database)) == 3
     page.context.set_offline(False)
 
 
 @pytest.mark.e2e
-def test_undo_expiry_does_not_restart_revealed_audio(
+def test_undo_persists_after_clock_jump_without_replaying_audio(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
     base_url, _ = pwa_server
@@ -360,52 +384,7 @@ def test_undo_expiry_does_not_restart_revealed_audio(
 
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#term")).to_be_visible()
-    assert page.evaluate("window.__audioPresentationSpy.calls") == {
-        "play": 1,
-        "pause": 1,
-        "seek": 1,
-    }
-    audio_source = page.locator("#audio").get_attribute("src")
-    assert audio_source
-
-    page.evaluate("window.__pwa.render()")
-    assert page.evaluate("window.__audioPresentationSpy.calls") == {
-        "play": 1,
-        "pause": 1,
-        "seek": 1,
-    }
-
-    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
-    page.evaluate(
-        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
-        "window.__pwa.render(); }",
-        undo_deadline,
-    )
-    assert page.evaluate("window.__pwa.getState().event") is None
-    assert page.locator("#undo").is_hidden()
-    assert page.locator("#audio").get_attribute("src") == audio_source
-    assert page.evaluate("window.__audioPresentationSpy.calls") == {
-        "play": 1,
-        "pause": 1,
-        "seek": 1,
-    }
-
-
-@pytest.mark.e2e
-def test_natural_undo_expiry_persists_without_replaying_audio(
-    page: Page, pwa_server: tuple[str, Path]
-) -> None:
-    base_url, _ = pwa_server
-    page.goto(base_url)
-    expect(page.locator("#progress")).to_have_text("1 of 3")
-    install_audio_presentation_spy(page)
-    page.evaluate(
-        "window.__pwaTestClock = { undoWindowMs: 750 }; window.__audioPresentationSpy.reset()"
-    )
-
-    page.get_by_role("button", name="Unknown", exact=True).click()
-    expect(page.locator("#term")).to_be_visible()
-    expect(page.locator("#undo")).to_be_visible()
+    expect(page.locator("#undo")).to_be_enabled()
     audio_source = page.locator("#audio").get_attribute("src")
     assert audio_source
     assert page.evaluate("window.__audioPresentationSpy.calls") == {
@@ -414,21 +393,19 @@ def test_natural_undo_expiry_persists_without_replaying_audio(
         "seek": 1,
     }
 
-    expect(page.locator("#undo")).to_be_hidden(timeout=2_000)
-    wait_for_persisted_undo_expiry(page)
-    assert page.evaluate("window.__pwa.getState().event") is None
-    assert page.evaluate("window.__pwa.getState().undoDeadline") == 0
+    future = page.evaluate("Date.now() + 60_000")
+    page.evaluate(
+        "(now) => { window.__pwaTestClock = { now: () => now }; window.__pwa.render(); }",
+        future,
+    )
+    assert page.evaluate("window.__pwa.getState().event") is not None
+    expect(page.locator("#undo")).to_be_enabled()
     assert page.locator("#audio").get_attribute("src") == audio_source
     assert page.evaluate("window.__audioPresentationSpy.calls") == {
         "play": 1,
         "pause": 1,
         "seek": 1,
     }
-
-    page.reload()
-    expect(page.locator("#term")).to_be_visible(timeout=10_000)
-    assert page.evaluate("window.__pwa.getState().event") is None
-    assert page.evaluate("window.__pwa.getState().undoDeadline") == 0
 
 
 @pytest.mark.e2e
@@ -438,13 +415,18 @@ def test_mobile_pwa_empty_daily_session_says_all_caught_up(
     base_url, database = pwa_server
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(base_url)
+    expect(page.locator("#undo")).to_be_visible()
+    expect(page.locator("#undo")).to_be_disabled()
     for count in range(1, 4):
         page.get_by_role("button", name="Known", exact=True).click()
         wait_for_rows(database, count)
     expect(page.locator("#card")).to_have_text("Daily study complete.")
+    expect(page.locator("#undo")).to_be_enabled()
     page.reload()
     expect(page.locator("#card")).to_have_text("All caught up / nothing due.")
     expect(page.locator("#progress")).to_have_text("0 of 0")
+    expect(page.locator("#undo")).to_be_visible()
+    expect(page.locator("#undo")).to_be_disabled()
 
 
 @pytest.mark.e2e
@@ -478,18 +460,12 @@ def test_unknown_learning_replays_after_injected_ten_minute_clock(
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
     replayed = page.evaluate("window.__pwa.getState().learningQueue[0]")
     assert replayed["eventId"] == queued["eventId"]
-    # A learning retry remains revealable even after its five-second Undo data
-    # expires, and Continue never advances the initial admission cursor.
+    # A learning retry remains revealable, and Continue never advances the
+    # initial admission cursor.
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#continue")).to_be_visible()
+    expect(page.locator("#undo")).to_be_enabled()
     retry = page.evaluate("window.__pwa.getState().learningQueue[0]")
-    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
-    page.evaluate(
-        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
-        "window.__pwa.render(); }",
-        undo_deadline,
-    )
-    assert page.evaluate("window.__pwa.getState().event") is None
     resumed = page.evaluate("window.__pwa.getState()")
     assert resumed["revealedLearningWordId"], resumed
     assert resumed["phase"] == "revealed", resumed
@@ -505,16 +481,10 @@ def test_unknown_learning_replays_after_injected_ten_minute_clock(
         retry["due_at"],
     )
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
-    # A second expired retry also leaves the cursor clamped at the initial total.
+    # A second retry also leaves the cursor clamped at the initial total.
     page.get_by_role("button", name="Unknown", exact=True).click()
     expect(page.locator("#continue")).to_be_visible()
     retry_again = page.evaluate("window.__pwa.getState().learningQueue[0]")
-    undo_deadline = page.evaluate("window.__pwa.getState().undoDeadline")
-    page.evaluate(
-        "(deadline) => { window.__pwaTestClock = { now: () => deadline + 1 }; "
-        "window.__pwa.render(); }",
-        undo_deadline,
-    )
     page.get_by_role("button", name="Continue", exact=True).click()
     assert page.evaluate("window.__pwa.getState().current") == page.evaluate(
         "window.__pwa.getState().cards.length"
@@ -831,6 +801,8 @@ def test_offline_audio_outbox_rotation_and_private_reset(
     )
     assert private_keys == []
     assert db_state == [[], []]
+    expect(page.locator("#undo")).to_be_visible()
+    expect(page.locator("#undo")).to_be_disabled()
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#status")).to_have_text("Reconnect to start a new study session.")
 
