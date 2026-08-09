@@ -12,8 +12,21 @@ from english_vocab_trainer.adapters.local.sqlite import (
 from english_vocab_trainer.domain.models import Rating, ReviewEvent, Word
 
 
+_OPEN: list[SQLiteVocabularyRepository] = []
+
+
+@pytest.fixture(autouse=True)
+def close_repositories() -> object:
+    yield
+    for repository in _OPEN:
+        repository.close()
+    _OPEN.clear()
+
+
 def repo(path: Path, user: str = "alice") -> SQLiteVocabularyRepository:
-    return SQLiteVocabularyRepository(path, user)
+    repository = SQLiteVocabularyRepository(path, user)
+    _OPEN.append(repository)
+    return repository
 
 
 def words(r: SQLiteVocabularyRepository) -> None:
