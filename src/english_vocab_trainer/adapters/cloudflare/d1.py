@@ -48,6 +48,10 @@ class D1VocabularyRepository:
         )
         return _records(rows)
 
+    async def _count(self, sql: str, *params: object) -> int:
+        row = await self._first(sql, *params)
+        return int(cast(int | str, row["value"])) if row else 0
+
     async def get_word(self, word_id: str) -> Word | None:
         row = await self._first(
             "SELECT id,term,level,transcript,audio_key FROM words WHERE id=?", word_id
