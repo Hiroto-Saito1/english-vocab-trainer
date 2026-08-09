@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from random import Random
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
@@ -20,7 +20,7 @@ from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.adapters.local.sqlite import MissingError
 from english_vocab_trainer.application.services import create_study_session, submit_review
-from english_vocab_trainer.domain.models import ReviewAction, ReviewEvent
+from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.container import (
     AppContainer,
@@ -88,6 +88,19 @@ class SessionOut(BaseModel):
     mode: str
     created_at: datetime
     items: list[WordOut]
+
+
+class EventResultOut(BaseModel):
+    id: UUID
+    word_id: str
+    status: Literal["applied", "idempotent", "voided", "conflict", "missing"]
+    rating: Rating | None = None
+    detail: str | None = None
+
+
+class BatchOut(BaseModel):
+    results: list[EventResultOut]
+    acknowledged: list[UUID]
 
 
 @router.get("/", response_class=HTMLResponse)
