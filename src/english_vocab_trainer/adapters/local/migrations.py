@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.resources
 import sqlite3
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 
 class MigrationError(RuntimeError):
     pass
+
+
+def packaged_migrations() -> Traversable:
+    """Return migrations bundled inside the installed Python package."""
+    return importlib.resources.files("english_vocab_trainer.migrations")
+
+
+def configure_connection(connection: sqlite3.Connection) -> None:
+    """Use the same safe SQLite settings for every repository and auth connection."""
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
 
 
 def _statements(sql: str) -> list[str]:
@@ -30,14 +45,26 @@ def _statements(sql: str) -> list[str]:
     return statements
 
 
-def apply_migrations(connection: sqlite3.Connection, directory: Path) -> None:
-    connection.execute("PRAGMA foreign_keys = ON")
+def apply_migrations(
+    connection: sqlite3.Connection,
+    directory: Path | Traversable | None = None,
+) -> None:
+    configure_connection(connection)
+    migration_directory = directory or packaged_migrations()
     connection.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations("
         "version TEXT PRIMARY KEY, checksum TEXT NOT NULL, "
         "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     )
-    for path in sorted(directory.glob("*.sql")):
+    paths = sorted(
+        (
+            candidate
+            for candidate in migration_directory.iterdir()
+            if candidate.name.endswith(".sql")
+        ),
+        key=lambda candidate: candidate.name,
+    )
+    for path in paths:
         sql = path.read_text(encoding="utf-8")
         checksum = hashlib.sha256(sql.encode()).hexdigest()
         existing = connection.execute(

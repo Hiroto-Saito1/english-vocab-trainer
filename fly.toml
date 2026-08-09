@@ -1,0 +1,38 @@
+# This is a template: deploy/render_fly_config.py inserts both app and volume.
+app = "${FLY_APP}"
+primary_region = "nrt"
+kill_signal = "SIGTERM"
+kill_timeout = 45
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  strategy = "immediate"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "15s"
+    method = "GET"
+    path = "/readyz"
+    timeout = "5s"
+    headers = { Host = "${FLY_HOST}", X-Forwarded-Proto = "https" }
+
+# Render this template with deploy/render_fly_config.py and FLY_APP/FLY_VOLUME. The
+# deploy workflow passes the rendered file to flyctl; raw interpolation is not
+# accepted by Fly TOML.
+[[mounts]]
+  source = "${FLY_VOLUME}"
+  destination = "/data"
+  snapshot_retention = 14
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

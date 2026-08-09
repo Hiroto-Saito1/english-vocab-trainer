@@ -1,0 +1,22 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      FLY_APP: ${{ vars.FLY_APP }}
+      FLY_VOLUME: ${{ vars.FLY_VOLUME }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: superfly/flyctl-actions/setup-flyctl@e99bc7e62bc93bbf0a0de16fc57a2149280c186a # v1.5
+      - run: python deploy/render_fly_config.py --output "$RUNNER_TEMP/fly.toml" --app "$FLY_APP" --volume "$FLY_VOLUME"
+      - run: flyctl deploy --remote-only --config "$RUNNER_TEMP/fly.toml" --app "$FLY_APP"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - run: flyctl scale count 1 --yes --app "$FLY_APP"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

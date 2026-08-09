@@ -17,7 +17,7 @@ class SQLiteLoginAttemptLimiter:
         cutoff = int((now - timedelta(minutes=15)).timestamp())
         connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         try:
-            apply_migrations(connection, Path(__file__).parents[4] / "migrations")
+            apply_migrations(connection)
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM login_attempts WHERE attempted_at<?", (cutoff,))
             count = int(connection.execute("SELECT count(*) FROM login_attempts").fetchone()[0])
@@ -40,7 +40,7 @@ class SQLiteLoginAttemptLimiter:
     def clear(self) -> None:
         connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         try:
-            apply_migrations(connection, Path(__file__).parents[4] / "migrations")
+            apply_migrations(connection)
             connection.execute("DELETE FROM login_attempts")
         finally:
             connection.close()

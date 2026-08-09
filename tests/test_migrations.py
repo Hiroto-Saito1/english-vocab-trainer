@@ -6,6 +6,17 @@ import pytest
 from english_vocab_trainer.adapters.local.migrations import MigrationError, apply_migrations
 
 
+def test_packaged_migrations_and_connection_pragmas_work_without_a_checkout(tmp_path: Path) -> None:
+    connection = sqlite3.connect(tmp_path / "installed.db")
+    apply_migrations(connection)
+    versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+    assert versions == {"0001_initial.sql", "0002_auth.sql"}
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    connection.close()
+
+
 def test_migrations_are_idempotent_and_recorded(tmp_path: Path) -> None:
     directory = tmp_path / "migrations"
     directory.mkdir()

@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
@@ -43,6 +44,7 @@ from english_vocab_trainer.web.container import (
     ConfigurationError,
     audio_store_from_env,
     auth_from_env,
+    trusted_hosts_from_env,
 )
 from english_vocab_trainer.web.dependencies import audio_store, csrf, identity
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
@@ -154,8 +156,24 @@ def home(request: Request) -> Response:
 
 
 @router.get("/health", include_in_schema=False)
+@router.get("/healthz", include_in_schema=False)
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/readyz", include_in_schema=False)
+def readiness(request: Request) -> dict[str, str]:
+    """A public readiness probe that exercises opening and migrating SQLite only."""
+    container = request.app.state.container
+    try:
+        repository = container.repositories.for_user("healthcheck")
+        try:
+            repository.progress(datetime.now(UTC))
+        finally:
+            repository.close()
+    except Exception as exc:
+        raise HTTPException(503, "database is not ready") from exc
+    return {"status": "ready"}
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -449,6 +467,11 @@ def transcript(
 def create_app(container: AppContainer) -> FastAPI:
     new_app = FastAPI(title="English Vocab Trainer", version="1.0.0")
     new_app.state.container = container
+    if container.environment == "production":
+        # A manually assembled production container is useful in tests; the
+        # env factory never permits this fallback for an internet-facing app.
+        allowed_hosts = list(container.trusted_hosts or ("localhost", "127.0.0.1", "testserver"))
+        new_app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @new_app.middleware("http")
     async def private_response_cache_control(
@@ -462,6 +485,16 @@ def create_app(container: AppContainer) -> FastAPI:
             or path == "/login"
         ):
             response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+            "form-action 'self'; img-src 'self'; media-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; connect-src 'self'"
+        )
+        if container.environment == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
     new_app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
@@ -489,6 +522,7 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
             audio_store_from_env(environ),
             "production",
             auth=auth_from_env(environ, database, secure_cookies=True),
+            trusted_hosts=trusted_hosts_from_env(environ),
         )
     except (KeyError, ConfigurationError) as exc:
         raise ConfigurationError(

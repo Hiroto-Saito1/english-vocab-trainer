@@ -41,7 +41,7 @@ class SQLiteVocabularyRepository:
             sqlite3.connect(path, isolation_level=None, check_same_thread=False),
         )
         self.db.row_factory = sqlite3.Row
-        apply_migrations(self.db, Path(__file__).parents[4] / "migrations")
+        apply_migrations(self.db)
 
     def close(self) -> None:
         self.db.close()

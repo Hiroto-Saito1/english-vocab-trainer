@@ -20,6 +20,7 @@ ingest = ["mlx-whisper>=0.4", "tqdm>=4.66,<4.70"]
 
 [project.scripts]
 vocab-ingest = "english_vocab_trainer.ingest:main"
+vocab-restore-drill = "english_vocab_trainer.restore_drill:main"
 
 [tool.ruff]
 line-length = 100
@@ -54,4 +55,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/english_vocab_trainer"]
-artifacts = ["src/english_vocab_trainer/web/templates/**", "src/english_vocab_trainer/web/static/**", "migrations/**"]
+artifacts = ["src/english_vocab_trainer/web/templates/**", "src/english_vocab_trainer/web/static/**", "src/english_vocab_trainer/migrations/**"]

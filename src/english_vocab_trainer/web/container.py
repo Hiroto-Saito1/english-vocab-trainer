@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,7 @@ class AppContainer:
     environment: str
     local_user_id: str | None = None
     auth: AuthService | None = None
+    trusted_hosts: tuple[str, ...] = ()
 
 
 def auth_from_env(
@@ -95,6 +97,33 @@ def auth_from_env(
         )
     except Exception as exc:
         raise ConfigurationError("authentication configuration is invalid") from exc
+
+
+def trusted_hosts_from_env(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """Require an explicit public host, or safely derive Fly's canonical hostname."""
+    raw_hosts = environ.get("ALLOWED_HOSTS", "")
+    if raw_hosts:
+        configured = tuple(raw_hosts.split(","))
+        if any(host != host.strip() for host in configured) or not all(
+            _is_valid_host(host) for host in configured
+        ):
+            raise ConfigurationError("ALLOWED_HOSTS must contain valid host names only")
+        return configured
+    fly_app = environ.get("FLY_APP_NAME")
+    if fly_app and _FLY_APP_NAME.fullmatch(fly_app):
+        return (f"{fly_app}.fly.dev",)
+    raise ConfigurationError("ALLOWED_HOSTS or FLY_APP_NAME is required in production")
+
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+_FLY_APP_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _is_valid_host(host: str) -> bool:
+    candidate = host[2:] if host.startswith("*.") else host
+    if not candidate or len(candidate) > 253 or any(character.isspace() for character in host):
+        return False
+    return all(_HOST_LABEL.fullmatch(label) is not None for label in candidate.split("."))
 
 
 class UnavailableRepositoryProvider:

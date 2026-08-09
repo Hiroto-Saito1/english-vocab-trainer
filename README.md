@@ -131,3 +131,83 @@ window. This deliberately permits a local denial-of-service tradeoff rather than
 client IP headers. Offline resume is device-local until logout; Logout first clears local study data,
 then expires server cookies. If the network is unavailable after local clearing, the UI asks to
 reconnect to complete cookie logout.
+
+## M3b: single-Machine Fly runtime and SQLite recovery
+
+M3b adds a production container, one Fly Machine with one `/data` volume, and Litestream 0.5.16
+replication. It does not create a Fly application, a volume, an R2 bucket, or any credentials. The
+container uses one Uvicorn worker; SQLite runs with foreign keys, WAL, a five-second busy timeout,
+and `synchronous=NORMAL` on every repository and login-limiter connection. The volume is prepared
+briefly as root and the Litestream/app process is then dropped to the `vocab` user.
+
+`fly.toml` is a checked-in template rather than a deployable app binding; **never pass the raw
+template to `fly deploy`**. Render a temporary config with a strict volume-name validator, then use
+the app name as a command-line parameter:
+
+`FLY_APP=your-app FLY_VOLUME=your_single_volume python deploy/render_fly_config.py --output /tmp/fly.toml --app "$FLY_APP" --volume "$FLY_VOLUME"`
+
+After choosing your own values, these are the manual provisioning commands (they are not run by
+this repository):
+
+`FLY_APP=your-app FLY_VOLUME=your-volume fly apps create "$FLY_APP"`
+
+`fly volumes create "$FLY_VOLUME" --app "$FLY_APP" --region nrt --size 1`
+
+`fly scale count 1 --app "$FLY_APP"`
+
+Deploy with the rendered config:
+
+`fly deploy --remote-only --app "$FLY_APP" --config /tmp/fly.toml`
+
+The production entrypoint accepts only `APP_ENV=production`, `AUDIO_BACKEND=r2`, and a canonical
+absolute `VOCAB_DB_PATH` below `/data` (normally `/data/vocab.db`). It fails without printing any
+secret if any required auth, audio, or backup setting is absent. Fly terminates it with SIGTERM and
+a 45-second kill timeout; Litestream 0.5.16 performs a final sync on graceful shutdown and its
+configuration gives that sync 30 seconds. `/healthz` is public liveness; `/readyz` is public
+readiness and opens/migrates SQLite without returning data. Production also validates the Host
+header (`ALLOWED_HOSTS`, or a safely derived `FLY_APP_NAME.fly.dev`) and applies HSTS, CSP,
+`nosniff`, referrer, and permissions headers. The Uvicorn command enables trusted Fly proxy
+headers so HTTPS same-origin checks see the original scheme.
+
+Set production secrets through the Fly secret manager, preferably from a protected local file or
+standard input rather than a shell history. The full contract is: `APP_ENV=production`,
+`VOCAB_DB_PATH=/data/vocab.db`, `APP_PASSWORD_HASH`,
+`SESSION_SIGNING_SECRET`, `AUDIO_BACKEND=r2`, `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `LITESTREAM_ACCESS_KEY_ID`,
+`LITESTREAM_SECRET_ACCESS_KEY`, `LITESTREAM_R2_ENDPOINT_URL`, and
+`LITESTREAM_R2_BUCKET`. On Fly, `FLY_APP_NAME` is supplied by the platform and safely derives the
+canonical allowed host; set `ALLOWED_HOSTS` only when an additional explicit host is needed. The
+backup endpoint must be the strict HTTPS
+`https://ACCOUNTID.r2.cloudflarestorage.com` form and the backup bucket is a lowercase R2-safe
+name; these restrictions prevent environment expansion from changing Litestream YAML. For example,
+prepare an ignored file containing `NAME=value` entries and run `fly secrets import --app
+"$FLY_APP" < .private/fly-production.env`.
+
+Use three different least-privilege R2 credential pairs. The app's audio-read pair needs only
+object read/HEAD access to the private audio bucket. The offline upload/publish pair needs object write
+for the audio prefix (and only the explicit overwrite permission if force publishing is desired).
+The Litestream backup pair is separate and needs read/list/write for the backup bucket/path, but
+no DeleteObject because `retention.enabled` is false. Litestream stores this database at the fixed
+`backups/sqlite/vocab.db` path, has one `replica`, syncs low-volume writes every 10 seconds,
+validates every six hours, and verifies compaction. Disabling retention avoids accidental deletion
+of an LTX chain, but creates immutable growth; plan and rehearse any object lifecycle/retention
+change as a complete chain-safe restore policy, never as a blind expiry rule.
+
+Run a restore drill against a **new** path while retaining the live database:
+
+`vocab-restore-drill --live-db /data/vocab.db --output /data/drills/restore-$(date +%Y%m%dT%H%M%S).db`
+
+The command refuses the live DB and its WAL/SHM paths or any existing output. It asks Litestream to
+restore into the new file, runs `PRAGMA quick_check`, verifies migrations `0001_initial.sql` and
+`0002_auth.sql`, and prints only word/review counts. Rehearse this manually against backup R2
+credentials before relying on it. Actual disaster recovery requires stopping the app and attaching
+or swapping in a recovered volume/database; it never overwrites a live DB in place. Restore time
+depends on backup size and R2 availability, so this single-Machine personal setup has downtime and
+RTO risk. The rendered Fly mount retains 14 Fly volume snapshots as a secondary convenience, not a
+primary backup; R2 replication is the DR copy. The accepted tradeoff is no redundancy for this
+one-user app.
+
+The manual GitHub **Deploy** workflow is `workflow_dispatch` only, protected by the `production`
+environment and uses `FLY_API_TOKEN`, `FLY_APP`, and `FLY_VOLUME` only at run time. CI never
+deploys; it builds the container, checks the pinned Litestream binary, and creates a migrated DB
+from the installed wheel and container package.

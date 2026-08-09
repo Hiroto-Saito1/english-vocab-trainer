@@ -1,0 +1,18 @@
+# Litestream v0.5.16 configuration. Credentials are injected only at runtime.
+retention:
+  # No DeleteObject permission. Use a tested, chain-safe retention plan.
+  enabled: false
+validation:
+  interval: 6h
+verify-compaction: true
+shutdown-sync-timeout: 30s
+dbs:
+  - path: ${VOCAB_DB_PATH}
+    restore-if-db-not-exists: true
+    replica:
+      type: s3
+      bucket: ${LITESTREAM_R2_BUCKET}
+      path: backups/sqlite/vocab.db
+      endpoint: ${LITESTREAM_R2_ENDPOINT_URL}
+      # Cloudflare R2 is auto-detected; do not set a region.
+      sync-interval: 10s

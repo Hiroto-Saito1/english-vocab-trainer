@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
@@ -8,7 +9,12 @@ from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
-from english_vocab_trainer.web.container import AppContainer
+from english_vocab_trainer.web.container import (
+    AppContainer,
+    ConfigurationError,
+    UnavailableRepositoryProvider,
+    trusted_hosts_from_env,
+)
 
 
 def client(tmp_path: Path) -> TestClient:
@@ -113,3 +119,54 @@ def test_login_size_cap_and_production_cookie_attributes(tmp_path: Path) -> None
         assert csrf.startswith("__Host-vocab-csrf=")
         assert "HttpOnly" not in csrf and "Secure" in csrf and "SameSite=strict" in csrf
         assert "Path=/" in csrf and "Domain=" not in csrf
+
+
+def test_production_host_security_headers_and_readiness_are_public(tmp_path: Path) -> None:
+    with client(tmp_path) as app:
+        liveness = app.get("/healthz")
+        readiness = app.get("/readyz")
+        assert liveness.status_code == readiness.status_code == 200
+        assert liveness.json() == {"status": "ok"} and readiness.json() == {"status": "ready"}
+        assert liveness.headers["strict-transport-security"].startswith("max-age=")
+        assert liveness.headers["x-content-type-options"] == "nosniff"
+        assert "default-src 'self'" in liveness.headers["content-security-policy"]
+        assert "object-src 'none'" in liveness.headers["content-security-policy"]
+        assert app.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
+
+    unavailable = TestClient(
+        create_app(
+            AppContainer(
+                UnavailableRepositoryProvider(),
+                FilesystemAudioStore(tmp_path),
+                "production",
+                auth=AuthService(
+                    PasswordHasher().hash("test-password"),
+                    b"s" * 32,
+                    SQLiteLoginAttemptLimiter(tmp_path / "unavailable.db"),
+                    secure_cookies=False,
+                ),
+            )
+        )
+    )
+    assert unavailable.get("/readyz").status_code == 503
+
+
+def test_trusted_host_configuration_rejects_untrusted_host_syntax() -> None:
+    assert trusted_hosts_from_env({"ALLOWED_HOSTS": "vocab.example.test,*.fly.dev"}) == (
+        "vocab.example.test",
+        "*.fly.dev",
+    )
+    assert trusted_hosts_from_env({"FLY_APP_NAME": "vocab-study"}) == ("vocab-study.fly.dev",)
+    for invalid in (
+        "*",
+        "https://bad.example",
+        "bad.example:8080",
+        "bad example",
+        "bad..example",
+        " vocab.example",
+    ):
+        with pytest.raises(ConfigurationError):
+            trusted_hosts_from_env({"ALLOWED_HOSTS": invalid})
+    for invalid_app in ("Vocab", "vocab_study", "-vocab", "vocab-", "日本語"):
+        with pytest.raises(ConfigurationError):
+            trusted_hosts_from_env({"FLY_APP_NAME": invalid_app})

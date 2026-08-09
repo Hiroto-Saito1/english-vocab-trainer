@@ -101,6 +101,7 @@ def test_sqlite_limiter_and_production_configuration(tmp_path: Path) -> None:
             "AUDIO_ROOT": str(tmp_path),
             "APP_PASSWORD_HASH": password_hash,
             "SESSION_SIGNING_SECRET": "c" * 43,
+            "ALLOWED_HOSTS": "vocab.example.test",
         }
     )
     assert container.auth is not None and container.local_user_id is None
@@ -112,6 +113,7 @@ def test_sqlite_limiter_and_production_configuration(tmp_path: Path) -> None:
             "AUDIO_ROOT": str(tmp_path),
             "APP_PASSWORD_HASH": password_hash,
             "SESSION_SIGNING_SECRET": "c" * 43,
+            "ALLOWED_HOSTS": "vocab.example.test",
         }
     )
     assert non_bypass.environment == "production" and non_bypass.auth is not None
