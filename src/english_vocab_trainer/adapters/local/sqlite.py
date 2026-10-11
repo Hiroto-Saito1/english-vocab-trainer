@@ -31,7 +31,11 @@ class SQLiteVocabularyRepository:
     def __init__(self, path: Path) -> None:
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        initialize_database(self.db)
+        try:
+            initialize_database(self.db)
+        except Exception:
+            self.db.close()
+            raise
 
     def close(self) -> None:
         self.db.close()
@@ -56,7 +60,8 @@ class SQLiteVocabularyRepository:
         """Atomically publish a fully validated catalog without touching review history."""
         with self._transaction():
             self.db.executemany(
-                "INSERT INTO words(id,term,level,transcript,audio_key,tier) VALUES(?,?,?,?,?,?) "
+                "INSERT INTO words(id,term,level,transcript,audio_key,tier,excluded) "
+                "VALUES(?,?,?,?,?,?,0) "
                 "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
                 "transcript=excluded.transcript,audio_key=excluded.audio_key,tier=excluded.tier",
                 [
@@ -89,7 +94,7 @@ class SQLiteVocabularyRepository:
 
     def list_words(self, *, limit: int = 100) -> list[Word]:
         query = (
-            "SELECT w.* FROM words w WHERE NOT EXISTS("
+            "SELECT w.* FROM words w WHERE w.excluded=0 AND NOT EXISTS("
             "SELECT 1 FROM review_events e "
             "WHERE e.word_id=w.id AND e.voided_at IS NULL) "
             "ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
@@ -99,7 +104,7 @@ class SQLiteVocabularyRepository:
     def due_words(self, now: datetime, limit: int) -> list[Word]:
         query = (
             "SELECT w.* FROM word_state s JOIN words w ON w.id=s.word_id "
-            "WHERE s.due_at<=? ORDER BY s.due_at LIMIT ?"
+            "WHERE w.excluded=0 AND s.due_at<=? ORDER BY s.due_at LIMIT ?"
         )
         return [self._word(row) for row in self.db.execute(query, (_iso(now), limit))]
 
@@ -133,12 +138,21 @@ class SQLiteVocabularyRepository:
             return WordState(word_id, datetime.min.replace(tzinfo=UTC))
         return WordState(word_id, datetime.fromisoformat(row["due_at"]))
 
-    def has_active_review(self, word_id: str) -> bool:
-        row = self.db.execute(
-            "SELECT EXISTS(SELECT 1 FROM review_events WHERE word_id=? AND voided_at IS NULL)",
-            (word_id,),
-        ).fetchone()
-        return bool(int(row[0]))
+    def list_excluded_words(self) -> list[Word]:
+        return [
+            self._word(row)
+            for row in self.db.execute(
+                "SELECT * FROM words WHERE excluded=1 ORDER BY level IS NULL,level,term,id"
+            )
+        ]
+
+    def set_excluded(self, word_id: str, excluded: bool) -> None:
+        with self._transaction():
+            cursor = self.db.execute(
+                "UPDATE words SET excluded=? WHERE id=?", (int(excluded), word_id)
+            )
+            if cursor.rowcount != 1:
+                raise MissingError("word not found")
 
     def _save(self, state: WordState) -> None:
         self.db.execute(

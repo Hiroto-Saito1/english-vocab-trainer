@@ -1,10 +1,18 @@
+CREATE TABLE IF NOT EXISTS schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    version INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES(1, 1);
+
 CREATE TABLE IF NOT EXISTS words (
     id TEXT PRIMARY KEY,
     term TEXT NOT NULL,
     level INTEGER,
     transcript TEXT,
     audio_key TEXT NOT NULL UNIQUE,
-    tier TEXT NOT NULL CHECK(tier IN ('upper', 'ultra'))
+    tier TEXT NOT NULL CHECK(tier IN ('upper', 'ultra')),
+    excluded INTEGER NOT NULL DEFAULT 0 CHECK(excluded IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS word_state (
@@ -15,7 +23,7 @@ CREATE TABLE IF NOT EXISTS word_state (
 CREATE TABLE IF NOT EXISTS review_events (
     id TEXT PRIMARY KEY,
     word_id TEXT NOT NULL REFERENCES words(id),
-    rating TEXT NOT NULL CHECK(rating IN ('again', 'good', 'easy')),
+    rating TEXT NOT NULL CHECK(rating IN ('again', 'good')),
     reviewed_at TEXT NOT NULL,
     voided_at TEXT
 );

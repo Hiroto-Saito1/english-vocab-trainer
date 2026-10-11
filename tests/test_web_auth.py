@@ -1,3 +1,5 @@
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -6,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
-from english_vocab_trainer.web.app import create_app
+from english_vocab_trainer.adapters.local.database import SchemaMismatchError
+from english_vocab_trainer.web.app import create_app, create_app_from_env
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import (
     AppContainer,
@@ -37,7 +40,7 @@ def client(tmp_path: Path) -> TestClient:
 
 def test_login_protects_api_and_enforces_csrf_logout(tmp_path: Path) -> None:
     with client(tmp_path) as app:
-        unauthenticated = app.get("/api/v1/sessions")
+        unauthenticated = app.get("/api/v1/sets")
         assert (
             unauthenticated.status_code == 401
             and unauthenticated.headers["cache-control"] == "no-store"
@@ -52,13 +55,13 @@ def test_login_protects_api_and_enforces_csrf_logout(tmp_path: Path) -> None:
         login = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
         assert login.status_code == 303
         assert "vocab-session" in login.headers["set-cookie"]
-        assert app.get("/api/v1/sessions").status_code == 200
+        assert app.get("/api/v1/sets").status_code == 200
         assert app.post("/auth/logout").status_code == 403
         csrf = app.cookies.get("vocab-csrf")
         assert csrf is not None
         logout = app.post("/auth/logout", headers={"X-CSRF-Token": csrf})
         assert logout.status_code == 204 and logout.headers["cache-control"] == "no-store"
-        assert app.get("/api/v1/sessions").status_code == 401
+        assert app.get("/api/v1/sets").status_code == 401
 
 
 def test_login_origin_and_global_throttle(tmp_path: Path) -> None:
@@ -79,7 +82,7 @@ def test_login_origin_and_global_throttle(tmp_path: Path) -> None:
 def test_malformed_cookie_and_csrf_never_become_server_errors(tmp_path: Path) -> None:
     with client(tmp_path) as app:
         for session in ("bad*.x", "e30.e30", "W10.e30", "bnVsbA.e30"):
-            response = app.get("/api/v1/sessions", headers={"Cookie": f"vocab-session={session}"})
+            response = app.get("/api/v1/sets", headers={"Cookie": f"vocab-session={session}"})
             assert response.status_code == 401
         login = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
         assert login.status_code == 303
@@ -132,7 +135,7 @@ def test_production_host_security_headers_and_readiness_are_public(tmp_path: Pat
         assert "object-src 'none'" in liveness.headers["content-security-policy"]
         assert app.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
 
-    unavailable = TestClient(
+    with TestClient(
         create_app(
             AppContainer(
                 tmp_path / "missing" / "v.db",
@@ -146,8 +149,31 @@ def test_production_host_security_headers_and_readiness_are_public(tmp_path: Pat
                 ),
             )
         )
-    )
-    assert unavailable.get("/readyz").status_code == 503
+    ) as unavailable:
+        assert unavailable.get("/readyz").status_code == 503
+
+
+def test_startup_and_readiness_reject_an_incompatible_database_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "old.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE TABLE review_events("
+            "id TEXT PRIMARY KEY,word_id TEXT,rating TEXT,reviewed_at TEXT,voided_at TEXT,"
+            "payload TEXT,legacy_version INTEGER)"
+        )
+    app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "database schema is incompatible"}
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("VOCAB_DB_PATH", str(database))
+    monkeypatch.setenv("AUDIO_BACKEND", "filesystem")
+    monkeypatch.setenv("AUDIO_ROOT", str(tmp_path))
+    with pytest.raises(SchemaMismatchError, match="recreate"):
+        create_app_from_env()
 
 
 def test_trusted_host_configuration_rejects_untrusted_host_syntax() -> None:

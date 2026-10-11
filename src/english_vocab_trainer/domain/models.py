@@ -12,7 +12,6 @@ from fsrs import Rating as FsrsRating
 class Rating(StrEnum):
     AGAIN = "again"
     GOOD = "good"
-    EASY = "easy"
 
 
 class ReviewAction(StrEnum):
@@ -32,10 +31,8 @@ class Tier(StrEnum):
 LEARNING_STEP = timedelta(minutes=10)
 
 
-def rating_for_action(action: ReviewAction, has_active_review: bool) -> Rating:
-    if action is ReviewAction.UNKNOWN:
-        return Rating.AGAIN
-    return Rating.GOOD if has_active_review else Rating.EASY
+def rating_for_action(action: ReviewAction) -> Rating:
+    return Rating.AGAIN if action is ReviewAction.UNKNOWN else Rating.GOOD
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +84,6 @@ def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
         rating = {
             Rating.AGAIN: FsrsRating.Again,
             Rating.GOOD: FsrsRating.Good,
-            Rating.EASY: FsrsRating.Easy,
         }[event.rating]
         card, _ = scheduler.review_card(card, rating, now)
     return WordState(word_id, card.due if active else datetime.min.replace(tzinfo=UTC))

@@ -31,7 +31,7 @@ def words(repository: SQLiteVocabularyRepository) -> None:
 
 
 def event(word: str, when: datetime) -> ReviewEvent:
-    return ReviewEvent(uuid4(), word, Rating.EASY, when)
+    return ReviewEvent(uuid4(), word, Rating.GOOD, when)
 
 
 def test_reopen_persists_words_state_and_events(tmp_path: Path) -> None:
@@ -54,7 +54,6 @@ def test_list_excludes_active_review_and_void_reincludes_word(tmp_path: Path) ->
         assert "nine" not in [word.id for word in repository.list_words()]
         repository.void_event(review.id)
         assert "nine" in [word.id for word in repository.list_words()]
-        assert not repository.has_active_review("nine")
 
 
 def test_due_returns_past_cards_only(tmp_path: Path) -> None:
@@ -73,9 +72,15 @@ def test_due_returns_past_cards_only(tmp_path: Path) -> None:
 def test_schema_rejects_invalid_tier_rating_and_missing_word(tmp_path: Path) -> None:
     with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
         with pytest.raises(sqlite3.IntegrityError):
-            repository.db.execute("INSERT INTO words VALUES('x','x',NULL,NULL,'x','unknown')")
+            repository.db.execute(
+                "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+                "VALUES('x','x',NULL,NULL,'x','unknown')"
+            )
         with pytest.raises(sqlite3.IntegrityError):
-            repository.db.execute("INSERT INTO review_events VALUES('x','none','bad','now',NULL)")
+            repository.db.execute(
+                "INSERT INTO review_events(id,word_id,rating,reviewed_at,voided_at) "
+                "VALUES('x','none','bad','now',NULL)"
+            )
 
 
 def test_submit_review_is_idempotent_for_known_and_unknown(tmp_path: Path) -> None:
@@ -88,7 +93,7 @@ def test_submit_review_is_idempotent_for_known_and_unknown(tmp_path: Path) -> No
         unknown_id = uuid4()
         unknown = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
         unknown_retry = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
-        assert first.rating is second.rating is Rating.EASY
+        assert first.rating is second.rating is Rating.GOOD
         assert first.state.due_at == second.state.due_at
         assert unknown.rating is unknown_retry.rating is Rating.AGAIN
         assert unknown_retry.status == "idempotent"
@@ -151,7 +156,7 @@ def test_concurrent_distinct_events_are_serialized_and_both_persist(tmp_path: Pa
     with SQLiteVocabularyRepository(path) as repository:
         words(repository)
     start = Barrier(2, timeout=10)
-    first = ReviewEvent(UUID(int=1), "nine", Rating.EASY, datetime(2026, 1, 1, tzinfo=UTC))
+    first = ReviewEvent(UUID(int=1), "nine", Rating.GOOD, datetime(2026, 1, 1, tzinfo=UTC))
     second = ReviewEvent(UUID(int=2), "nine", Rating.AGAIN, datetime(2026, 1, 2, tzinfo=UTC))
 
     def append(review: ReviewEvent) -> None:
@@ -168,3 +173,47 @@ def test_concurrent_distinct_events_are_serialized_and_both_persist(tmp_path: Pa
         assert repository.get_event(first.id) == first
         assert repository.get_event(second.id) == second
         assert repository.state("nine").due_at == replay_word_state("nine", [first, second]).due_at
+
+
+def test_exclusion_persists_and_hides_new_and_due_words_until_restored(tmp_path: Path) -> None:
+    path = tmp_path / "v.db"
+    now = datetime.now(UTC)
+    with SQLiteVocabularyRepository(path) as repository:
+        words(repository)
+        repository.append_event(event("nine", now))
+        repository.db.execute(
+            "UPDATE word_state SET due_at=? WHERE word_id='nine'",
+            ((now - timedelta(minutes=1)).isoformat(),),
+        )
+        repository.set_excluded("nine", True)
+        repository.set_excluded("ten", True)
+    with SQLiteVocabularyRepository(path) as repository:
+        assert {word.id for word in repository.list_excluded_words()} == {"nine", "ten"}
+        assert "nine" not in {word.id for word in repository.due_words(now, 30)}
+        assert "ten" not in {word.id for word in repository.list_words(limit=30)}
+        repository.set_excluded("nine", False)
+        repository.set_excluded("ten", False)
+        assert "nine" in {word.id for word in repository.due_words(now, 30)}
+        assert "ten" in {word.id for word in repository.list_words(limit=30)}
+
+
+def test_offline_unknown_then_known_has_same_state_when_synced_in_reverse(tmp_path: Path) -> None:
+    reviewed_at = datetime(2026, 1, 1, tzinfo=UTC)
+    unknown = (UUID(int=21), ReviewAction.UNKNOWN, reviewed_at)
+    known = (UUID(int=22), ReviewAction.KNOWN, reviewed_at + timedelta(minutes=1))
+    due_dates = []
+    for path, order in (
+        (tmp_path / "forward.db", (unknown, known)),
+        (tmp_path / "reverse.db", (known, unknown)),
+    ):
+        with SQLiteVocabularyRepository(path) as repository:
+            words(repository)
+            for event_id, action, when in order:
+                submit_review(repository, event_id, "nine", action, when)
+            due_dates.append(repository.state("nine").due_at)
+            stored = [repository.get_event(event_id) for event_id, _, _ in order]
+            assert {event.rating for event in stored if event is not None} == {
+                Rating.AGAIN,
+                Rating.GOOD,
+            }
+    assert due_dates[0] == due_dates[1]

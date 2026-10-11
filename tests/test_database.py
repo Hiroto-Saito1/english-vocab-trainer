@@ -1,9 +1,21 @@
 import sqlite3
 from pathlib import Path
 
-from english_vocab_trainer.adapters.local.database import initialize_database
+import pytest
 
-EXPECTED_TABLES = {"words", "word_state", "review_events", "login_attempts"}
+from english_vocab_trainer.adapters.local.database import (
+    SCHEMA_VERSION,
+    SchemaMismatchError,
+    initialize_database,
+)
+
+EXPECTED_TABLES = {
+    "schema_metadata",
+    "words",
+    "word_state",
+    "review_events",
+    "login_attempts",
+}
 
 
 def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
@@ -20,6 +32,16 @@ def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
         "word_id",
         "due_at",
     }
+    assert {row[1] for row in connection.execute("PRAGMA table_info(words)")} == {
+        "id",
+        "term",
+        "level",
+        "transcript",
+        "audio_key",
+        "tier",
+        "excluded",
+    }
+    assert connection.execute("SELECT version FROM schema_metadata").fetchone() == (SCHEMA_VERSION,)
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -30,7 +52,10 @@ def test_current_schema_initialization_is_idempotent_across_reopen(tmp_path: Pat
     path = tmp_path / "current.db"
     connection = sqlite3.connect(path)
     initialize_database(connection)
-    connection.execute("INSERT INTO words VALUES('one','one',9,NULL,'one.mp3','upper')")
+    connection.execute(
+        "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+        "VALUES('one','one',9,NULL,'one.mp3','upper')"
+    )
     connection.commit()
     connection.close()
 
@@ -38,3 +63,25 @@ def test_current_schema_initialization_is_idempotent_across_reopen(tmp_path: Pat
     initialize_database(reopened)
     assert reopened.execute("SELECT term FROM words WHERE id='one'").fetchone() == ("one",)
     reopened.close()
+
+
+def test_incompatible_columns_and_version_fail_without_migration(tmp_path: Path) -> None:
+    old = sqlite3.connect(tmp_path / "old.db")
+    old.execute(
+        "CREATE TABLE review_events("
+        "id TEXT PRIMARY KEY,word_id TEXT,rating TEXT,reviewed_at TEXT,voided_at TEXT,"
+        "payload TEXT,user_id TEXT)"
+    )
+    old.commit()
+    with pytest.raises(SchemaMismatchError, match="recreate"):
+        initialize_database(old)
+    assert old.execute("PRAGMA table_info(review_events)").fetchall()
+    old.close()
+
+    wrong_version = sqlite3.connect(tmp_path / "wrong-version.db")
+    initialize_database(wrong_version)
+    wrong_version.execute("UPDATE schema_metadata SET version=999")
+    wrong_version.commit()
+    with pytest.raises(SchemaMismatchError, match="recreate"):
+        initialize_database(wrong_version)
+    wrong_version.close()

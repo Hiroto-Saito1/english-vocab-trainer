@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from english_vocab_trainer.adapters.local.database import initialize_database
+from english_vocab_trainer.adapters.local.database import SCHEMA_VERSION, initialize_database
 from english_vocab_trainer.restore_drill import RestoreDrillError, restore_drill
 
 ROOT = Path(__file__).parents[1]
@@ -209,6 +209,8 @@ def test_litestream_config_separates_audio_credentials_and_rendered_fly_toml(
         "dbs",
     } <= top_level
     assert "replica:" in config and "replicas:" not in config
+    assert f"path: backups/sqlite/schema-v{SCHEMA_VERSION}/vocab.db" in config
+    assert "path: backups/sqlite/vocab.db" not in config
     assert "retention:\n  # No DeleteObject" in config
     assert "validation:\n  interval: 6h" in config
     assert "verify-compaction: true" in config and "shutdown-sync-timeout: 30s" in config

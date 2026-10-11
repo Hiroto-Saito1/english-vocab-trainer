@@ -16,8 +16,9 @@ from pydantic import BaseModel
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from english_vocab_trainer.adapters.local.database import SchemaMismatchError
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import select_session_words, submit_review
+from english_vocab_trainer.application.services import select_set_words, submit_review
 from english_vocab_trainer.domain.models import (
     LEARNING_STEP,
     ReviewAction,
@@ -75,9 +76,20 @@ class WordOut(BaseModel):
     tier: Tier
 
 
-class SessionOut(BaseModel):
+class SetOut(BaseModel):
     items: list[WordOut]
     learning_step_seconds: int
+
+
+class ExcludedWordOut(BaseModel):
+    id: str
+    term: str
+    level: int | None
+    tier: Tier
+
+
+class ExclusionsOut(BaseModel):
+    items: list[ExcludedWordOut]
 
 
 class EventResultOut(BaseModel):
@@ -134,6 +146,8 @@ def readiness(request: Request) -> dict[str, str]:
     try:
         with SQLiteVocabularyRepository(container.database) as repository:
             repository.db.execute("SELECT 1 FROM words LIMIT 1").fetchone()
+    except SchemaMismatchError as exc:
+        raise HTTPException(503, "database schema is incompatible") from exc
     except Exception as exc:
         raise HTTPException(503, "database is not ready") from exc
     return {"status": "ready"}
@@ -216,13 +230,41 @@ def service_worker() -> FileResponse:
     )
 
 
-@router.get("/api/v1/sessions", response_model=SessionOut)
-def sessions(repository: Repository) -> SessionOut:
-    words = select_session_words(repository, datetime.now(UTC), Random())
-    return SessionOut(
+@router.get("/api/v1/sets", response_model=SetOut)
+def study_set(repository: Repository) -> SetOut:
+    words = select_set_words(repository, datetime.now(UTC), Random())
+    return SetOut(
         items=[word_out(word) for word in words],
         learning_step_seconds=int(LEARNING_STEP.total_seconds()),
     )
+
+
+@router.get("/api/v1/exclusions", response_model=ExclusionsOut)
+def exclusions(repository: Repository) -> ExclusionsOut:
+    return ExclusionsOut(
+        items=[
+            ExcludedWordOut(id=word.id, term=word.term, level=word.level, tier=word.tier)
+            for word in repository.list_excluded_words()
+        ]
+    )
+
+
+@router.post("/api/v1/exclusions/{word_id}", status_code=204)
+def exclude_word(word_id: str, repository: Repository, _: Csrf) -> Response:
+    try:
+        repository.set_excluded(word_id, True)
+    except MissingError as exc:
+        raise HTTPException(404, "word not found") from exc
+    return Response(status_code=204)
+
+
+@router.delete("/api/v1/exclusions/{word_id}", status_code=204)
+def restore_word(word_id: str, repository: Repository, _: Csrf) -> Response:
+    try:
+        repository.set_excluded(word_id, False)
+    except MissingError as exc:
+        raise HTTPException(404, "word not found") from exc
+    return Response(status_code=204)
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
@@ -389,4 +431,7 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
 
 
 def create_app_from_env() -> FastAPI:
-    return create_app(container_from_env())
+    container = container_from_env()
+    with SQLiteVocabularyRepository(container.database):
+        pass
+    return create_app(container)

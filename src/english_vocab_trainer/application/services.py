@@ -10,7 +10,6 @@ from english_vocab_trainer.domain.models import (
     Rating,
     ReviewAction,
     ReviewEvent,
-    Tier,
     Word,
     WordState,
     rating_for_action,
@@ -19,32 +18,18 @@ from english_vocab_trainer.ports.errors import EventConflictError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
-def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]:
-    """Take new words without replacement, balancing the two published tiers."""
-    pools: dict[Tier, list[Word]] = {}
-    for tier in Tier:
-        tier_words = [word for word in words if word.tier is tier]
-        pools[tier] = rng.sample(tier_words, k=len(tier_words))
-    # For an odd quota either tier may receive the extra slot; this avoids a
-    # persistent upper-first presentation bias while preserving a <= 1 split.
-    upper_quota = limit // 2 + rng.randrange(2 if limit % 2 else 1)
-    ultra_quota = limit - upper_quota
-    selected = pools[Tier.UPPER][:upper_quota] + pools[Tier.ULTRA][:ultra_quota]
-    remainder = pools[Tier.UPPER][upper_quota:] + pools[Tier.ULTRA][ultra_quota:]
-    return (selected + remainder)[:limit]
-
-
-def select_session_words(repo: VocabularyRepository, now: datetime, rng: Random) -> list[Word]:
-    unseen = repo.list_words(limit=10_000)
+def select_set_words(repo: VocabularyRepository, now: datetime, rng: Random) -> list[Word]:
+    """Admit due cards first, then the lowest-level unseen words, up to 30."""
+    unseen = sorted(
+        repo.list_words(limit=10_000),
+        key=lambda word: (word.level is None, word.level if word.level is not None else 0, word.id),
+    )
     target = 30
     due = repo.due_words(now, target)
     due_ids = {word.id for word in due}
     quota = max(0, target - len(due))
-    selected = due + balanced_new_words(
-        [word for word in unseen if word.id not in due_ids], quota, rng
-    )
-    # Due cards win admission to the daily quota; their presentation order, and
-    # the new cards' order, are still random so a level band cannot dominate.
+    selected = due + [word for word in unseen if word.id not in due_ids][:quota]
+    # Admission is deterministic by due time and difficulty; presentation is not.
     return rng.sample(selected, k=len(selected))
 
 
@@ -66,7 +51,7 @@ def submit_review(
     if existing is not None:
         allowed_ratings = {
             ReviewAction.UNKNOWN: {Rating.AGAIN},
-            ReviewAction.KNOWN: {Rating.EASY, Rating.GOOD},
+            ReviewAction.KNOWN: {Rating.GOOD},
         }[action]
         if (
             existing.word_id != word_id
@@ -79,7 +64,7 @@ def submit_review(
             state=repo.state(word_id),
             status="voided" if existing.voided_at is not None else "idempotent",
         )
-    rating = rating_for_action(action, repo.has_active_review(word_id))
+    rating = rating_for_action(action)
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
     return ReviewResult(
         rating=rating,

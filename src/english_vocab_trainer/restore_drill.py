@@ -8,6 +8,11 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from english_vocab_trainer.adapters.local.database import (
+    SchemaMismatchError,
+    validate_database_schema,
+)
+
 Runner = Callable[[Sequence[str]], None]
 
 
@@ -49,22 +54,12 @@ def restore_drill(
         try:
             if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise RestoreDrillError("restored database failed SQLite quick_check")
-            tables = {
-                row[0]
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-            expected = {"words", "word_state", "review_events", "login_attempts"}
-            columns = {
-                table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-                for table in expected
-            }
-            if tables != expected or columns != {
-                "words": {"id", "term", "level", "transcript", "audio_key", "tier"},
-                "word_state": {"word_id", "due_at"},
-                "review_events": {"id", "word_id", "rating", "reviewed_at", "voided_at"},
-                "login_attempts": {"attempted_at"},
-            }:
-                raise RestoreDrillError("restored database does not match the current schema")
+            try:
+                validate_database_schema(connection)
+            except SchemaMismatchError as exc:
+                raise RestoreDrillError(
+                    "restored database does not match the current schema"
+                ) from exc
             return {
                 "words": int(connection.execute("SELECT count(*) FROM words").fetchone()[0]),
                 "review_events": int(

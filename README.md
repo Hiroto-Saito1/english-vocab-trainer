@@ -2,7 +2,9 @@
 
 English Vocab Trainer は、英語音声を起点にして単語を学習する、1 アカウント用の FastAPI/PWA アプリです。Fly.io 上の 1 Machine で動かし、学習履歴は SQLite、非公開音声は Cloudflare R2、バックアップは Litestream で管理します。以前の Cloudflare 版は Git の `cloudflare-prototype-2026-08-09` に保存していますが、現在のデプロイ対象ではありません。
 
-音声、カタログ、文字起こし、認証情報、生成した SQLite データベースは Git に含めません。現行スキーマのみをサポートし、旧 DB の upgrade は行いません。旧版から移行する場合は DB を再作成し、カタログを再 publish してください。その際、学習履歴は破棄されます。
+音声、カタログ、文字起こし、認証情報、生成した SQLite データベースは Git に含めません。DB は `schema_metadata` の version と全 table の正確な列集合を起動時に検査します。現行スキーマだけをサポートし、旧 DB の暗黙利用や自動 upgrade は行いません。不一致なら起動と `/readyz` が明示的に失敗します。
+
+旧 DB を破壊的に作り直すときは、DB ファイルだけを削除して再起動してはいけません。`restore-if-db-not-exists` が旧レプリカを復元するためです。まず application と Litestream を停止し、旧 volume の DB と `-wal` / `-shm` をまとめて別の安全な場所へ退避してから、volume 上の3ファイルを除去します。次に、Litestream が新しいスキーマ別 prefix `backups/sqlite/schema-v1/vocab.db` を参照することを確認し、production entrypoint を動かす前に、現行スキーマの DB を seed または初期化して監査済み catalog を publish します。旧 `backups/sqlite/vocab.db` レプリカは削除せず、rollback / archive 用に残します。旧学習履歴は新 DB へ引き継げません。退避ファイルを現行 DB path へ戻したり、稼働中に DB だけを差し替えたりしないでください。
 
 ## 開発と検証
 
@@ -93,15 +95,19 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 ## 学習とオフライン動作
 
-学習画面は audio-first です。回答前は term と transcript を隠します。**Known** は初回なら FSRS の Easy、review 済みなら Good、**Unknown** は Again として保存します。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。Undo は未 sync event を端末から削除し、sync 済みなら server で void して、void されていない event から FSRS の due を決定的に再生します。
+学習画面は audio-first です。まず音声だけを聴き、**Show answer** で term と transcript を確認してからだけ **Known** または **Unknown** を選べます。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。Undo は未 sync event を端末から削除し、sync 済みなら server で void して、void されていない event から FSRS の due を決定的に再生します。
 
-server は日次の選出結果を session として永続化しません。学習対象と outbox はブラウザの IndexedDB に保存し、server から `applied`、`idempotent`、`voided` が返った event ID だけを削除します。保存する表示状態は操作でのみ更新し、待機中と完了は cards/current/learning queue から描画時に導出します。
+server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、残りは level の低い新規語を優先して、level 不明を最後にします。採用後の提示順だけを shuffle します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。**Start next set** を押したときだけ server から再取得します。
+
+Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。進捗は初回カードと再学習を分けて表示し、待機中は **Finish for now** で終了できます。次回の明示的な set 取得では、server 側で期限に達した語を通常どおり再取得します。語を **Suspend word** すると DB に永続化して新規・期限到来の両方から除外し、一覧の **Restore** で復帰できます。
+
+同期表示は network、server HTTP error、再試行不能な conflict/missing、audio cache を別々に扱います。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、件数を表示し、利用者が明示的に破棄できます。通常の同期成功時は過去の一時的な network/server error 表示を解消します。
 
 オンラインで学習対象を取得すると、PWA は全ての full `200` audio response を private Cache Storage へ preload します。失敗しても online 再生は継続できます。新しい学習対象では古い audio cache を先に削除し、中断した保存済み学習を開き直す場合は対応する audio を保持します。preload の世代は process-local な epoch だけで管理し、古い世代の応答が現在の cache に混入するのを防ぎます。
 
 offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。
 
-`window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。audio cache を削除し、IndexedDB の学習状態と outbox を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
+`window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。進行中の audio preload を `AbortController` で止めて audio cache を削除し、IndexedDB の学習状態、通常 outbox、隔離 event を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
 
 ## 認証とセキュリティ
 
@@ -114,7 +120,7 @@ uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
 
 本番 session cookie は `__Host-`、Secure、HttpOnly、SameSite=Strict で、有効期間は 30 日です。別の CSRF cookie は PWA が一致する header を送るためだけに non-HttpOnly とします。どちらも IndexedDB や Cache Storage に保存しません。login/auth と audio 以外の API response は `no-store` です。private full audio だけを PWA の明示的な現行 cache に保存できます。
 
-パスワード検証は永続化した global limiter で、15 分の rolling window 内に最大 5 回までです。login 成功時に window をクリアします。spoof できる client IP header を信頼せず、local DoS の可能性を受け入れる 1 アカウント用のトレードオフです。Logout は先に端末内学習 data を消去し、その後 server cookie を失効させます。local 消去後に network が切れた場合は、cookie logout を完了するための再接続を促します。
+パスワード検証は永続化した global limiter で、15 分の rolling window 内に最大 5 回までです。login 成功時に window をクリアします。spoof できる client IP header を信頼せず、local DoS の可能性を受け入れる 1 アカウント用のトレードオフです。Logout は進行中の audio preload を直ちに中断し、未同期または隔離 event があれば確認を求めます。online では server logout が成功して cookie が失効した後だけ端末内 private data を消去します。offline では logout も local 消去も行わず、data を保持したことを明示します。
 
 本番では Host header を `ALLOWED_HOSTS` または安全に導出した `FLY_APP_NAME.fly.dev` と照合し、HSTS、CSP、`nosniff`、referrer policy、permissions policy を付与します。Uvicorn は Fly の trusted proxy header を有効にし、HTTPS same-origin 検証が元の scheme を参照できるようにします。
 
@@ -156,9 +162,11 @@ Fly では `FLY_APP_NAME` が platform から渡されます。追加 host が�
 fly secrets import --app "$FLY_APP" < .private/fly-production.env
 ```
 
-audio read、offline upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。固定 path `backups/sqlite/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。この設定は LTX chain の誤削除を避ける代わりに immutable growth を生むため、object lifecycle を変更するときは chain 全体から restore できる policy を事前検証してください。
+audio read、offline upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。現行スキーマはスキーマ別 path `backups/sqlite/schema-v1/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。schema を破壊的に変更するときは別の `schema-vN` prefix へ進め、古い prefix は rollback / archive 用に保持します。この設定は LTX chain の誤削除を避ける代わりに immutable growth を生むため、object lifecycle を変更するときは chain 全体から restore できる policy を事前検証してください。
 
-初回 deploy 前に、full catalog の audit/validate、2,000 音声の upload と metadata/size 検証、履歴のない R2-key SQLite seed の publish、Fly volume への seed または Litestream replica の初期化と検証をこの順に完了させます。acceptance 用の学習履歴入り DB は seed に使わないでください。`restore-if-db-not-exists` は検証済み replica があれば restore しますが、seed/replica がなければ空の DB を初期化できてしまいます。その初回起動は成功した catalog deploy とみなさず block として扱います。
+初回 deploy と schema prefix の切替前には、full catalog の audit/validate、2,000 音声の upload と metadata/size 検証、履歴のない R2-key SQLite seed の publish を完了させます。schema 切替では application / Litestream を停止し、旧 volume の DB / WAL / SHM を退避して除去した後、新 prefix を設定した image と現行 schema の seed DB を volume へ配置します。seed を事前作成しない場合は、production entrypoint とは別の停止中 maintenance 環境で現行 DB を初期化し、catalog を publish してから起動してください。acceptance 用の学習履歴入り DB は seed に使わないでください。
+
+起動後は `/readyz`、現行 schema version、期待する catalog 件数、音声取得、新 prefix から新規 path への restore drill を確認して初めて切替完了とします。`restore-if-db-not-exists` は新 prefix に検証済み replica があれば復元しますが、新 prefix が空なら application が空 DB を初期化できてしまいます。空 DB の起動成功や `/readyz` 成功だけを catalog deploy 完了と扱ってはいけません。旧 `backups/sqlite/vocab.db` は DeleteObject 権限のない credential でそのまま保持し、新 prefix へ copy / restore して混在させません。
 
 ## バックアップとリストア
 
