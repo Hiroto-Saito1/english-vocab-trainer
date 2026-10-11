@@ -182,7 +182,7 @@ def test_schema_rejects_duplicate_session_ordinal(tmp_path: Path) -> None:
         r.db.execute("INSERT INTO session_items VALUES('s','ten',0)")
 
 
-def test_submit_known_retry_is_easy_and_idempotent(tmp_path: Path) -> None:
+def test_submit_review_retry_is_idempotent_for_known_and_unknown(tmp_path: Path) -> None:
     r = repo(tmp_path / "v.db")
     words(r)
     event_id, now = uuid4(), datetime.now(UTC)
@@ -190,7 +190,12 @@ def test_submit_known_retry_is_easy_and_idempotent(tmp_path: Path) -> None:
     second = submit_review(r, event_id, "nine", ReviewAction.KNOWN, now)
     assert first.rating is second.rating is Rating.EASY
     assert first.state.version == second.state.version == 1
-    assert r.progress(now)["reviewed"] == 1
+    unknown_id = uuid4()
+    unknown = submit_review(r, unknown_id, "ten", ReviewAction.UNKNOWN, now)
+    unknown_retry = submit_review(r, unknown_id, "ten", ReviewAction.UNKNOWN, now)
+    assert unknown.rating is unknown_retry.rating is Rating.AGAIN
+    assert unknown_retry.status == "idempotent"
+    assert r.progress(now)["reviewed"] == 2
 
 
 def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:

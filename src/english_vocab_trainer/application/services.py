@@ -20,23 +20,16 @@ from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConfl
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
-def shuffled(words: list[Word], rng: Random) -> list[Word]:
-    """Return a random, without-replacement presentation order."""
-    result = list(words)
-    rng.shuffle(result)
-    return result
-
-
 def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]:
     """Take new words without replacement, balancing the two published tiers.
 
     Unknown legacy rows intentionally remain a last-resort pool: they must not
     crowd out either tier in a catalog which has been republished with 0003.
     """
-    pools = {
-        tier: shuffled([word for word in words if word.tier is tier], rng)
-        for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN)
-    }
+    pools: dict[Tier, list[Word]] = {}
+    for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN):
+        tier_words = [word for word in words if word.tier is tier]
+        pools[tier] = rng.sample(tier_words, k=len(tier_words))
     # For an odd quota either tier may receive the extra slot; this avoids a
     # persistent upper-first presentation bias while preserving a <= 1 split.
     upper_quota = limit // 2 + rng.randrange(2 if limit % 2 else 1)
@@ -56,7 +49,8 @@ def select_session_words(
     if mode == "screen":
         if count not in {20, 50, 100}:
             raise ValueError("screen count must be 20, 50, or 100")
-        return shuffled(balanced_new_words(unseen, count, rng), rng)
+        selected = balanced_new_words(unseen, count, rng)
+        return rng.sample(selected, k=len(selected))
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
     target = repo.get_daily_target()
@@ -68,7 +62,7 @@ def select_session_words(
     )
     # Due cards win admission to the daily quota; their presentation order, and
     # the new cards' order, are still random so a level band cannot dominate.
-    return shuffled(selected, rng)
+    return rng.sample(selected, k=len(selected))
 
 
 def create_study_session(
@@ -99,14 +93,15 @@ def submit_review(
 ) -> ReviewResult:
     existing = repo.get_event(event_id)
     if existing is not None:
-        compatible = existing.word_id == word_id and existing.reviewed_at == reviewed_at
-        compatible = compatible and (
-            action is ReviewAction.UNKNOWN
-            and existing.rating is Rating.AGAIN
-            or action is ReviewAction.KNOWN
-            and existing.rating in {Rating.EASY, Rating.GOOD}
-        )
-        if not compatible:
+        allowed_ratings = {
+            ReviewAction.UNKNOWN: {Rating.AGAIN},
+            ReviewAction.KNOWN: {Rating.EASY, Rating.GOOD},
+        }[action]
+        if (
+            existing.word_id != word_id
+            or existing.reviewed_at != reviewed_at
+            or existing.rating not in allowed_ratings
+        ):
             raise EventConflictError("review event conflict")
         return ReviewResult(
             rating=existing.rating,

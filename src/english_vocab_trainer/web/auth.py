@@ -50,7 +50,7 @@ def csrf_hash(token: str | None) -> str:
         raise AuthenticationError("invalid csrf")
     try:
         decoded = _unb64(token)
-    except (ValueError, AuthenticationError) as exc:
+    except ValueError as exc:
         raise AuthenticationError("invalid csrf") from exc
     if len(decoded) != 32:
         raise AuthenticationError("invalid csrf")
@@ -133,7 +133,7 @@ class AuthService:
             encoded_payload = _unb64(parts[1])
             _unb64(parts[2])
             payload = json.loads(encoded_payload)
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError, AuthenticationError) as exc:
+        except ValueError as exc:
             raise AuthenticationError("invalid session") from exc
         expected = _b64(
             hmac.new(self.signing_secret, parts[1].encode("ascii"), hashlib.sha256).digest()

@@ -89,9 +89,7 @@ class Boto3R2AudioStore:
         try:
             response = self._client.head_object(Bucket=self._bucket, Key=self._key(key))
             return self._metadata(response)
-        except FileNotFoundError:
-            raise
-        except AudioStorageError:
+        except (FileNotFoundError, AudioStorageError):
             raise
         except Exception as exc:
             self._raise_store_error(exc, key, range_request=False)

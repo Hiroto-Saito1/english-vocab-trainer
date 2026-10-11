@@ -370,24 +370,23 @@ def audio(
     word = repository.get_word(word_id)
     if word is None:
         raise HTTPException(404, "word not found")
-    metadata = None
     # RFC 7233 evaluates Range only after preconditions: a matching cache validator
     # wins even over an otherwise invalid range and must not fetch the object body.
-    if if_none_match is not None:
+    if if_none_match is not None or range_header is not None:
         metadata = _audio_metadata(store, word.audio_key)
-        if if_none_match_matches(metadata.etag, if_none_match):
+        if if_none_match is not None and if_none_match_matches(metadata.etag, if_none_match):
             return build_audio_head_response(metadata, None, if_none_match)
-    if range_header is not None:
-        try:
-            metadata = metadata or _audio_metadata(store, word.audio_key)
-            assert metadata is not None
-            parse_single_range(range_header, metadata.size)
-        except InvalidRangeError:
-            assert metadata is not None
-            return Response(
-                status_code=416,
-                headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
-            )
+        if range_header is not None:
+            try:
+                parse_single_range(range_header, metadata.size)
+            except InvalidRangeError:
+                return Response(
+                    status_code=416,
+                    headers={
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes */{metadata.size}",
+                    },
+                )
     try:
         result = store.get(word.audio_key, range_header)
     except FileNotFoundError as exc:

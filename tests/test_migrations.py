@@ -81,47 +81,38 @@ def test_failed_migration_rolls_back_ddl_and_history(tmp_path: Path) -> None:
     connection.close()
 
 
-def test_multiple_statements_on_one_line_are_applied(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("sql", "query", "expected"),
+    [
+        (
+            "CREATE TABLE one(id INTEGER); CREATE TABLE two(id INTEGER);\n",
+            "SELECT name FROM sqlite_master WHERE name IN ('one','two') ORDER BY name",
+            [("one",), ("two",)],
+        ),
+        (
+            "CREATE TABLE notes(value TEXT); INSERT INTO notes(value) VALUES ('one; two');\n",
+            "SELECT value FROM notes",
+            [("one; two",)],
+        ),
+        (
+            "-- Line comment; still a comment.\n"
+            "/* Block comment; also still a comment. */\n"
+            "CREATE TABLE comments(id INTEGER);\n",
+            "SELECT name FROM sqlite_master WHERE name = 'comments'",
+            [("comments",)],
+        ),
+    ],
+)
+def test_regular_statement_boundaries_are_applied(
+    tmp_path: Path, sql: str, query: str, expected: list[tuple[str]]
+) -> None:
     directory = tmp_path / "migrations"
     directory.mkdir()
-    (directory / "0001.sql").write_text(
-        "CREATE TABLE one(id INTEGER); CREATE TABLE two(id INTEGER);\n"
-    )
+    (directory / "0001.sql").write_text(sql)
     connection = sqlite3.connect(":memory:")
     apply_migrations(connection, directory)
 
-    tables = {
-        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    assert {"one", "two"} <= tables
-    connection.close()
-
-
-def test_semicolon_in_quoted_string_is_not_a_statement_boundary(tmp_path: Path) -> None:
-    directory = tmp_path / "migrations"
-    directory.mkdir()
-    (directory / "0001.sql").write_text(
-        "CREATE TABLE notes(value TEXT); INSERT INTO notes(value) VALUES ('one; two');\n"
-    )
-    connection = sqlite3.connect(":memory:")
-    apply_migrations(connection, directory)
-
-    assert connection.execute("SELECT value FROM notes").fetchone()[0] == "one; two"
-    connection.close()
-
-
-def test_semicolons_in_comments_are_not_statement_boundaries(tmp_path: Path) -> None:
-    directory = tmp_path / "migrations"
-    directory.mkdir()
-    (directory / "0001.sql").write_text(
-        "-- Line comment; still a comment.\n"
-        "/* Block comment; also still a comment. */\n"
-        "CREATE TABLE comments(id INTEGER);\n"
-    )
-    connection = sqlite3.connect(":memory:")
-    apply_migrations(connection, directory)
-
-    assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'comments'").fetchone()
+    assert connection.execute(query).fetchall() == expected
     connection.close()
 
 

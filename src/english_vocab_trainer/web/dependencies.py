@@ -8,7 +8,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.repositories import VocabularyRepository
-from english_vocab_trainer.web.auth import AuthenticationError, csrf_hash
+from english_vocab_trainer.web.auth import AuthenticationError
 from english_vocab_trainer.web.container import AppContainer, ConfigurationError
 
 
@@ -40,19 +40,16 @@ def csrf(
     if container.auth is None:
         raise HTTPException(503, "authentication is unavailable")
     cookie = request.cookies.get(container.auth.csrf_cookie_name)
-    try:
-        csrf_hash(token)
-        csrf_hash(cookie)
-    except AuthenticationError as exc:
-        raise HTTPException(403, "csrf validation failed") from exc
-    if token is None or cookie is None or not hmac.compare_digest(token, cookie):
+    if token is None or cookie is None:
         raise HTTPException(403, "csrf validation failed")
     try:
         container.auth.user_from_session(
-            request.cookies.get(container.auth.session_cookie_name), cookie, require_csrf=True
+            request.cookies.get(container.auth.session_cookie_name), token, require_csrf=True
         )
     except AuthenticationError as exc:
         raise HTTPException(403, "csrf validation failed") from exc
+    if not hmac.compare_digest(token.encode("utf-8"), cookie.encode("utf-8")):
+        raise HTTPException(403, "csrf validation failed")
 
 
 def get_container(request: Request) -> AppContainer:

@@ -1,14 +1,10 @@
-class RepositoryError(RuntimeError):
+class MissingError(RuntimeError):
     pass
 
 
-class MissingError(RepositoryError):
+class EventConflictError(RuntimeError):
     pass
 
 
-class EventConflictError(RepositoryError):
-    pass
-
-
-class ConcurrentUpdateError(RepositoryError):
+class ConcurrentUpdateError(RuntimeError):
     pass

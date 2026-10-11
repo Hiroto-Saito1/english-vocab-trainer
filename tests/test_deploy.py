@@ -246,31 +246,21 @@ def test_litestream_config_separates_audio_credentials_and_rendered_fly_toml(
     assert parsed["mounts"] == [
         {"source": "vocab_data", "destination": "/data", "snapshot_retention": 14}
     ]
-    failed = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "deploy" / "render_fly_config.py"),
-            "--output",
-            str(tmp_path / "bad.toml"),
-            "--app",
-            "Invalid app",
-            "--volume",
-            "Invalid volume",
-        ],
-        check=False,
-    )
-    assert failed.returncode != 0
-    failed = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "deploy" / "render_fly_config.py"),
-            "--output",
-            str(tmp_path / "bad-volume.toml"),
-            "--app",
-            "vocab-study",
-            "--volume",
-            "Invalid volume",
-        ],
-        check=False,
-    )
-    assert failed.returncode != 0
+    for app, volume in (
+        ("Invalid app", "Invalid volume"),
+        ("vocab-study", "Invalid volume"),
+    ):
+        failed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "deploy" / "render_fly_config.py"),
+                "--output",
+                str(tmp_path / "bad.toml"),
+                "--app",
+                app,
+                "--volume",
+                volume,
+            ],
+            check=False,
+        )
+        assert failed.returncode != 0

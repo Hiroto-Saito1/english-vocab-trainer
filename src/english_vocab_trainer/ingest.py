@@ -196,17 +196,13 @@ def _source_candidates(root: Path, source: str) -> list[AudioCandidate]:
     if not source_root.is_dir():
         raise ValueError(f"approved source is missing: {source}")
     expected_root = root.resolve() / source
-    try:
-        source_root.resolve().relative_to(expected_root)
-    except ValueError as exc:
-        raise ValueError("approved source symlink is outside its source tree") from exc
+    if not source_root.resolve().is_relative_to(expected_root):
+        raise ValueError("approved source symlink is outside its source tree")
     for path in source_root.rglob("*"):
         if not path.is_file() or path.suffix.lower() != ".mp3":
             continue
-        try:
-            path.resolve().relative_to(expected_root)
-        except ValueError as exc:
-            raise ValueError("audio symlink is outside its approved source tree") from exc
+        if not path.resolve().is_relative_to(expected_root):
+            raise ValueError("audio symlink is outside its approved source tree")
         level, term = parse_audio_path(root, path)
         candidates.append(
             AudioCandidate(path, path.relative_to(root).as_posix(), source, level, term)
@@ -780,10 +776,8 @@ def _validate_record(
     if root is not None:
         resolved_root = root.resolve()
         source_path = (root / Path(*relative.parts)).resolve()
-        try:
-            source_path.relative_to(resolved_root / record.source)
-        except ValueError as exc:
-            raise ValueError("audio key is outside approved source trees") from exc
+        if not source_path.is_relative_to(resolved_root / record.source):
+            raise ValueError("audio key is outside approved source trees")
         if not source_path.is_file():
             raise ValueError("catalog source audio is missing")
         if checksum(source_path) != record.checksum:
@@ -1028,11 +1022,8 @@ def publish_records(
         )
         for record in validated
     ]
-    repository = SQLiteVocabularyRepository(database, "local-user")
-    try:
+    with SQLiteVocabularyRepository(database, "local-user") as repository:
         repository.bulk_upsert_words(words)
-    finally:
-        repository.close()
 
 
 def upload_audio(
