@@ -3,9 +3,9 @@ const STATE_KEY = "active-session";
 const AUDIO_CACHE = "pwa-private-audio-v3";
 const AUDIO_PRELOAD_CONCURRENCY = 4;
 const SYNC_BATCH_SIZE = 100;
-let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
+let state = { cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
 let busy = false, syncFlight = null, learningTimer = null;
-let audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
+let audioCacheState = { expected: 0, cached: 0, ready: false, failed: 0 };
 let audioCacheEpoch = 0, preloadFlight = null;
 let audioPresentation = null;
 const $ = (selector) => document.querySelector(selector);
@@ -75,7 +75,6 @@ function armLearningTimer() {
 function updateUndoPresentation() { undoButton.disabled = !state.event; }
 function render() {
   const word = currentWord();
-  if (word && state.phase === "waiting") state.phase = "listening";
   const revealed = state.phase === "revealed";
   updateUndoPresentation();
   if (state.phase === "unavailable") { card.textContent = "Reconnect to start your study session."; term.hidden = true; tier.hidden = true; transcript.hidden = true; clearAudioPresentation(); setActions(true); progress.textContent = "Offline"; return; }
@@ -84,12 +83,11 @@ function render() {
   if (!word) {
     term.hidden = true; tier.hidden = true; transcript.hidden = true; clearAudioPresentation(); setActions(true);
     if (state.learningQueue.length) {
-      state.phase = "waiting";
       const seconds = Math.max(0, Math.ceil((Math.min(...state.learningQueue.map((item) => item.due_at)) - nowMs()) / 1000));
       card.textContent = `Waiting for the next review: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
-      progress.textContent = `${state.cards.length} of ${state.cards.length}`; armLearningTimer(); saveState(); return;
+      progress.textContent = `${state.cards.length} of ${state.cards.length}`; armLearningTimer(); return;
     }
-    state.phase = "complete"; card.textContent = state.cards.length ? "Daily study complete." : "All caught up / nothing due."; progress.textContent = `${state.cards.length} of ${state.cards.length}`; saveState(); return;
+    card.textContent = state.cards.length ? "Daily study complete." : "All caught up / nothing due."; progress.textContent = `${state.cards.length} of ${state.cards.length}`; return;
   }
   card.textContent = revealed ? "Review the word and continue when ready." : "Listen, then choose.";
   term.textContent = word.term; tier.textContent = formatTier(word); transcript.textContent = word.transcript || "Transcript is unavailable.";
@@ -138,8 +136,8 @@ async function configureAudioCache(rotate) {
 }
 
 async function preload() {
-  const sessionId = state.sessionId, epoch = audioCacheEpoch, urls = state.cards.map((word) => word.audio_url);
-  audioCacheState = { sessionId, expected: urls.length, cached: 0, ready: false, failed: 0 };
+  const epoch = audioCacheEpoch, urls = state.cards.map((word) => word.audio_url);
+  audioCacheState = { expected: urls.length, cached: 0, ready: false, failed: 0 };
   const cache = await caches.open(AUDIO_CACHE);
   let next = 0;
   const load = async () => {
@@ -147,7 +145,7 @@ async function preload() {
       const url = urls[next++];
       try {
         const response = await window.fetch(url);
-        if (audioCacheEpoch !== epoch || state.sessionId !== sessionId || response.status !== 200) throw new Error("audio unavailable");
+        if (audioCacheEpoch !== epoch || response.status !== 200) throw new Error("audio unavailable");
         await cache.put(new Request(url, { method: "GET" }), response.clone());
         audioCacheState.cached += 1;
       } catch (_) { audioCacheState.failed += 1; }
@@ -196,8 +194,9 @@ async function sync() {
           }
         }
         await saveState();
-        if (state.phase === "waiting") render(); else armLearningTimer();
-        await Promise.all(payload.acknowledged.map(removeEvent));
+        render();
+        const acknowledged = payload.results.filter((result) => ["applied", "idempotent", "voided"].includes(result.status)).map((result) => result.id);
+        await Promise.all(acknowledged.map(removeEvent));
         unresolved ||= payload.results.some((result) => result.status === "conflict" || result.status === "missing");
       }
       if (unresolved) showStatus("Some review updates need attention and remain on this device.");
@@ -222,9 +221,9 @@ async function answer(action) {
     state.learningQueue.push({ eventId: state.event.id, word, due_at: nowMs() + state.learningStepSeconds * 1000 });
     state.phase = "revealed";
   }
-  await saveState(); render(); if (!currentWord()) await saveState(); busy = false; sync();
+  await saveState(); render(); busy = false; sync();
 }
-async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; if (state.current < state.cards.length) state.current += 1; state.phase = "listening"; await saveState(); render(); if (!currentWord()) await saveState(); busy = false; }
+async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; if (state.current < state.cards.length) state.current += 1; state.phase = "listening"; await saveState(); render(); busy = false; }
 async function undoLast() {
   if (busy || !state.event) return;
   busy = true; setActions(true); const event = state.event; await sync();
@@ -250,20 +249,20 @@ async function clearPrivateCaches() {
   if (navigator.serviceWorker && navigator.serviceWorker.controller && !workerCleared) {
     throw new Error("private cache worker did not confirm the reset");
   }
-  await Promise.all((await caches.keys()).filter((key) => key === AUDIO_CACHE || key.startsWith("pwa-user-")).map((key) => caches.delete(key)));
+  await caches.delete(AUDIO_CACHE);
   // Clear the durable records transactionally instead of deleting the database:
   // a live browser connection can otherwise block deleteDatabase indefinitely.
   await transaction("events", "readwrite", (store) => store.clear());
   await transaction("state", "readwrite", (store) => store.clear());
-  state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
-  audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
+  state = { cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
+  audioCacheState = { expected: 0, cached: 0, ready: false, failed: 0 };
   clearLearningTimer(); render(); showStatus("Private study data was cleared.");
 }
 
 async function boot() {
   let saved = null;
   try { saved = await getState(); } catch (_) { showStatus("Local study storage is unavailable."); }
-  if (saved && saved.cards && saved.phase !== "complete") {
+  if (saved && saved.cards && (saved.current < saved.cards.length || saved.learningQueue.length)) {
     state = saved;
     try { await saveState(); } catch (_) { showStatus("Local study storage is unavailable."); }
     try { await configureAudioCache(false); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
@@ -272,7 +271,7 @@ async function boot() {
       const response = await apiFetch("/api/v1/sessions");
       if (!response.ok) throw new Error("session unavailable");
       const session = await response.json();
-      state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, learningQueue: [], learningStepSeconds: session.learning_step_seconds };
+      state = { cards: session.items, current: 0, phase: "listening", event: null, learningQueue: [], learningStepSeconds: session.learning_step_seconds };
       try { await configureAudioCache(true); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
       await saveState();
     } catch (_) {

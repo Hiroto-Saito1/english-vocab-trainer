@@ -1,295 +1,175 @@
 # English Vocab Trainer
 
-This project is being rebuilt as a conventional FastAPI application for Fly.io. The previous Cloudflare prototype is preserved in Git as `cloudflare-prototype-2026-08-09`; it is not the deployment target.
+English Vocab Trainer は、英語音声を起点にして単語を学習する、1 アカウント用の FastAPI/PWA アプリです。Fly.io 上の 1 Machine で動かし、学習履歴は SQLite、非公開音声は Cloudflare R2、バックアップは Litestream で管理します。以前の Cloudflare 版は Git の `cloudflare-prototype-2026-08-09` に保存していますが、現在のデプロイ対象ではありません。
 
-The application is English-only and audio-first. A fresh SQLite database is initialized from the packaged current schema, and audio/catalogs/transcripts/secrets are excluded from Git.
+音声、カタログ、文字起こし、認証情報、生成した SQLite データベースは Git に含めません。現行スキーマのみをサポートし、旧 DB の upgrade は行いません。旧版から移行する場合は DB を再作成し、カタログを再 publish してください。その際、学習履歴は破棄されます。
 
-## M1/M2b: private catalog, private audio, and publishing
+## 開発と検証
 
-M1 runs locally with SQLite and an audio root. It selects exactly ten files from each approved
-source tree (`上級SVL/` and `超上級SVL/`), favouring lower levels and using a deterministic path
-tie-break. It never scans the similarly named duplicate directories or CSV files. Audio is served
-in place from the configured parent audio root; it is never copied into, or tracked by, this repo.
+Python 3.13 と `uv` を使います。
 
-Create the private catalog (the catalog and all transcripts stay under ignored `.private/`):
+```sh
+uv sync --group dev --frozen
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run pytest -m 'not e2e' -W error::ResourceWarning
+uv run coverage report --precision=2 --fail-under=90
+```
 
-`uv run vocab-ingest scan --source .. --catalog .private/m1-catalog.jsonl`
+PWA のブラウザテストには Chromium が必要です。
 
-Install the optional Apple Silicon transcription tooling, then generate English-only transcripts:
+```sh
+uv run playwright install chromium
+uv run pytest -m e2e --no-cov -W error::ResourceWarning
+```
 
-`uv sync --group ingest`
+E2E はローカル Uvicorn と実際の Chromium を使い、Service Worker、Cache Storage、IndexedDB の状態を固定 sleep に頼らず待ち合わせます。Dropbox 配下の `.venv` で読み込みが滞る環境では、依存環境だけを Dropbox 外に作成できます。
 
-`uv run --group ingest vocab-ingest transcribe --source .. --catalog .private/m1-catalog.jsonl`
+```sh
+external_env="$(mktemp -d)/venv"
+UV_PROJECT_ENVIRONMENT="$external_env" uv sync --group dev --frozen
+UV_PROJECT_ENVIRONMENT="$external_env" uv run pytest
+```
 
-Validate the private 20-record catalog, then dry-run and publish it to a local database. The
-filesystem backend is the default and stores the source-relative catalog key in SQLite:
+## 非公開カタログと文字起こし
 
-`uv run vocab-ingest validate --source .. --catalog .private/m1-catalog.jsonl`
+ingest は許可した `上級SVL/` と `超上級SVL/` だけを読みます。似た名前のディレクトリや CSV は読みません。`mvp` プロファイルは各ソースから低いレベルを優先し、パスを決定的なタイブレークにして既定 10 件ずつを選びます。`full` は各ソースに解析可能な MP3 が正確に 1,000 件ある場合だけ成功し、2,000 件全ての checksum と path/checksum/term の重複を検証します。
 
-`uv run vocab-ingest publish --source .. --catalog .private/m1-catalog.jsonl --database ./vocab.db --audio-backend filesystem --dry-run`
+出力先には Git 管理外の `.private/` を使ってください。MVP カタログの基本手順は次の通りです。
 
-`uv run vocab-ingest publish --source .. --catalog .private/m1-catalog.jsonl --database ./vocab.db --audio-backend filesystem`
+```sh
+uv run vocab-ingest scan --source .. --catalog .private/mvp-catalog.jsonl
+uv sync --group ingest
+uv run --group ingest vocab-ingest transcribe --source .. --catalog .private/mvp-catalog.jsonl
+uv run vocab-ingest validate --source .. --catalog .private/mvp-catalog.jsonl
+uv run vocab-ingest publish --source .. --catalog .private/mvp-catalog.jsonl --database ./vocab.db --audio-backend filesystem --dry-run
+uv run vocab-ingest publish --source .. --catalog .private/mvp-catalog.jsonl --database ./vocab.db --audio-backend filesystem
+```
 
-To publish R2 keys instead, upload the same immutable files first and then select the R2 backend:
+`scan` は音声の checksum と provenance manifest を毎回検証し、同じ checksum の検証済み文字起こしを既定で再利用します。catalog、manifest、文字起こし journal、未解決エラーの整合性が取れない場合は fail closed にします。全てを意図的に破棄する場合だけ `scan --force` を使います。`--dry-run` は書き込みなしで予定処理を確認します。
 
-`uv run vocab-ingest upload-audio --source .. --catalog .private/m1-catalog.jsonl --dry-run`
+文字起こしの既定モデルは `mlx-community/whisper-large-v3-turbo`、言語は `en` です。`temperature=0` かつ previous-text conditioning なしの決定的なデコードで、短い音声の反復 hallucination を抑えます。日本語、短すぎる文、不安全な Unicode、過度な反復などは拒否します。成功した文字起こしは append-only journal へ fsync し、全件完了時に JSONL catalog へ atomic にまとめます。クラッシュ時に壊れ得るのは journal 最後の不完全な 1 行だけで、再実行で自動継続します。
 
-`R2_ENDPOINT_URL=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=... uv run vocab-ingest upload-audio --source .. --catalog .private/m1-catalog.jsonl`
+`--continue-on-error` では、失敗した checksum ごとの未解決状態を atomic な `.transcription-errors.jsonl` snapshot に保存します。理由は `runtime-failure` や品質・script 検証コードなどの allowlist に限り、例外文、path、secret、文字起こし本文は書きません。成功済み checksum は再開時に対象から外れ、未解決エラーがなくなれば snapshot も削除されます。
 
-`uv run vocab-ingest publish --source .. --catalog .private/m1-catalog.jsonl --database ./vocab.db --audio-backend r2`
+本番用の full catalog は Dropbox 内の仮想環境を使わず、次の wrapper から実行します。
 
-`upload-audio` validates all 20 source-relative paths and file SHA-256 values before it contacts
-R2. Every object is private at `audio/<64 lowercase sha256>.mp3`, with `Content-Type:
-audio/mpeg` and `sha256` metadata. A matching existing object's length and metadata causes a
-safe skip, so rerunning resumes automatically. A mismatch fails closed; `--force` is the explicit
-overwrite escape hatch. The catalog always retains its local source-relative audio key; it is not
-rewritten to an R2 key.
+```sh
+uv run vocab-ingest scan --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run
+scripts/ingest-env doctor
+scripts/ingest-env scan --profile full --source .. --catalog .private/full-catalog.jsonl
+scripts/ingest-env status --profile full --source .. --catalog .private/full-catalog.jsonl
+scripts/ingest-env transcribe --profile full --source .. --catalog .private/full-catalog.jsonl --max-records 100
+scripts/ingest-env audit --profile full --source .. --catalog .private/full-catalog.jsonl
+scripts/ingest-env validate --profile full --source .. --catalog .private/full-catalog.jsonl
+```
 
-The transcriber defaults to `mlx-community/whisper-large-v3-turbo` with `language=en`. It rejects
-Japanese characters and transcripts too short to contain an English definition/example. Use
-`--resume` on scan to retain matching existing transcripts, `--force` to transcribe again, and
-`--dry-run` on scan/transcribe/publish to verify a planned operation without writes.
+最初は小さな batch で private status/error report を確認し、問題がなければ繰り返すか上限を外します。現在の 2,000 ファイルは合計 7.783 時間、最長 35.344 秒です。ウォームアップ済みの小規模検証からは全件 18〜25 分が目安ですが、性能保証ではありません。
 
-Run the application with Python 3.13 and uv. The local filesystem backend requires an explicit
-`AUDIO_BACKEND=filesystem`; `AUDIO_ROOT` must be the parent containing the two approved source
-directories, so catalog audio keys resolve without copying any MP3:
+`audit` は inventory、checksum、一意性、source の存在、英語 transcript をブロッキング検証します。term 不在、重複 transcript、不自然な長さは機械可読な private warning report に出します。指摘を手動で確認・修正し、再度 scan/audit してから publish してください。importer は音声ツリーを読むだけで、そこに書き込みません。
 
-`VOCAB_DB_PATH=./vocab.db AUDIO_BACKEND=filesystem AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:create_app_from_env --factory --app-dir src`
+## 音声の保管と配信
 
-The private, server-side R2 proxy uses `AUDIO_BACKEND=r2`, `R2_ENDPOINT_URL`,
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` (optionally `R2_REGION`, default
-`auto`). Objects must use `audio/<64 lowercase hex>.mp3` keys and include lowercase `sha256`
-metadata. The browser only receives the authenticated `/api/v1/audio/{word_id}` proxy; neither
-R2 URLs nor credentials are exposed. This repository contains no R2 credentials; the upload path
-is covered with fakes and dry-runs only.
+ローカルでは `filesystem` backend を明示し、`AUDIO_ROOT` に 2 つの許可済みディレクトリの親を指定します。MP3 を repository にコピーする必要はありません。
 
-The MVP proxy buffers one MP3 as bytes for each GET. The measured maximum across the approved
-2,000 audio sources is 797,946 bytes (about 0.8 MB), which is acceptable for this bounded slice.
-Before serving larger media, replace this with `StreamingResponse` and enforce a size cap.
+```sh
+VOCAB_DB_PATH=./vocab.db AUDIO_BACKEND=filesystem AUDIO_ROOT=.. APP_ENV=local uv run uvicorn english_vocab_trainer.web.app:create_app_from_env --factory --app-dir src
+```
 
-The web flow is audio first: term and transcript are hidden until **Unknown**, **Known** maps to
-Easy for a new word and Good for a reviewed word, and **Unknown** maps to Again. Events are
-idempotent UUIDs; Undo either removes an unsynchronised event or calls the void/replay endpoint.
-The web client retains its session and outbox in IndexedDB, deleting only server-acknowledged event IDs.
+R2 へ publish する場合は、同じ immutable 音声を先に upload します。
 
-## M2c: offline and local privacy boundary
+```sh
+uv run vocab-ingest upload-audio --source .. --catalog .private/mvp-catalog.jsonl --dry-run
+R2_ENDPOINT_URL=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=... uv run vocab-ingest upload-audio --source .. --catalog .private/mvp-catalog.jsonl
+uv run vocab-ingest publish --source .. --catalog .private/mvp-catalog.jsonl --database ./vocab.db --audio-backend r2
+scripts/ingest-env upload-audio --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run
+scripts/ingest-env publish --profile full --source .. --catalog .private/full-catalog.jsonl --database ./vocab.db --audio-backend r2 --dry-run
+```
 
-After an online session is created, the PWA waits for every full `200` audio response to be written
-to a private Cache Storage cache. The status line reports whether the set is ready for offline
-listening; a cache failure is non-fatal and leaves online listening available. Only the active
-session's audio URLs are retained. Fetching a new session clears the prior audio cache before its
-preload begins; reopening an unfinished saved session retains its matching audio. The service
-worker never stores API, review, or authentication JSON, and it never stores upstream `206` range
-responses. Static shell files use a network-first cache fallback only.
+`upload-audio` は R2 に接続する前に全 path と SHA-256 を検証します。object key は `audio/<64 文字の lowercase sha256>.mp3`、Content-Type は `audio/mpeg`、metadata の `sha256` も lowercase です。既存 object の size と metadata が一致すれば安全に skip し、不一致なら fail closed にします。上書きは `--force` の場合だけです。catalog 内の audio key は source 相対 path のままで、R2 key へ書き換えません。
 
-Once full audio is cached, an offline reload can resume the saved listening flow. Normal audio GETs
-are served from the full response; a single offline byte range is synthesized as a correct `206`
-response. Review actions continue into the IndexedDB outbox and are sent exactly once when the
-browser reconnects. A first visit made offline, or a completed session that needs a new session,
-keeps existing local data and says to reconnect instead of failing the page.
+ブラウザは認証済みの `/api/v1/audio/{word_id}` proxy だけにアクセスし、R2 URL や credential を受け取りません。現在の proxy は GET ごとに MP3 1 件を bytes として buffer します。許可済み 2,000 件の実測最大値は 797,946 bytes（約 0.8 MB）です。より大きな media を扱う前に `StreamingResponse` と size 上限を導入してください。
 
-Audio cache rotation deliberately does **not** erase the IndexedDB session or outbox. For the M3
-logout boundary, `window.clearPrivateCaches()` is available but is not called automatically. It
-clears private audio/user caches and transactionally empties the local session and outbox stores;
-the transaction avoids a blocked IndexedDB database deletion caused by a live connection. This is
-the explicit device-local privacy reset boundary.
+## 学習とオフライン動作
 
-No MP3, catalog, transcript, secret, or database belongs in Git. M3a now provides the production
-SQLite repository and authentication boundary; the Fly/R2 deployment work remains M3b.
+学習画面は audio-first です。回答前は term と transcript を隠します。**Known** は初回なら FSRS の Easy、review 済みなら Good、**Unknown** は Again として保存します。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。Undo は未 sync event を端末から削除し、sync 済みなら server で void して、void されていない event から FSRS の due を決定的に再生します。
 
-Browser acceptance tests use a live local Uvicorn server and Chromium. Install and run them with:
+server は日次の選出結果を session として永続化しません。学習対象と outbox はブラウザの IndexedDB に保存し、server から `applied`、`idempotent`、`voided` が返った event ID だけを削除します。保存する表示状態は操作でのみ更新し、待機中と完了は cards/current/learning queue から描画時に導出します。
 
-`uv run playwright install chromium`
+オンラインで学習対象を取得すると、PWA は全ての full `200` audio response を private Cache Storage へ preload します。失敗しても online 再生は継続できます。新しい学習対象では古い audio cache を先に削除し、中断した保存済み学習を開き直す場合は対応する audio を保持します。preload の世代は process-local な epoch だけで管理し、古い世代の応答が現在の cache に混入するのを防ぎます。
 
-`uv run pytest -m e2e --no-cov -W error::ResourceWarning`
-
-M2c browser coverage waits for the service worker, cache-readiness state, and browser conditions;
-it does not depend on fixed sleeps for PWA/cache timing.
-
-## M3a: production sign-in
-
-Production starts only through the factory entrypoint above and requires `APP_ENV=production`,
-`VOCAB_DB_PATH`, a complete private audio backend configuration, `APP_PASSWORD_HASH`, and
-`SESSION_SIGNING_SECRET`. `APP_PASSWORD_HASH` must be a sufficiently strong Argon2id encoded hash
-(at least 19 MiB memory, two iterations, and 16-byte salt/hash). `SESSION_SIGNING_SECRET` is a
-canonical base64url value decoding to at least 32 random bytes. Generate both without placing the
-values in shell history, then enter them into the secret manager:
-
-`uv run python -c 'from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass("Password: ")))'`
-
-`uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'`
-
-The production session cookie is `__Host-` scoped, Secure, HttpOnly, SameSite=Strict, and lasts
-30 days. Its separate Secure CSRF cookie is non-HttpOnly only so the PWA can submit the matching
-header; neither credential is stored in IndexedDB or Cache Storage. Login/auth and non-audio API
-responses are `no-store`. Private full audio remains eligible only for the explicit current-session
-PWA cache.
-
-Authentication uses a persistent global limiter for this one-account application: at most five
-password-verification reservations in any 15-minute rolling window. A successful sign-in clears the
-window. This deliberately permits a local denial-of-service tradeoff rather than trusting spoofable
-client IP headers. Offline resume is device-local until logout; Logout first clears local study data,
-then expires server cookies. If the network is unavailable after local clearing, the UI asks to
-reconnect to complete cookie logout.
-
-## M3b: single-Machine Fly runtime and SQLite recovery
-
-M3b adds a production container, one Fly Machine with one `/data` volume, and Litestream 0.5.16
-replication. It does not create a Fly application, a volume, an R2 bucket, or any credentials. The
-container uses one Uvicorn worker; SQLite runs with foreign keys, WAL, a five-second busy timeout,
-and `synchronous=NORMAL` on every repository and login-limiter connection. The volume is prepared
-briefly as root and the Litestream/app process is then dropped to the `vocab` user.
-
-`fly.toml` is a checked-in template rather than a deployable app binding; **never pass the raw
-template to `fly deploy`**. Render a temporary config with a strict volume-name validator, then use
-the app name as a command-line parameter:
-
-`FLY_APP=your-app FLY_VOLUME=your_single_volume python deploy/render_fly_config.py --output /tmp/fly.toml --app "$FLY_APP" --volume "$FLY_VOLUME"`
-
-After choosing your own values, these are the manual provisioning commands (they are not run by
-this repository):
+offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。
 
-`FLY_APP=your-app FLY_VOLUME=your-volume fly apps create "$FLY_APP"`
-
-`fly volumes create "$FLY_VOLUME" --app "$FLY_APP" --region nrt --size 1`
-
-`fly scale count 1 --app "$FLY_APP"`
-
-Deploy with the rendered config:
-
-`fly deploy --remote-only --app "$FLY_APP" --config /tmp/fly.toml`
-
-The production entrypoint accepts only `APP_ENV=production`, `AUDIO_BACKEND=r2`, and a canonical
-absolute `VOCAB_DB_PATH` below `/data` (normally `/data/vocab.db`). It fails without printing any
-secret if any required auth, audio, or backup setting is absent. Fly terminates it with SIGTERM and
-a 45-second kill timeout; Litestream 0.5.16 performs a final sync on graceful shutdown and its
-configuration gives that sync 30 seconds. `/healthz` is public liveness; `/readyz` is public
-readiness and opens/initializes SQLite without returning data. Production also validates the Host
-header (`ALLOWED_HOSTS`, or a safely derived `FLY_APP_NAME.fly.dev`) and applies HSTS, CSP,
-`nosniff`, referrer, and permissions headers. The Uvicorn command enables trusted Fly proxy
-headers so HTTPS same-origin checks see the original scheme.
-
-Set production secrets through the Fly secret manager, preferably from a protected local file or
-standard input rather than a shell history. The full contract is: `APP_ENV=production`,
-`VOCAB_DB_PATH=/data/vocab.db`, `APP_PASSWORD_HASH`,
-`SESSION_SIGNING_SECRET`, `AUDIO_BACKEND=r2`, `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `LITESTREAM_ACCESS_KEY_ID`,
-`LITESTREAM_SECRET_ACCESS_KEY`, `LITESTREAM_R2_ENDPOINT_URL`, and
-`LITESTREAM_R2_BUCKET`. On Fly, `FLY_APP_NAME` is supplied by the platform and safely derives the
-canonical allowed host; set `ALLOWED_HOSTS` only when an additional explicit host is needed. The
-backup endpoint must be the strict HTTPS
-`https://ACCOUNTID.r2.cloudflarestorage.com` form and the backup bucket is a lowercase R2-safe
-name; these restrictions prevent environment expansion from changing Litestream YAML. For example,
-prepare an ignored file containing `NAME=value` entries and run `fly secrets import --app
-"$FLY_APP" < .private/fly-production.env`.
-
-Before the first production deploy, prepare a pristine private R2-key seed in this exact order:
-audit and validate the full catalog; upload and verify all 2,000 private audio objects (including
-their SHA-256 metadata and sizes, with safe reruns); publish a new pristine R2-key SQLite seed; and
-then either seed the Fly volume or initialise and verify the Litestream replica from that seed.
-Only then perform the first deploy. Do not use a local acceptance database with review state as a
-production seed. `restore-if-db-not-exists` restores an existing replica, but without a verified
-seed or replica it allows the app to initialize an empty database; that first boot must be treated as
-blocked, not as a successful catalog deployment.
-
-Use three different least-privilege R2 credential pairs. The app's audio-read pair needs only
-object read/HEAD access to the private audio bucket. The offline upload/publish pair needs object write
-for the audio prefix (and only the explicit overwrite permission if force publishing is desired).
-The Litestream backup pair is separate and needs read/list/write for the backup bucket/path, but
-no DeleteObject because `retention.enabled` is false. Litestream stores this database at the fixed
-`backups/sqlite/vocab.db` path, has one `replica`, syncs low-volume writes every 10 seconds,
-validates every six hours, and verifies compaction. Disabling retention avoids accidental deletion
-of an LTX chain, but creates immutable growth; plan and rehearse any object lifecycle/retention
-change as a complete chain-safe restore policy, never as a blind expiry rule.
-
-Run a restore drill against a **new** path while retaining the live database:
-
-`vocab-restore-drill --live-db /data/vocab.db --output /data/drills/restore-$(date +%Y%m%dT%H%M%S).db`
-
-The command refuses the live DB and its WAL/SHM paths or any existing output. It asks Litestream to
-restore into the new file, runs `PRAGMA quick_check`, verifies the exact current tables and columns,
-and prints only word/review counts. Rehearse this manually against backup R2
-credentials before relying on it. Actual disaster recovery requires stopping the app and attaching
-or swapping in a recovered volume/database; it never overwrites a live DB in place. Restore time
-depends on backup size and R2 availability, so this single-Machine personal setup has downtime and
-RTO risk. The rendered Fly mount retains 14 Fly volume snapshots as a secondary convenience, not a
-primary backup; R2 replication is the DR copy. The accepted tradeoff is no redundancy for this
-one-user app.
-
-The manual GitHub **Deploy** workflow is `workflow_dispatch` only, protected by the `production`
-environment and uses `FLY_API_TOKEN`, `FLY_APP`, and `FLY_VOLUME` only at run time. CI never
-deploys; it builds the container, checks the pinned Litestream binary, and creates a current-schema DB
-from the installed wheel and container package.
-
-This release does not upgrade databases created by earlier versions. Recreate the database and
-republish the private catalog before deployment; doing so discards existing learning history.
-
-## M3c-a: full private inventory and durable transcription
-
-The ingest CLI has explicit profiles. `mvp` remains the safe default (ten selected records per
-approved source unless `--limit-per-source` is supplied). `full` fails closed unless **each** of
-`上級SVL/` and `超上級SVL/` contains exactly 1,000 parseable MP3s; it computes all 2,000 checksums
-before accepting the inventory and rejects duplicate path, checksum, or term. Profile-derived
-counts are enforced by scan, validate, audit, publish, and upload, so the full catalog is never
-mistaken for the 20-record MVP.
-
-Use only ignored private output paths. A recommended full preparation sequence is:
-
-`uv run vocab-ingest scan --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
-
-The direct `uv` form above is safe for metadata-only scanning. Before any normal ingest command,
-use the external environment wrapper—never the Dropbox-synchronised project `.venv`:
-
-`scripts/ingest-env doctor`
-
-`scripts/ingest-env scan --profile full --source .. --catalog .private/full-catalog.jsonl`
-
-`scripts/ingest-env status --profile full --source .. --catalog .private/full-catalog.jsonl`
-
-`scripts/ingest-env transcribe --profile full --source .. --catalog .private/full-catalog.jsonl --max-records 100`
-
-Repeat the bounded transcription command (or omit `--max-records` after monitoring the first
-batch). It uses the English-only `mlx-community/whisper-large-v3-turbo` model with `language=en`.
-It uses deterministic decoding (`temperature=0`, without previous-text conditioning) to reduce
-repetition hallucinations on the short approved clips; transcript quality checks still block bad output.
-The approved inventory is 7.783 hours of audio (maximum single file 35.344 seconds). Three warm M1
-checks completed in 0.54–0.82 seconds with exact expected text; that supports a rough 18–25 minute
-full-run estimate, not a performance guarantee. Start with a bounded batch and inspect its private
-status/error report before increasing it.
-Each accepted transcript is append-only journaled and fsynced; normal completion atomically compacts
-the journal into the JSONL catalog. A crash can only lose a partial final journal line, which is
-ignored safely. Transcription resumes from its journal automatically. A versioned provenance manifest
-records the source digest, profile, model, and language; incompatible journal/catalog identities fail
-closed. A default scan refuses to replace any transcript, checkpoint, or unresolved-error state.
-Use `scan --resume` to scan immutable audio metadata again and carry forward only a validated
-transcript with the identical audio checksum; it reconciles unresolved errors only for still-missing
-current audio. `scan --force` is the explicit destructive reset of all transcript/error checkpoints.
-
-For unattended batches use `--continue-on-error`. Its private `.transcription-errors.jsonl` is a
-current checksum-keyed unresolved-error snapshot; an internal fsynced event journal makes retries
-crash-safe. Each current error has a whitelisted `reason` (for example a transcript quality/script
-failure or `runtime-failure`), never raw exception text, paths, secrets, or transcript content. A
-successful retry removes that checksum, and both files disappear when all errors are resolved. The
-command exits nonzero with an English summary while unresolved errors remain; use a deterministic
-quality reason to correct the source/transcript policy before retrying, and retry runtime failures
-after the environment is healthy. `audit` is blocking for inventory, checksum, unique identity, source presence,
-and English-only transcripts. It also writes a private machine-readable warning report for
-term-not-found, duplicate transcript, and unusual length cases. Correct flagged audio/transcripts
-manually, then rerun scan/audit before publishing:
-
-`scripts/ingest-env audit --profile full --source .. --catalog .private/full-catalog.jsonl`
-
-`scripts/ingest-env validate --profile full --source .. --catalog .private/full-catalog.jsonl`
-
-`scripts/ingest-env upload-audio --profile full --source .. --catalog .private/full-catalog.jsonl --dry-run`
-
-`scripts/ingest-env publish --profile full --source .. --catalog .private/full-catalog.jsonl --database ./vocab.db --audio-backend r2 --dry-run`
-
-These dry-runs only inspect the full plan; they neither upload audio nor create a seed database.
-For an actual production seed, upload and verify every audio object before publishing the pristine
-R2-key database, then seed the volume or initialise and verify the Litestream replica before first
-deploy as described in M3b.
-
-No catalog, manifest, journal, report, audio file, or generated SQLite database may be committed.
-The importer reads the source audio trees only; it never writes there. Do not start a 2,000-file
-Whisper run without monitoring its private reports and checkpoint progress.
+`window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。audio cache を削除し、IndexedDB の学習状態と outbox を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
+
+## 認証とセキュリティ
+
+本番起動には `APP_ENV=production`、`VOCAB_DB_PATH`、完全な private audio backend 設定、`APP_PASSWORD_HASH`、`SESSION_SIGNING_SECRET` が必要です。`APP_PASSWORD_HASH` は少なくとも memory 19 MiB、2 iterations、16-byte salt/hash の Argon2id encoded hash、`SESSION_SIGNING_SECRET` は 32 random bytes 以上に decode できる canonical base64url 値でなければなりません。shell history に値を残さず生成し、secret manager に登録してください。
+
+```sh
+uv run python -c 'from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass("Password: ")))'
+uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+本番 session cookie は `__Host-`、Secure、HttpOnly、SameSite=Strict で、有効期間は 30 日です。別の CSRF cookie は PWA が一致する header を送るためだけに non-HttpOnly とします。どちらも IndexedDB や Cache Storage に保存しません。login/auth と audio 以外の API response は `no-store` です。private full audio だけを PWA の明示的な現行 cache に保存できます。
+
+パスワード検証は永続化した global limiter で、15 分の rolling window 内に最大 5 回までです。login 成功時に window をクリアします。spoof できる client IP header を信頼せず、local DoS の可能性を受け入れる 1 アカウント用のトレードオフです。Logout は先に端末内学習 data を消去し、その後 server cookie を失効させます。local 消去後に network が切れた場合は、cookie logout を完了するための再接続を促します。
+
+本番では Host header を `ALLOWED_HOSTS` または安全に導出した `FLY_APP_NAME.fly.dev` と照合し、HSTS、CSP、`nosniff`、referrer policy、permissions policy を付与します。Uvicorn は Fly の trusted proxy header を有効にし、HTTPS same-origin 検証が元の scheme を参照できるようにします。
+
+## Fly.io での運用
+
+本番構成は 1 Fly Machine、1 つの `/data` volume、Litestream 0.5.16 です。repository は Fly application、volume、R2 bucket、credential を作成しません。container は Uvicorn worker 1 つで動き、SQLite は全 connection で foreign keys、WAL、5 秒の busy timeout、`synchronous=NORMAL` を使います。volume を root で準備した後、Litestream と application は `vocab` user で動きます。
+
+`fly.toml` は deploy 可能な実 app 設定ではなく template です。そのまま `fly deploy` に渡さないでください。app 名と volume 名を明示し、検証済みの一時 config を作ります。
+
+```sh
+FLY_APP=your-app FLY_VOLUME=your_single_volume python deploy/render_fly_config.py --output /tmp/fly.toml --app "$FLY_APP" --volume "$FLY_VOLUME"
+FLY_APP=your-app FLY_VOLUME=your-volume fly apps create "$FLY_APP"
+fly volumes create "$FLY_VOLUME" --app "$FLY_APP" --region nrt --size 1
+fly scale count 1 --app "$FLY_APP"
+fly deploy --remote-only --app "$FLY_APP" --config /tmp/fly.toml
+```
+
+production entrypoint が受け付けるのは `APP_ENV=production`、`AUDIO_BACKEND=r2`、`/data` 配下の canonical absolute `VOCAB_DB_PATH`（通常 `/data/vocab.db`）です。必要な auth/audio/backup 設定が不足していれば secret を出力せず起動に失敗します。Fly の SIGTERM 後の kill timeout は 45 秒、Litestream の graceful shutdown 時の最終 sync 予算は 30 秒です。`/healthz` は公開 liveness、`/readyz` は公開 readiness で、SQLite の現行スキーマを開いて軽く検査しますが data は返しません。
+
+本番で必要な環境変数は次の通りです。
+
+- `APP_ENV=production`
+- `VOCAB_DB_PATH=/data/vocab.db`
+- `APP_PASSWORD_HASH`
+- `SESSION_SIGNING_SECRET`
+- `AUDIO_BACKEND=r2`
+- `R2_ENDPOINT_URL`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET`
+- `LITESTREAM_ACCESS_KEY_ID`
+- `LITESTREAM_SECRET_ACCESS_KEY`
+- `LITESTREAM_R2_ENDPOINT_URL`
+- `LITESTREAM_R2_BUCKET`
+
+Fly では `FLY_APP_NAME` が platform から渡されます。追加 host が必要なときだけ `ALLOWED_HOSTS` を設定します。backup endpoint は厳密な `https://ACCOUNTID.r2.cloudflarestorage.com` 形式、bucket は lowercase の R2-safe 名に限ります。これは環境変数展開が Litestream YAML の構造を変えるのを防ぐためです。secret は shell history ではなく、例えば Git 管理外の file から登録します。
+
+```sh
+fly secrets import --app "$FLY_APP" < .private/fly-production.env
+```
+
+audio read、offline upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。固定 path `backups/sqlite/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。この設定は LTX chain の誤削除を避ける代わりに immutable growth を生むため、object lifecycle を変更するときは chain 全体から restore できる policy を事前検証してください。
+
+初回 deploy 前に、full catalog の audit/validate、2,000 音声の upload と metadata/size 検証、履歴のない R2-key SQLite seed の publish、Fly volume への seed または Litestream replica の初期化と検証をこの順に完了させます。acceptance 用の学習履歴入り DB は seed に使わないでください。`restore-if-db-not-exists` は検証済み replica があれば restore しますが、seed/replica がなければ空の DB を初期化できてしまいます。その初回起動は成功した catalog deploy とみなさず block として扱います。
+
+## バックアップとリストア
+
+restore drill は live DB を残したまま、必ず新しい path に実行します。
+
+```sh
+vocab-restore-drill --live-db /data/vocab.db --output /data/drills/restore-$(date +%Y%m%dT%H%M%S).db
+```
+
+live DB とその WAL/SHM、および既存 output は拒否します。Litestream で新規 file へ restore した後、`PRAGMA quick_check`、現行の正確な table/column 構成を検査し、word/review 件数だけを出力します。本番で使う前に backup R2 credential で手動リハーサルを行ってください。実際の障害復旧では app を止め、復旧済み volume/DB を attach または交換します。live DB をその場で上書きする機能はありません。
+
+restore 時間は backup size と R2 の可用性に依存します。1 Machine の個人利用構成では downtime と RTO のリスクを受け入れています。render された Fly mount は副次的な便利機能として 14 snapshots を保持しますが、DR の主要 copy は R2 replication です。
+
+GitHub の手動 **Deploy** workflow は `workflow_dispatch` のみで、保護された `production` environment から `FLY_API_TOKEN`、`FLY_APP`、`FLY_VOLUME` を実行時に受け取ります。CI は deploy せず、container build、固定 Litestream binary、wheel と container package からの現行スキーマ DB 作成を検査します。

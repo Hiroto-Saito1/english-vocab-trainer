@@ -19,14 +19,12 @@ from english_vocab_trainer.ingest import (
     AudioCandidate,
     CatalogRecord,
     MlxWhisperTranscriber,
-    _error_updates,
     _failure_reason,
     _merge_journal,
     _read_current_error_report,
     audit_catalog,
     audit_records,
     catalog_lock,
-    error_journal_path,
     error_report_path,
     journal_path,
     main,
@@ -530,12 +528,12 @@ def test_full_profile_requires_exact_inventory_and_reuses_only_checksum_transcri
     )
     changed = tmp_path / first[1].audio_key
     changed.write_bytes(b"changed audio")
-    resumed, _ = scan_catalog(tmp_path, catalog, limit_per_source=2, resume=True)
+    resumed, _ = scan_catalog(tmp_path, catalog, limit_per_source=2)
     assert resumed[0].transcript is not None and resumed[1].transcript is None
     assert resumed[0].term == first[0].term and resumed[1].checksum != first[1].checksum
 
 
-def test_scan_preserves_existing_state_only_with_resume_or_force(tmp_path: Path) -> None:
+def test_scan_reuses_validated_state_by_default_and_force_discards_it(tmp_path: Path) -> None:
     _approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     records, _ = scan_catalog(tmp_path, catalog, limit_per_source=1)
@@ -547,9 +545,7 @@ def test_scan_preserves_existing_state_only_with_resume_or_force(tmp_path: Path)
         ],
     )
 
-    with pytest.raises(ValueError, match="--resume or --force"):
-        scan_catalog(tmp_path, catalog, limit_per_source=1)
-    resumed, _ = scan_catalog(tmp_path, catalog, limit_per_source=1, resume=True)
+    resumed, _ = scan_catalog(tmp_path, catalog, limit_per_source=1)
     assert all(record.transcript for record in resumed)
     forced, _ = scan_catalog(tmp_path, catalog, limit_per_source=1, force=True)
     assert all(record.transcript is None for record in forced)
@@ -567,7 +563,7 @@ def test_scan_force_discards_mismatched_pending_journal(tmp_path: Path) -> None:
     transcribe_catalog(tmp_path, catalog, OneTranscription(), force=False, max_records=1)
     (tmp_path / records[0].audio_key).write_bytes(b"changed")
     with pytest.raises(ValueError, match="identity"):
-        scan_catalog(tmp_path, catalog, limit_per_source=1, resume=True)
+        scan_catalog(tmp_path, catalog, limit_per_source=1)
     scan_catalog(tmp_path, catalog, limit_per_source=1, force=True)
     assert not journal_path(catalog).exists()
 
@@ -591,10 +587,8 @@ def test_scan_reconciles_or_force_clears_current_error_state(tmp_path: Path) -> 
     )
     error_report = catalog.with_suffix(".jsonl.transcription-errors.jsonl")
     assert error_report.exists()
-    with pytest.raises(ValueError, match="--resume or --force"):
-        scan_catalog(tmp_path, catalog, limit_per_source=1)
     (tmp_path / records[0].audio_key).write_bytes(b"changed")
-    scan_catalog(tmp_path, catalog, limit_per_source=1, resume=True)
+    scan_catalog(tmp_path, catalog, limit_per_source=1)
     assert not error_report.exists()
 
     transcribe_catalog(
@@ -608,7 +602,6 @@ def test_scan_reconciles_or_force_clears_current_error_state(tmp_path: Path) -> 
     assert error_report.exists()
     scan_catalog(tmp_path, catalog, limit_per_source=1, force=True)
     assert not error_report.exists()
-    assert not catalog.with_suffix(".jsonl.transcription-errors.journal.jsonl").exists()
 
 
 def test_journal_handles_truncated_tail_and_continue_on_error(tmp_path: Path) -> None:
@@ -631,9 +624,6 @@ def test_journal_handles_truncated_tail_and_continue_on_error(tmp_path: Path) ->
     assert summary.errors == 1 and summary.completed == 1
     error_report = catalog.with_suffix(".jsonl.transcription-errors.jsonl")
     assert error_report.exists() and "runtime-failure" in error_report.read_text()
-    error_journal = catalog.with_suffix(".jsonl.transcription-errors.journal.jsonl")
-    with error_journal.open("a", encoding="utf-8") as journal:
-        journal.write('{"kind":')
     with journal_path(catalog).open("a", encoding="utf-8") as journal:
         journal.write('{"kind":')
     records_after_crash = read_catalog(catalog)
@@ -646,7 +636,6 @@ def test_journal_handles_truncated_tail_and_continue_on_error(tmp_path: Path) ->
     recovered = transcribe_catalog(tmp_path, catalog, RecoveryTranscriber(), force=False)
     assert recovered.completed == 2 and not journal_path(catalog).exists()
     assert not catalog.with_suffix(".jsonl.transcription-errors.jsonl").exists()
-    assert not error_journal.exists()
 
 
 def test_force_transcription_resets_pending_journal(tmp_path: Path) -> None:
@@ -780,7 +769,7 @@ def test_scan_rejects_source_change_while_a_matching_journal_is_pending(tmp_path
     first = read_catalog(catalog)[0]
     (tmp_path / first.audio_key).write_bytes(b"changed")
     with pytest.raises(ValueError, match="identity"):
-        scan_catalog(tmp_path, catalog, limit_per_source=2, resume=True)
+        scan_catalog(tmp_path, catalog, limit_per_source=2)
 
 
 def test_cli_status_accepts_untranscribed_profile_inventory(
@@ -845,7 +834,7 @@ def test_failure_reason_is_whitelisted(error: Exception, reason: str) -> None:
     assert _failure_reason(error) == reason
 
 
-def test_journal_and_error_journal_reject_corrupt_identity_and_records(tmp_path: Path) -> None:
+def test_journal_rejects_corrupt_identity_and_records(tmp_path: Path) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
     record = _records(1)[0]
     write_catalog(catalog, [record])
@@ -881,15 +870,6 @@ def test_journal_and_error_journal_reject_corrupt_identity_and_records(tmp_path:
         read_catalog(catalog)
     with pytest.raises(ValueError, match="absent from catalog base"):
         _merge_journal([], {record.checksum: record})
-
-    error_journal_path(catalog).write_text("[]\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="error journal is corrupt"):
-        _error_updates(catalog)
-    error_journal_path(catalog).write_text(
-        json.dumps({"kind": "header", "fingerprint": "wrong"}) + "\n", encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="identity"):
-        _error_updates(catalog, "expected")
 
 
 @pytest.mark.parametrize("duplicate", ["path", "checksum", "term"])

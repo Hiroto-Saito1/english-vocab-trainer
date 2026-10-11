@@ -10,13 +10,12 @@ from english_vocab_trainer.domain.models import (
     Rating,
     ReviewAction,
     ReviewEvent,
-    StudySession,
     Tier,
     Word,
     WordState,
     rating_for_action,
 )
-from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConflictError
+from english_vocab_trainer.ports.errors import EventConflictError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
@@ -47,16 +46,6 @@ def select_session_words(repo: VocabularyRepository, now: datetime, rng: Random)
     # Due cards win admission to the daily quota; their presentation order, and
     # the new cards' order, are still random so a level band cannot dominate.
     return rng.sample(selected, k=len(selected))
-
-
-def create_study_session(
-    repo: VocabularyRepository,
-    now: datetime,
-    session_id: str,
-    rng: Random,
-) -> StudySession:
-    words = select_session_words(repo, now, rng)
-    return StudySession(session_id, tuple(words))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,14 +81,8 @@ def submit_review(
         )
     rating = rating_for_action(action, repo.has_active_review(word_id))
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
-    for _ in range(3):
-        try:
-            state = repo.append_event(event, repo.state(word_id).version)
-            return ReviewResult(
-                rating=rating,
-                state=state,
-                status="applied",
-            )
-        except ConcurrentUpdateError:
-            continue
-    raise ConcurrentUpdateError("CAS retry exhausted")
+    return ReviewResult(
+        rating=rating,
+        state=repo.append_event(event),
+        status="applied",
+    )

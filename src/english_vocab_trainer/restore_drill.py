@@ -60,17 +60,7 @@ def restore_drill(
             }
             if tables != expected or columns != {
                 "words": {"id", "term", "level", "transcript", "audio_key", "tier"},
-                "word_state": {
-                    "word_id",
-                    "due_at",
-                    "stability",
-                    "difficulty",
-                    "card_json",
-                    "first_seen_at",
-                    "first_known_at",
-                    "last_known_at",
-                    "version",
-                },
+                "word_state": {"word_id", "due_at"},
                 "review_events": {"id", "word_id", "rating", "reviewed_at", "voided_at"},
                 "login_attempts": {"attempted_at"},
             }:

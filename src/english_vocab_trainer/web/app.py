@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from random import Random
 from typing import Annotated, Literal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -17,12 +17,10 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import create_study_session, submit_review
+from english_vocab_trainer.application.services import select_session_words, submit_review
 from english_vocab_trainer.domain.models import (
     LEARNING_STEP,
-    Rating,
     ReviewAction,
-    StudySession,
     Tier,
     Word,
 )
@@ -33,11 +31,7 @@ from english_vocab_trainer.ports.audio import (
     InvalidRangeError,
     parse_single_range,
 )
-from english_vocab_trainer.ports.errors import (
-    ConcurrentUpdateError,
-    EventConflictError,
-    MissingError,
-)
+from english_vocab_trainer.ports.errors import EventConflictError, MissingError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.audio import (
     build_audio_head_response,
@@ -82,32 +76,18 @@ class WordOut(BaseModel):
 
 
 class SessionOut(BaseModel):
-    id: str
     items: list[WordOut]
     learning_step_seconds: int
 
 
 class EventResultOut(BaseModel):
     id: UUID
-    word_id: str
     status: Literal["applied", "idempotent", "voided", "conflict", "missing"]
-    rating: Rating | None = None
-    detail: str | None = None
     due_at: datetime | None = None
-    version: int | None = None
 
 
 class BatchOut(BaseModel):
     results: list[EventResultOut]
-    acknowledged: list[UUID]
-
-
-class VoidOut(BaseModel):
-    id: UUID
-    status: Literal["voided"]
-    word_id: str
-    due_at: datetime
-    version: int
 
 
 def word_out(word: Word) -> WordOut:
@@ -118,14 +98,6 @@ def word_out(word: Word) -> WordOut:
         transcript=word.transcript,
         audio_url=f"/api/v1/audio/{word.id}",
         tier=word.tier,
-    )
-
-
-def session_out(session: StudySession) -> SessionOut:
-    return SessionOut(
-        id=session.id,
-        items=[word_out(word) for word in session.words],
-        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
     )
 
 
@@ -150,7 +122,6 @@ def home(request: Request) -> Response:
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
 
 
-@router.get("/health", include_in_schema=False)
 @router.get("/healthz", include_in_schema=False)
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -247,8 +218,11 @@ def service_worker() -> FileResponse:
 
 @router.get("/api/v1/sessions", response_model=SessionOut)
 def sessions(repository: Repository) -> SessionOut:
-    session = create_study_session(repository, datetime.now(UTC), str(uuid4()), Random())
-    return session_out(session)
+    words = select_session_words(repository, datetime.now(UTC), Random())
+    return SessionOut(
+        items=[word_out(word) for word in words],
+        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
+    )
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
@@ -256,7 +230,6 @@ def review_batch(events: list[EventIn], repository: Repository, _: Csrf) -> Batc
     if len(events) > 100:
         raise HTTPException(422, "at most 100 events")
     results: list[EventResultOut] = []
-    acknowledged: list[UUID] = []
     for event in events:
         try:
             result = submit_review(
@@ -265,44 +238,24 @@ def review_batch(events: list[EventIn], repository: Repository, _: Csrf) -> Batc
             results.append(
                 EventResultOut(
                     id=event.id,
-                    word_id=event.word_id,
                     status=result.status,
-                    rating=result.rating,
                     due_at=result.state.due_at,
-                    version=result.state.version,
                 )
             )
-            acknowledged.append(event.id)
-        except (EventConflictError, ConcurrentUpdateError) as exc:
-            results.append(
-                EventResultOut(
-                    id=event.id, word_id=event.word_id, status="conflict", detail=str(exc)
-                )
-            )
-        except MissingError as exc:
-            results.append(
-                EventResultOut(
-                    id=event.id, word_id=event.word_id, status="missing", detail=str(exc)
-                )
-            )
-    return BatchOut(results=results, acknowledged=acknowledged)
+        except EventConflictError:
+            results.append(EventResultOut(id=event.id, status="conflict"))
+        except MissingError:
+            results.append(EventResultOut(id=event.id, status="missing"))
+    return BatchOut(results=results)
 
 
-@router.post("/api/v1/review-events/{event_id}/void", response_model=VoidOut)
-def void_event(event_id: UUID, repository: Repository, _: Csrf) -> VoidOut:
+@router.post("/api/v1/review-events/{event_id}/void", status_code=204)
+def void_event(event_id: UUID, repository: Repository, _: Csrf) -> Response:
     try:
-        state = repository.void_event(event_id)
+        repository.void_event(event_id)
     except MissingError as exc:
         raise HTTPException(404, "event not found") from exc
-    except (EventConflictError, ConcurrentUpdateError) as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return VoidOut(
-        id=event_id,
-        status="voided",
-        word_id=state.word_id,
-        due_at=state.due_at,
-        version=state.version,
-    )
+    return Response(status_code=204)
 
 
 @router.get("/api/v1/audio/{word_id}")

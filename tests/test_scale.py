@@ -7,7 +7,7 @@ from time import monotonic
 from uuid import uuid4
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import create_study_session, submit_review
+from english_vocab_trainer.application.services import select_session_words, submit_review
 from english_vocab_trainer.domain.models import ReviewAction, Tier, Word
 
 
@@ -29,12 +29,12 @@ def test_two_thousand_word_session_progress_and_review_smoke(tmp_path: Path) -> 
             ]
         )
         now = datetime(2026, 1, 1, tzinfo=UTC)
-        session = create_study_session(repository, now, "scale", Random(7))
+        selected = select_session_words(repository, now, Random(7))
         event_id = uuid4()
-        review = submit_review(repository, event_id, session.words[0].id, ReviewAction.KNOWN, now)
+        review = submit_review(repository, event_id, selected[0].id, ReviewAction.KNOWN, now)
         stored = repository.get_event(event_id)
     finally:
         repository.close()
-    assert len(session.words) == 30 and len({word.id for word in session.words}) == 30
+    assert len(selected) == 30 and len({word.id for word in selected}) == 30
     assert review.status == "applied" and stored is not None
     assert monotonic() - started < 8

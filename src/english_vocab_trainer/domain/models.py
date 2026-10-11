@@ -48,17 +48,10 @@ class Word:
     tier: Tier
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class WordState:
     word_id: str
     due_at: datetime
-    stability: float = 0.0
-    difficulty: float = 5.0
-    first_seen_at: datetime | None = None
-    first_known_at: datetime | None = None
-    last_known_at: datetime | None = None
-    version: int = 0
-    card_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,27 +63,16 @@ class ReviewEvent:
     voided_at: datetime | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class StudySession:
-    id: str
-    words: tuple[Word, ...]
-
-
-def replay_word_state(word_id: str, events: list[ReviewEvent], revision: int = 0) -> WordState:
+def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
     """Rebuild state from genesis. Ordering is stable even for offline arrivals."""
     active = sorted(
         (event for event in events if event.voided_at is None),
         key=lambda event: (event.reviewed_at, event.id.int),
     )
     # Py-FSRS creates a time-based card id by default; seed it from word_id so
-    # offline replays have byte-for-byte deterministic card JSON.
+    # offline replays produce the same due date from the same event history.
     seed = int.from_bytes(word_id.encode("utf-8"), "big") % 2_000_000_000
-    state = WordState(
-        word_id,
-        datetime.min.replace(tzinfo=UTC),
-        version=revision,
-        card_json=Card(card_id=seed).to_json(),
-    )
+    card = Card(card_id=seed)
     scheduler = Scheduler(
         desired_retention=0.90,
         learning_steps=(LEARNING_STEP,),
@@ -102,20 +84,10 @@ def replay_word_state(word_id: str, events: list[ReviewEvent], revision: int = 0
     )
     for event in active:
         now = event.reviewed_at.astimezone(UTC)
-        state.first_seen_at = state.first_seen_at or now
-        assert state.card_json is not None
-        card = Card.from_json(state.card_json)
         rating = {
             Rating.AGAIN: FsrsRating.Again,
             Rating.GOOD: FsrsRating.Good,
             Rating.EASY: FsrsRating.Easy,
         }[event.rating]
         card, _ = scheduler.review_card(card, rating, now)
-        if event.rating is not Rating.AGAIN:
-            state.first_known_at = state.first_known_at or now
-            state.last_known_at = now
-        state.card_json = card.to_json()
-        state.stability = card.stability or 0.0
-        state.difficulty = card.difficulty or 5.0
-        state.due_at = card.due
-    return state
+    return WordState(word_id, card.due if active else datetime.min.replace(tzinfo=UTC))

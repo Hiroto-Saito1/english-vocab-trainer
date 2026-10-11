@@ -9,14 +9,7 @@ CREATE TABLE IF NOT EXISTS words (
 
 CREATE TABLE IF NOT EXISTS word_state (
     word_id TEXT PRIMARY KEY REFERENCES words(id),
-    due_at TEXT NOT NULL,
-    stability REAL NOT NULL,
-    difficulty REAL NOT NULL,
-    card_json TEXT,
-    first_seen_at TEXT,
-    first_known_at TEXT,
-    last_known_at TEXT,
-    version INTEGER NOT NULL DEFAULT 0
+    due_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS review_events (

@@ -3,20 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from random import Random
 from typing import cast
-from uuid import uuid4
 
-from english_vocab_trainer.application.services import (
-    select_session_words,
-    submit_review,
-)
-from english_vocab_trainer.domain.models import (
-    ReviewAction,
-    ReviewEvent,
-    Tier,
-    Word,
-    WordState,
-)
-from english_vocab_trainer.ports.errors import ConcurrentUpdateError
+from english_vocab_trainer.application.services import select_session_words
+from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
@@ -108,36 +97,3 @@ def test_new_tier_shortage_spills_to_the_other_tier() -> None:
     result = select(SessionRepository(candidates, []), seed=3)
     assert sum(word.tier is Tier.UPPER for word in result) == 1
     assert sum(word.tier is Tier.ULTRA for word in result) == 10
-
-
-class RetryingReviewRepository:
-    def __init__(self) -> None:
-        self.attempts = 0
-
-    def get_event(self, event_id: object) -> None:
-        return None
-
-    def has_active_review(self, word_id: str) -> bool:
-        return False
-
-    def state(self, word_id: str) -> WordState:
-        return WordState(word_id, datetime(2026, 1, 1, tzinfo=UTC), version=0)
-
-    def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
-        self.attempts += 1
-        if self.attempts == 1:
-            raise ConcurrentUpdateError("retry")
-        return WordState(event.word_id, event.reviewed_at, version=1)
-
-
-def test_submit_review_retries_once_after_a_cas_conflict() -> None:
-    repository = RetryingReviewRepository()
-    now = datetime.now(UTC)
-    result = submit_review(
-        cast(VocabularyRepository, repository),
-        uuid4(),
-        "word",
-        ReviewAction.KNOWN,
-        now,
-    )
-    assert result.status == "applied" and repository.attempts == 2 and result.state.version == 1

@@ -16,11 +16,7 @@ from english_vocab_trainer.domain.models import (
     WordState,
     replay_word_state,
 )
-from english_vocab_trainer.ports.errors import (
-    ConcurrentUpdateError,
-    EventConflictError,
-    MissingError,
-)
+from english_vocab_trainer.ports.errors import EventConflictError, MissingError
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -135,17 +131,7 @@ class SQLiteVocabularyRepository:
         row = self.db.execute("SELECT * FROM word_state WHERE word_id=?", (word_id,)).fetchone()
         if row is None:
             return WordState(word_id, datetime.min.replace(tzinfo=UTC))
-        return WordState(
-            word_id,
-            datetime.fromisoformat(row["due_at"]),
-            row["stability"],
-            row["difficulty"],
-            _dt(row["first_seen_at"]),
-            _dt(row["first_known_at"]),
-            _dt(row["last_known_at"]),
-            row["version"],
-            row["card_json"],
-        )
+        return WordState(word_id, datetime.fromisoformat(row["due_at"]))
 
     def has_active_review(self, word_id: str) -> bool:
         row = self.db.execute(
@@ -156,26 +142,12 @@ class SQLiteVocabularyRepository:
 
     def _save(self, state: WordState) -> None:
         self.db.execute(
-            "INSERT INTO word_state VALUES(?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(word_id) DO UPDATE SET due_at=excluded.due_at,"
-            "stability=excluded.stability,difficulty=excluded.difficulty,"
-            "card_json=excluded.card_json,first_seen_at=excluded.first_seen_at,"
-            "first_known_at=excluded.first_known_at,last_known_at=excluded.last_known_at,"
-            "version=excluded.version",
-            (
-                state.word_id,
-                _iso(state.due_at),
-                state.stability,
-                state.difficulty,
-                state.card_json,
-                _iso(state.first_seen_at),
-                _iso(state.first_known_at),
-                _iso(state.last_known_at),
-                state.version,
-            ),
+            "INSERT INTO word_state VALUES(?,?) "
+            "ON CONFLICT(word_id) DO UPDATE SET due_at=excluded.due_at",
+            (state.word_id, _iso(state.due_at)),
         )
 
-    def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
+    def append_event(self, event: ReviewEvent) -> WordState:
         with self._transaction():
             old = self.db.execute(
                 "SELECT word_id,rating,reviewed_at FROM review_events WHERE id=?",
@@ -192,9 +164,6 @@ class SQLiteVocabularyRepository:
                 return self.state(event.word_id)
             if self.get_word(event.word_id) is None:
                 raise MissingError("word not found")
-            state = self.state(event.word_id)
-            if state.version != expected_version:
-                raise ConcurrentUpdateError("CAS conflict")
             self.db.execute(
                 "INSERT INTO review_events VALUES(?,?,?,?,?)",
                 (
@@ -205,7 +174,7 @@ class SQLiteVocabularyRepository:
                     None,
                 ),
             )
-            state = replay_word_state(event.word_id, self._events(event.word_id), state.version + 1)
+            state = replay_word_state(event.word_id, self._events(event.word_id))
             self._save(state)
             return state
 
@@ -223,8 +192,6 @@ class SQLiteVocabularyRepository:
                 "UPDATE review_events SET voided_at=? WHERE id=?",
                 (_iso(datetime.now(UTC)), str(event_id)),
             )
-            state = replay_word_state(
-                word_id, self._events(word_id), self.state(word_id).version + 1
-            )
+            state = replay_word_state(word_id, self._events(word_id))
             self._save(state)
             return state

@@ -16,6 +16,10 @@ def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
         )
     }
     assert tables == EXPECTED_TABLES
+    assert {row[1] for row in connection.execute("PRAGMA table_info(word_state)")} == {
+        "word_id",
+        "due_at",
+    }
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

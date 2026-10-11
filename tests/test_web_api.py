@@ -52,13 +52,12 @@ def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
         assert sum(repository.get_event(UUID(int=value)) is not None for value in (9, 10, 11)) == 3
     assert (
         first["results"][0]["status"] == "applied"
-        and first["results"][0]["rating"] == "easy"
         and first["results"][0]["due_at"] is not None
-        and first["results"][0]["version"] == 1
+        and set(first["results"][0]) == {"id", "status", "due_at"}
     )
     assert second["results"][0]["status"] == "idempotent"
-    assert third["results"][0]["rating"] == "good"
-    assert fourth["results"][0]["rating"] == "again"
+    assert third["results"][0]["status"] == "applied"
+    assert fourth["results"][0]["status"] == "applied"
 
 
 def test_review_batch_reports_missing_and_conflict(tmp_path: Path) -> None:
@@ -76,8 +75,8 @@ def test_review_batch_reports_missing_and_conflict(tmp_path: Path) -> None:
         conflict = client.post(
             "/api/v1/review-events/batch", json=[dict(event, action="unknown")]
         ).json()
-    assert missing["results"][0]["status"] == "missing" and missing["acknowledged"] == []
-    assert conflict["results"][0]["status"] == "conflict" and conflict["acknowledged"] == []
+    assert missing == {"results": [{"id": event["id"], "status": "missing", "due_at": None}]}
+    assert conflict == {"results": [{"id": event["id"], "status": "conflict", "due_at": None}]}
 
 
 def test_void_review_is_idempotent_and_missing_is_404(tmp_path: Path) -> None:
@@ -91,10 +90,10 @@ def test_void_review_is_idempotent_and_missing_is_404(tmp_path: Path) -> None:
     database = tmp_path / "v.db"
     with _client(tmp_path, (word(),)) as client:
         client.post("/api/v1/review-events/batch", json=[event])
-        first = client.post(f"/api/v1/review-events/{event_id}/void").json()
-        second = client.post(f"/api/v1/review-events/{event_id}/void").json()
+        first = client.post(f"/api/v1/review-events/{event_id}/void")
+        second = client.post(f"/api/v1/review-events/{event_id}/void")
         missing = client.post(f"/api/v1/review-events/{UUID(int=99)}/void")
     with SQLiteVocabularyRepository(database) as repository:
         stored = repository.get_event(event_id)
-    assert first["version"] == second["version"] and stored is not None
-    assert stored.voided_at is not None and missing.status_code == 404
+    assert first.status_code == second.status_code == 204 and first.content == second.content == b""
+    assert stored is not None and stored.voided_at is not None and missing.status_code == 404

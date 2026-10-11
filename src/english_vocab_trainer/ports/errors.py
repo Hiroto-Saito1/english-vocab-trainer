@@ -4,7 +4,3 @@ class MissingError(RuntimeError):
 
 class EventConflictError(RuntimeError):
     pass
-
-
-class ConcurrentUpdateError(RuntimeError):
-    pass

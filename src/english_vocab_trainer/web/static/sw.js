@@ -1,6 +1,6 @@
 const SHELL = "pwa-shell-v3";
 const AUDIO = "pwa-private-audio-v3";
-const MANAGED_PREFIXES = ["m1-", "pwa-"];
+const MANAGED_PREFIX = "pwa-";
 const SHELL_ASSETS = ["/", "/static/app.js", "/static/manifest.json", "/static/icon.svg"];
 let activeAudioUrls = new Set();
 
@@ -29,7 +29,7 @@ async function clearPrivateCaches() {
   activeAudioUrls = new Set();
   await Promise.all(
     (await caches.keys())
-      .filter((key) => key === AUDIO || key.startsWith("pwa-user-"))
+      .filter((key) => key === AUDIO)
       .map((key) => caches.delete(key)),
   );
 }
@@ -102,7 +102,7 @@ self.addEventListener("activate", (event) => {
     caches.keys()
       .then((keys) => Promise.all(
         keys
-          .filter((key) => MANAGED_PREFIXES.some((prefix) => key.startsWith(prefix)) && key !== SHELL && key !== AUDIO)
+          .filter((key) => key.startsWith(MANAGED_PREFIX) && key !== SHELL && key !== AUDIO)
           .map((key) => caches.delete(key)),
       ))
       .then(() => self.clients.claim()),

@@ -33,7 +33,7 @@ def test_daily_session_returns_thirty_balanced_unpersisted_words(tmp_path: Path)
     assert response.status_code == 200 and len(payload["items"]) == 30
     assert len({item["id"] for item in payload["items"]}) == 30
     assert abs(tiers.count("upper") - tiers.count("ultra")) <= 1
-    assert "mode" not in payload and "created_at" not in payload
+    assert "id" not in payload and "mode" not in payload and "created_at" not in payload
     assert payload["learning_step_seconds"] == 600
 
 

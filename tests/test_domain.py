@@ -12,17 +12,14 @@ from english_vocab_trainer.domain.models import (
 
 def test_fsrs_again_has_ten_minute_learning_step() -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    state = replay_word_state("one", [ReviewEvent(uuid4(), "one", Rating.AGAIN, now)], revision=7)
+    state = replay_word_state("one", [ReviewEvent(uuid4(), "one", Rating.AGAIN, now)])
     assert 9 * 60 <= (state.due_at - now).total_seconds() <= 11 * 60
-    assert state.card_json is not None
-    assert state.version == 7
 
 
-def test_first_known_is_preserved() -> None:
+def test_fsrs_easy_schedules_a_future_review() -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     state = replay_word_state("one", [ReviewEvent(uuid4(), "one", Rating.EASY, now)])
-    assert state.first_seen_at == state.first_known_at == now
-    assert state.stability > 0
+    assert state.due_at > now
 
 
 def test_action_rating_mapping() -> None:

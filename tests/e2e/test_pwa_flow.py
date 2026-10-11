@@ -157,8 +157,8 @@ def wait_for_audio_cache(page: Page) -> list[str]:
           if (!navigator.serviceWorker.controller || !window.__pwa) return false;
           const state = window.__pwa.getState(), cache = window.__pwa.getAudioCacheState();
           return Boolean(
-            state.sessionId && cache.ready && cache.sessionId === state.sessionId &&
-            cache.expected === state.cards.length && cache.cached === cache.expected &&
+            cache.ready && cache.expected === state.cards.length &&
+            cache.cached === cache.expected &&
             cache.failed === 0
           );
         }""",
@@ -244,8 +244,8 @@ def private_storage_state(page: Page) -> tuple[list[str], list[list[object]]]:
         tuple[list[str], list[list[object]]],
         page.evaluate(
             """async () => Promise.race([((async () => {
-              const privateKeys = (await caches.keys()).filter((key) =>
-                key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
+              const privateKeys = (await caches.keys()).filter(
+                (key) => key === "pwa-private-audio-v3"
               );
               const db = await new Promise((resolve, reject) => {
                 const request = indexedDB.open("english-vocab-trainer", 1);
@@ -546,9 +546,8 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
             status=200,
             content_type="application/json",
             body=(
-                '{"results":[{"id":"' + acknowledged + '","word_id":"word-0","status":"applied"},'
-                '{"id":"' + conflicted + '","word_id":"word-1","status":"conflict"}],'
-                '"acknowledged":["' + acknowledged + '"]}'
+                '{"results":[{"id":"' + acknowledged + '","status":"applied","due_at":null},'
+                '{"id":"' + conflicted + '","status":"conflict","due_at":null}]}'
             ),
         )
 
@@ -596,10 +595,8 @@ def test_online_reconnect_chunks_more_than_two_hundred_outbox_events(
             body=dumps(
                 {
                     "results": [
-                        {"id": event["id"], "word_id": event["word_id"], "status": "applied"}
-                        for event in events
-                    ],
-                    "acknowledged": [event["id"] for event in events],
+                        {"id": event["id"], "status": "applied", "due_at": None} for event in events
+                    ]
                 }
             ),
         )
@@ -822,7 +819,7 @@ def test_private_reset_cancels_an_inflight_audio_preload(
     page.wait_for_function(
         """() => {
           const cache = window.__pwa.getAudioCacheState();
-          return Boolean(cache.sessionId && cache.expected > 0 && !cache.ready);
+          return Boolean(cache.expected > 0 && !cache.ready);
         }""",
         timeout=10_000,
     )

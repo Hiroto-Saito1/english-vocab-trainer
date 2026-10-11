@@ -18,7 +18,6 @@ from typing import Any, Protocol
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioUploader, S3LikeClient
 from english_vocab_trainer.domain.models import Tier, Word
-from english_vocab_trainer.validation import validate_english_transcript
 from english_vocab_trainer.web.container import ConfigurationError, r2_client_from_env
 
 APPROVED_SOURCES = ("上級SVL", "超上級SVL")
@@ -27,6 +26,7 @@ _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
 _TERM_VALUE = re.compile(r"[A-Za-z][A-Za-z '\-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _WORDS = re.compile(r"[^\W\d_]+", re.UNICODE)
+_JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _COMMON_ENGLISH_PUNCTUATION = str.maketrans(
     {
         "\u00a0": " ",  # non-breaking space
@@ -54,6 +54,12 @@ _ERROR_REASONS = frozenset(
         "transcript-quality-low-lexical-diversity",
     }
 )
+_VALIDATION_FAILURE_REASONS = {
+    "transcript must use Latin alphabetic characters only": "transcript-script-invalid",
+    "transcript contains unsafe Unicode": "transcript-unicode-invalid",
+    "transcript must contain ASCII punctuation only": "transcript-punctuation-invalid",
+    "transcript contains an unbound combining mark": "transcript-unbound-combining-mark",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +223,7 @@ def _source_candidates(root: Path, source: str) -> list[AudioCandidate]:
     return candidates
 
 
-def inventory_digest(candidates: Iterable[AudioCandidate]) -> str:
+def inventory_digest(candidates: Iterable[AudioCandidate | CatalogRecord]) -> str:
     payload = "\n".join(
         f"{item.audio_key}\t{item.checksum}\t{item.term}"
         for item in sorted(candidates, key=lambda item: item.audio_key)
@@ -284,10 +290,6 @@ def report_path(catalog: Path, name: str) -> Path:
 
 def error_report_path(catalog: Path) -> Path:
     return catalog.with_suffix(catalog.suffix + ".transcription-errors.jsonl")
-
-
-def error_journal_path(catalog: Path) -> Path:
-    return catalog.with_suffix(catalog.suffix + ".transcription-errors.journal.jsonl")
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -429,88 +431,7 @@ def _failure_reason(error: Exception) -> str:
     message = str(error)
     if message in _ERROR_REASONS:
         return message
-    if message == "transcript must use Latin alphabetic characters only":
-        return "transcript-script-invalid"
-    if message == "transcript contains unsafe Unicode":
-        return "transcript-unicode-invalid"
-    if message == "transcript must contain ASCII punctuation only":
-        return "transcript-punctuation-invalid"
-    if message == "transcript contains an unbound combining mark":
-        return "transcript-unbound-combining-mark"
-    return "transcript-validation-failed"
-
-
-def _error_updates(catalog: Path, fingerprint: str | None = None) -> dict[str, dict[str, str]]:
-    path = error_journal_path(catalog)
-    if not path.exists():
-        return {}
-    unresolved: dict[str, dict[str, str]] = {}
-    lines = path.read_text(encoding="utf-8").splitlines()
-    header_seen = False
-    for index, line in enumerate(lines):
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            if index == len(lines) - 1:
-                break
-            raise ValueError("transcription error journal is corrupt") from None
-        if not isinstance(entry, dict):
-            raise ValueError("transcription error journal is corrupt")
-        if entry.get("kind") == "header":
-            if header_seen or not isinstance(entry.get("fingerprint"), str):
-                raise ValueError("transcription error journal is corrupt")
-            if fingerprint is not None and entry["fingerprint"] != fingerprint:
-                raise ValueError("catalog identity does not match transcription error journal")
-            header_seen = True
-            continue
-        if (
-            not header_seen
-            or entry.get("kind") != "event"
-            or not isinstance(entry.get("checksum"), str)
-        ):
-            raise ValueError("transcription error journal is corrupt")
-        checksum_value = entry["checksum"]
-        if _SHA256.fullmatch(checksum_value) is None:
-            raise ValueError("transcription error journal is corrupt")
-        status = entry.get("status")
-        if (
-            status == "failed"
-            and isinstance(entry.get("term"), str)
-            and entry.get("reason") in _ERROR_REASONS
-        ):
-            unresolved[checksum_value] = {
-                "checksum": checksum_value,
-                "term": entry["term"],
-                "reason": entry["reason"],
-            }
-        elif status == "resolved":
-            unresolved.pop(checksum_value, None)
-        else:
-            raise ValueError("transcription error journal is corrupt")
-    return unresolved
-
-
-def _append_error_event(
-    catalog: Path, fingerprint: str, record: CatalogRecord, status: str, reason: str | None = None
-) -> None:
-    path = error_journal_path(catalog)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _repair_truncated_journal_tail(path)
-    new = not path.exists() or path.stat().st_size == 0
-    event: dict[str, str] = {"checksum": record.checksum, "kind": "event", "status": status}
-    if status == "failed":
-        event["term"] = record.term
-        if reason not in _ERROR_REASONS:
-            raise ValueError("transcription error reason is invalid")
-        event["reason"] = reason
-    with path.open("a", encoding="utf-8") as journal:
-        if new:
-            journal.write(
-                json.dumps({"kind": "header", "fingerprint": fingerprint}, sort_keys=True) + "\n"
-            )
-        journal.write(json.dumps(event, sort_keys=True) + "\n")
-        journal.flush()
-        os.fsync(journal.fileno())
+    return _VALIDATION_FAILURE_REASONS.get(message, "transcript-validation-failed")
 
 
 def _unlink_durable(path: Path) -> None:
@@ -527,7 +448,6 @@ def _unlink_durable(path: Path) -> None:
 def _write_current_error_report(catalog: Path, unresolved: dict[str, dict[str, str]]) -> None:
     if not unresolved:
         _unlink_durable(error_report_path(catalog))
-        _unlink_durable(error_journal_path(catalog))
         return
     text = "".join(
         json.dumps(unresolved[checksum_value], sort_keys=True) + "\n"
@@ -565,29 +485,6 @@ def _read_current_error_report(catalog: Path) -> dict[str, dict[str, str]]:
     return result
 
 
-def _replace_error_journal(
-    catalog: Path, fingerprint: str, unresolved: dict[str, dict[str, str]]
-) -> None:
-    if not unresolved:
-        _unlink_durable(error_journal_path(catalog))
-        return
-    lines = [json.dumps({"kind": "header", "fingerprint": fingerprint}, sort_keys=True)]
-    lines.extend(
-        json.dumps(
-            {
-                "checksum": unresolved[checksum_value]["checksum"],
-                "kind": "event",
-                "reason": unresolved[checksum_value]["reason"],
-                "status": "failed",
-                "term": unresolved[checksum_value]["term"],
-            },
-            sort_keys=True,
-        )
-        for checksum_value in sorted(unresolved)
-    )
-    _atomic_write(error_journal_path(catalog), "\n".join(lines) + "\n")
-
-
 def read_catalog(path: Path, *, include_journal: bool = True) -> list[CatalogRecord]:
     if not path.exists():
         return []
@@ -620,8 +517,11 @@ def catalog_fingerprint(records: Iterable[CatalogRecord]) -> str:
 
 def validate_transcript(transcript: str) -> str:
     value = unicodedata.normalize("NFKC", transcript).translate(_COMMON_ENGLISH_PUNCTUATION)
-    value = re.sub(r"[ \t]+", " ", value)
-    value = validate_english_transcript(value)
+    value = re.sub(r"[ \t]+", " ", value).strip()
+    if _JAPANESE.search(value):
+        raise ValueError("transcript must be English only")
+    if len(value) < 12 or len(value.split()) < 3:
+        raise ValueError("transcript is too short to contain a definition or example")
     preceding_latin = False
     for character in value:
         category = unicodedata.category(character)
@@ -700,7 +600,14 @@ def transcribe_catalog(
         else:
             updates = _journal_updates(catalog, fingerprint)
         records = _merge_journal(base_records, updates)
-        unresolved = _error_updates(catalog, fingerprint)
+        unresolved = _read_current_error_report(catalog)
+        pending_checksums = {record.checksum for record in records if record.transcript is None}
+        unresolved = {
+            checksum_value: error
+            for checksum_value, error in unresolved.items()
+            if checksum_value in pending_checksums
+        }
+        _write_current_error_report(catalog, unresolved)
         total = len(records)
         completed = 0 if force else sum(record.transcript is not None for record in records)
         skipped = completed
@@ -720,7 +627,6 @@ def transcribe_catalog(
                     "term": record.term,
                     "reason": reason,
                 }
-                _append_error_event(catalog, fingerprint, record, "failed", reason)
                 _write_current_error_report(catalog, unresolved)
                 if continue_on_error:
                     continue
@@ -729,7 +635,7 @@ def transcribe_catalog(
             _append_journal(catalog, fingerprint, records[index])
             if record.checksum in unresolved:
                 unresolved.pop(record.checksum)
-                _append_error_event(catalog, fingerprint, record, "resolved")
+                _write_current_error_report(catalog, unresolved)
             completed += 1
             if on_transcribed is not None:
                 on_transcribed(completed, total, records[index])
@@ -816,23 +722,13 @@ def scan_catalog(
     *,
     profile: CatalogProfile = MVP_PROFILE,
     limit_per_source: int = 10,
-    resume: bool = False,
     force: bool = False,
 ) -> tuple[list[CatalogRecord], CatalogManifest]:
-    """Scan immutable audio, selectively reuse verified text, and atomically replace a catalog."""
+    """Scan audio and reuse transcript checkpoints only after validating their provenance."""
     with catalog_lock(catalog):
         base_records = read_catalog(catalog, include_journal=False)
         pending_journal = journal_path(catalog).exists()
-        pending_error_journal = error_journal_path(catalog).exists()
         pending_error_report = error_report_path(catalog).exists()
-        has_transcript_state = (
-            pending_journal
-            or pending_error_journal
-            or pending_error_report
-            or any(record.transcript is not None for record in base_records)
-        )
-        if has_transcript_state and not (resume or force):
-            raise ValueError("existing transcript state requires --resume or --force")
         candidates = select_audio(root, limit_per_source, profile=profile)
         records = records_from_audio(candidates)
         expected = profile.expected_count(limit_per_source)
@@ -849,34 +745,36 @@ def scan_catalog(
             "en",
         )
 
-        if force or not resume:
+        if force:
             write_catalog(catalog, records)
             write_manifest(catalog, manifest)
-            if force:
-                _unlink_durable(journal_path(catalog))
-                _unlink_durable(error_journal_path(catalog))
-                _unlink_durable(error_report_path(catalog))
+            _unlink_durable(journal_path(catalog))
+            _unlink_durable(error_report_path(catalog))
+            return records, manifest
+
+        if not base_records and not pending_journal and not pending_error_report:
+            write_catalog(catalog, records)
+            write_manifest(catalog, manifest)
             return records, manifest
 
         updates: dict[str, CatalogRecord] = {}
-        unresolved: dict[str, dict[str, str]] = {}
-        prior_manifest: CatalogManifest | None = None
-        if pending_journal or pending_error_journal:
-            prior_manifest = read_manifest(catalog)
-            if prior_manifest is None:
-                raise ValueError("checkpoint state exists without a provenance manifest")
+        prior_manifest = read_manifest(catalog)
+        if prior_manifest is None:
+            raise ValueError("catalog state exists without a provenance manifest")
+        prior_records = validate_records(
+            base_records,
+            prior_manifest.expected_count,
+            require_transcript=False,
+        )
+        if inventory_digest(prior_records) != prior_manifest.inventory_digest:
+            raise ValueError("catalog inventory does not match provenance manifest")
 
         if pending_journal:
-            assert prior_manifest is not None
             updates = _journal_updates(catalog, prior_manifest.fingerprint)
             if prior_manifest.fingerprint != manifest.fingerprint:
                 raise ValueError("catalog identity does not match transcription journal")
 
-        if pending_error_journal:
-            assert prior_manifest is not None
-            unresolved = _error_updates(catalog, prior_manifest.fingerprint)
-        elif pending_error_report:
-            unresolved = _read_current_error_report(catalog)
+        unresolved = _read_current_error_report(catalog)
 
         prior = {record.checksum: record for record in _merge_journal(base_records, updates)}
         reused: list[CatalogRecord] = []
@@ -900,7 +798,6 @@ def scan_catalog(
             for checksum_value, error in unresolved.items()
             if checksum_value in current_missing
         }
-        _replace_error_journal(catalog, manifest.fingerprint, unresolved)
         _write_current_error_report(catalog, unresolved)
     return records, manifest
 
@@ -1068,9 +965,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     )
     parser.add_argument("--limit-per-source", type=int, default=10)
     parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
-    parser.add_argument(
-        "--resume", action="store_true", help="preserve matching catalog transcripts"
-    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--max-records", type=int)
@@ -1097,7 +991,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
                 args.catalog,
                 profile=profile,
                 limit_per_source=args.limit_per_source,
-                resume=args.resume,
                 force=args.force,
             )
             print(f"wrote {len(records)} private catalog records")
