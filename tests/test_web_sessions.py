@@ -3,63 +3,43 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.container import AppContainer
 
 
-def test_screen_session_is_persisted(tmp_path: Path) -> None:
-    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
-    repository = provider.for_user("local-user")
-    repository.bulk_upsert_words([Word("one", "one", 9, None, "one.mp3", Tier.UPPER)])
-    repository.close()
-    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+def test_daily_session_returns_thirty_balanced_unpersisted_words(tmp_path: Path) -> None:
+    database = tmp_path / "v.db"
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.bulk_upsert_words(
+            [
+                Word(
+                    str(index),
+                    f"term {index}",
+                    index % 4,
+                    None,
+                    f"{index}.mp3",
+                    Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
+                )
+                for index in range(100)
+            ]
+        )
+    app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
     with TestClient(app) as client:
-        response = client.get("/api/v1/sessions?mode=screen&count=20")
-        assert client.get("/api/v1/sessions?mode=screen").status_code == 422
-        assert client.get("/api/v1/sessions?mode=screen&count=19").status_code == 422
-        assert client.get("/api/v1/sessions?mode=other").status_code == 422
+        response = client.get("/api/v1/sessions")
     payload = response.json()
-    stored_repository = provider.for_user("local-user")
-    stored = stored_repository.get_session(payload["id"])
-    stored_repository.close()
-    assert (
-        response.status_code == 200
-        and len(payload["items"]) == 1
-        and payload["items"][0]["audio_url"] == "/api/v1/audio/one"
-        and payload["items"][0]["tier"] == "upper"
-        and payload["learning_step_seconds"] == 600
-        and stored is not None
-    )
+    tiers = [item["tier"] for item in payload["items"]]
+    assert response.status_code == 200 and len(payload["items"]) == 30
+    assert len({item["id"] for item in payload["items"]}) == 30
+    assert abs(tiers.count("upper") - tiers.count("ultra")) <= 1
+    assert "mode" not in payload and "created_at" not in payload
+    assert payload["learning_step_seconds"] == 600
 
 
-def test_daily_session_honours_configured_target(tmp_path: Path) -> None:
-    target = 100
-    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
-    repository = provider.for_user("local-user")
-    repository.bulk_upsert_words(
-        [Word(str(index), f"term {index}", index % 4, None, f"{index}.mp3") for index in range(100)]
-    )
-    repository.close()
-    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
+def test_empty_daily_session_is_returned(tmp_path: Path) -> None:
+    database = tmp_path / "v.db"
+    app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
     with TestClient(app) as client:
-        assert client.patch("/api/v1/settings", json={"daily_target": target}).status_code == 200
-        response = client.get("/api/v1/sessions?mode=daily")
-    assert response.status_code == 200 and len(response.json()["items"]) == target
-
-
-def test_empty_daily_session_is_persisted_and_returned(tmp_path: Path) -> None:
-    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
-    app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
-    with TestClient(app) as client:
-        response = client.get("/api/v1/sessions?mode=daily")
-    session_id = response.json()["id"]
-    repository = provider.for_user("local-user")
-    try:
-        assert repository.get_session("missing") is None
-        stored = repository.get_session(session_id)
-    finally:
-        repository.close()
+        response = client.get("/api/v1/sessions")
     assert response.status_code == 200 and response.json()["items"] == []
-    assert stored is not None and stored.words == ()

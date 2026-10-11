@@ -68,7 +68,6 @@ class AuthService:
     password_hash: str
     signing_secret: bytes
     limiter: LoginAttemptLimiter
-    user_id: str = "primary"
     secure_cookies: bool = True
     clock: Clock = lambda: datetime.now(UTC)
 
@@ -109,8 +108,6 @@ class AuthService:
         self.limiter.clear()
         csrf = _b64(secrets.token_bytes(32))
         payload = {
-            "v": 1,
-            "u": self.user_id,
             "iat": int(now.timestamp()),
             "exp": int((now + SESSION_TTL).timestamp()),
             "c": csrf_hash(csrf),
@@ -119,31 +116,29 @@ class AuthService:
         signature = _b64(
             hmac.new(self.signing_secret, encoded.encode("ascii"), hashlib.sha256).digest()
         )
-        return AuthCookies(f"v1.{encoded}.{signature}", csrf)
+        return AuthCookies(f"{encoded}.{signature}", csrf)
 
-    def user_from_session(
+    def validate_session(
         self, session: str | None, csrf: str | None = None, *, require_csrf: bool = False
-    ) -> str:
+    ) -> None:
         if session is None or len(session) > MAX_TOKEN_BYTES:
             raise AuthenticationError("missing session")
         parts = session.split(".")
-        if len(parts) != 3 or parts[0] != "v1":
+        if len(parts) != 2:
             raise AuthenticationError("invalid session")
         try:
-            encoded_payload = _unb64(parts[1])
-            _unb64(parts[2])
+            encoded_payload = _unb64(parts[0])
+            _unb64(parts[1])
             payload = json.loads(encoded_payload)
         except ValueError as exc:
             raise AuthenticationError("invalid session") from exc
         expected = _b64(
-            hmac.new(self.signing_secret, parts[1].encode("ascii"), hashlib.sha256).digest()
+            hmac.new(self.signing_secret, parts[0].encode("ascii"), hashlib.sha256).digest()
         )
-        if not hmac.compare_digest(expected, parts[2]) or not isinstance(payload, dict):
+        if not hmac.compare_digest(expected, parts[1]) or not isinstance(payload, dict):
             raise AuthenticationError("invalid session")
         if (
-            set(payload) != {"v", "u", "iat", "exp", "c"}
-            or payload["v"] != 1
-            or payload["u"] != self.user_id
+            set(payload) != {"iat", "exp", "c"}
             or not isinstance(payload["c"], str)
             or len(payload["c"]) != 64
             or any(character not in "0123456789abcdef" for character in payload["c"])
@@ -165,4 +160,3 @@ class AuthService:
                 raise AuthenticationError("invalid csrf") from exc
             if not hmac.compare_digest(payload["c"], binding):
                 raise AuthenticationError("invalid csrf")
-        return self.user_id

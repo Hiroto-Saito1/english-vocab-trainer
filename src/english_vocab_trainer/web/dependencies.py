@@ -1,33 +1,17 @@
 from __future__ import annotations
 
 import hmac
+import sqlite3
 from collections.abc import Iterator
 from typing import Annotated, cast
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request
 
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.auth import AuthenticationError
-from english_vocab_trainer.web.container import AppContainer, ConfigurationError
-
-
-def identity(
-    request: Request,
-) -> str:
-    container = get_container(request)
-    if container.environment in {"local", "test"}:
-        if container.local_user_id is None:
-            raise HTTPException(500, "local identity is not configured")
-        return container.local_user_id
-    if container.auth is None:
-        raise HTTPException(503, "authentication is unavailable")
-    try:
-        return container.auth.user_from_session(
-            request.cookies.get(container.auth.session_cookie_name)
-        )
-    except AuthenticationError as exc:
-        raise HTTPException(401, "authentication required") from exc
+from english_vocab_trainer.web.container import AppContainer
 
 
 def csrf(
@@ -43,7 +27,7 @@ def csrf(
     if token is None or cookie is None:
         raise HTTPException(403, "csrf validation failed")
     try:
-        container.auth.user_from_session(
+        container.auth.validate_session(
             request.cookies.get(container.auth.session_cookie_name), token, require_csrf=True
         )
     except AuthenticationError as exc:
@@ -56,12 +40,18 @@ def get_container(request: Request) -> AppContainer:
     return cast(AppContainer, request.app.state.container)
 
 
-def repository(
-    request: Request, user_id: Annotated[str, Depends(identity)]
-) -> Iterator[VocabularyRepository]:
+def repository(request: Request) -> Iterator[VocabularyRepository]:
+    container = get_container(request)
+    if container.environment not in {"local", "test"}:
+        if container.auth is None:
+            raise HTTPException(503, "authentication is unavailable")
+        try:
+            container.auth.validate_session(request.cookies.get(container.auth.session_cookie_name))
+        except AuthenticationError as exc:
+            raise HTTPException(401, "authentication required") from exc
     try:
-        user_repository = get_container(request).repositories.for_user(user_id)
-    except ConfigurationError as exc:
+        user_repository = SQLiteVocabularyRepository(container.database)
+    except (OSError, sqlite3.Error) as exc:
         raise HTTPException(503, "repository is unavailable") from exc
     try:
         yield user_repository

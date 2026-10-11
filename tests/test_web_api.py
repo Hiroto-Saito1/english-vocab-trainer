@@ -4,29 +4,21 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
-from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.container import AppContainer
 
 
 def _client(tmp_path: Path, words: tuple[Word, ...] = ()) -> TestClient:
-    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
-    repository = provider.for_user("local-user")
-    try:
-        if words:
-            repository.bulk_upsert_words(list(words))
-    finally:
-        repository.close()
-    return TestClient(
-        create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
-    )
+    database = tmp_path / "v.db"
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.bulk_upsert_words(list(words))
+    return TestClient(create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test")))
 
 
-def test_progress_uses_test_container(tmp_path: Path) -> None:
-    with _client(tmp_path, (Word("one", "one", 9, None, "one.mp3"),)) as client:
-        response = client.get("/api/v1/progress")
-    assert response.status_code == 200 and response.json()["total"] == 1
+def word() -> Word:
+    return Word("one", "one", 9, None, "one.mp3", Tier.UPPER)
 
 
 def test_service_worker_is_root_scoped(tmp_path: Path) -> None:
@@ -39,47 +31,6 @@ def test_service_worker_is_root_scoped(tmp_path: Path) -> None:
     )
 
 
-def test_settings_patch_persists_and_validates(tmp_path: Path) -> None:
-    with _client(tmp_path) as client:
-        assert client.get("/api/v1/settings").json()["daily_target"] == 30
-        assert (
-            client.patch("/api/v1/settings", json={"daily_target": 42}).json()["daily_target"] == 42
-        )
-        assert client.get("/api/v1/settings").json()["daily_target"] == 42
-        assert client.patch("/api/v1/settings", json={"daily_target": 0}).status_code == 422
-        assert client.patch("/api/v1/settings", json={"daily_target": 101}).status_code == 422
-
-
-def test_words_filter_and_transcript_validation(tmp_path: Path) -> None:
-    with _client(
-        tmp_path,
-        (
-            Word("nine", "nine", 9, None, "nine.mp3"),
-            Word("ten", "ten", 10, None, "ten.mp3"),
-            Word("none", "none", None, None, "none.mp3"),
-        ),
-    ) as client:
-        assert client.get("/api/v1/words?levels=10&limit=1").json()["items"][0]["id"] == "ten"
-        assert (
-            client.patch(
-                "/api/v1/words/nine/transcript",
-                json={"transcript": "An English definition example."},
-            ).status_code
-            == 200
-        )
-        assert (
-            client.patch("/api/v1/words/nine/transcript", json={"transcript": "日本語"}).status_code
-            == 422
-        )
-        assert (
-            client.patch(
-                "/api/v1/words/no/transcript",
-                json={"transcript": "An English definition example."},
-            ).status_code
-            == 404
-        )
-
-
 def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
     event = {
         "id": str(UUID(int=9)),
@@ -87,7 +38,8 @@ def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
         "action": "known",
         "reviewed_at": "2026-01-01T00:00:00Z",
     }
-    with _client(tmp_path, (Word("one", "one", 9, None, "one.mp3"),)) as client:
+    database = tmp_path / "v.db"
+    with _client(tmp_path, (word(),)) as client:
         first = client.post("/api/v1/review-events/batch", json=[event]).json()
         second = client.post("/api/v1/review-events/batch", json=[event]).json()
         later = dict(event, id=str(UUID(int=10)), reviewed_at="2026-01-02T00:00:00Z")
@@ -96,14 +48,15 @@ def test_review_batch_known_retry_is_idempotent(tmp_path: Path) -> None:
             later, id=str(UUID(int=11)), action="unknown", reviewed_at="2026-01-03T00:00:00Z"
         )
         fourth = client.post("/api/v1/review-events/batch", json=[unknown]).json()
-        progress = client.get("/api/v1/progress").json()
+    with SQLiteVocabularyRepository(database) as repository:
+        assert sum(repository.get_event(UUID(int=value)) is not None for value in (9, 10, 11)) == 3
     assert (
         first["results"][0]["status"] == "applied"
         and first["results"][0]["rating"] == "easy"
         and first["results"][0]["due_at"] is not None
         and first["results"][0]["version"] == 1
     )
-    assert second["results"][0]["status"] == "idempotent" and progress["reviewed"] == 3
+    assert second["results"][0]["status"] == "idempotent"
     assert third["results"][0]["rating"] == "good"
     assert fourth["results"][0]["rating"] == "again"
 
@@ -115,7 +68,7 @@ def test_review_batch_reports_missing_and_conflict(tmp_path: Path) -> None:
         "action": "known",
         "reviewed_at": "2026-01-01T00:00:00Z",
     }
-    with _client(tmp_path, (Word("one", "one", 9, None, "one.mp3"),)) as client:
+    with _client(tmp_path, (word(),)) as client:
         missing = client.post(
             "/api/v1/review-events/batch", json=[dict(event, word_id="missing")]
         ).json()
@@ -135,14 +88,13 @@ def test_void_review_is_idempotent_and_missing_is_404(tmp_path: Path) -> None:
         "action": "known",
         "reviewed_at": "2026-01-01T00:00:00Z",
     }
-    with _client(tmp_path, (Word("one", "one", 9, None, "one.mp3"),)) as client:
+    database = tmp_path / "v.db"
+    with _client(tmp_path, (word(),)) as client:
         client.post("/api/v1/review-events/batch", json=[event])
         first = client.post(f"/api/v1/review-events/{event_id}/void").json()
         second = client.post(f"/api/v1/review-events/{event_id}/void").json()
-        progress = client.get("/api/v1/progress").json()
         missing = client.post(f"/api/v1/review-events/{UUID(int=99)}/void")
-    assert (
-        first["version"] == second["version"]
-        and progress["reviewed"] == 0
-        and missing.status_code == 404
-    )
+    with SQLiteVocabularyRepository(database) as repository:
+        stored = repository.get_event(event_id)
+    assert first["version"] == second["version"] and stored is not None
+    assert stored.voided_at is not None and missing.status_code == 404

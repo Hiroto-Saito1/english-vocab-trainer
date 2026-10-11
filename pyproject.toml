@@ -55,4 +55,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/english_vocab_trainer"]
-artifacts = ["src/english_vocab_trainer/web/templates/**", "src/english_vocab_trainer/web/static/**", "src/english_vocab_trainer/migrations/**"]
+artifacts = ["src/english_vocab_trainer/web/templates/**", "src/english_vocab_trainer/web/static/**", "src/english_vocab_trainer/schema.sql"]

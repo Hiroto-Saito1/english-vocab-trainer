@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,29 +14,13 @@ from english_vocab_trainer.ports.errors import (
     MissingError,
 )
 
-_OPEN: list[SQLiteVocabularyRepository] = []
 
-
-@pytest.fixture(autouse=True)
-def close_repositories() -> object:
-    yield
-    for repository in _OPEN:
-        repository.close()
-    _OPEN.clear()
-
-
-def repo(path: Path, user: str = "alice") -> SQLiteVocabularyRepository:
-    repository = SQLiteVocabularyRepository(path, user)
-    _OPEN.append(repository)
-    return repository
-
-
-def words(r: SQLiteVocabularyRepository) -> None:
-    r.bulk_upsert_words(
+def words(repository: SQLiteVocabularyRepository) -> None:
+    repository.bulk_upsert_words(
         [
-            Word("nine", "nine", 9, None, "nine.mp3"),
-            Word("ten", "ten", 10, None, "ten.mp3"),
-            Word("unknown", "unknown", None, None, "unknown.mp3"),
+            Word("nine", "nine", 9, None, "nine.mp3", Tier.UPPER),
+            Word("ten", "ten", 10, None, "ten.mp3", Tier.ULTRA),
+            Word("extra", "extra", None, None, "extra.mp3", Tier.UPPER),
         ]
     )
 
@@ -45,207 +29,115 @@ def event(word: str, when: datetime) -> ReviewEvent:
     return ReviewEvent(uuid4(), word, Rating.EASY, when)
 
 
-def test_reopen_persists_word_state_and_event(tmp_path: Path) -> None:
+def test_reopen_persists_words_state_and_events(tmp_path: Path) -> None:
     path = tmp_path / "v.db"
     now = datetime.now(UTC)
-    with repo(path) as r:
-        words(r)
-        r.append_event(event("nine", now), 0)
-    with repo(path) as r:
-        assert r.get_word("nine") is not None and r.state("nine").version == 1
+    with SQLiteVocabularyRepository(path) as repository:
+        words(repository)
+        repository.append_event(event("nine", now), 0)
+    with SQLiteVocabularyRepository(path) as repository:
+        stored = repository.get_word("nine")
+        assert stored is not None and stored.tier is Tier.UPPER
+        assert repository.state("nine").version == 1
 
 
-def test_word_tier_is_persisted_and_legacy_default_is_unknown(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    r.bulk_upsert_words([Word("upper", "upper", 9, None, "upper.mp3", Tier.UPPER)])
-    stored = r.get_word("upper")
-    assert stored is not None and stored.tier is Tier.UPPER
+def test_list_excludes_active_review_and_void_reincludes_word(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        words(repository)
+        review = event("nine", datetime.now(UTC))
+        repository.append_event(review, 0)
+        assert "nine" not in [word.id for word in repository.list_words()]
+        repository.void_event(review.id)
+        assert "nine" in [word.id for word in repository.list_words()]
+        assert not repository.has_active_review("nine")
 
 
-def test_two_users_state_and_progress_are_isolated(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    a = repo(path)
-    words(a)
-    a.append_event(event("nine", datetime.now(UTC)), 0)
-    b = repo(path, "bob")
-    assert (
-        a.progress(datetime.now(UTC))["reviewed"] == 1
-        and b.progress(datetime.now(UTC))["reviewed"] == 0
-    )
+def test_due_returns_past_cards_only(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        words(repository)
+        now = datetime.now(UTC)
+        repository.append_event(event("nine", now), 0)
+        assert not repository.due_words(now, 10)
+        repository.db.execute(
+            "UPDATE word_state SET due_at=? WHERE word_id=?",
+            ((now - timedelta(minutes=1)).isoformat(), "nine"),
+        )
+        assert [word.id for word in repository.due_words(now, 10)] == ["nine"]
 
 
-def test_levels_filter_and_null_last(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    words(r)
-    assert [w.id for w in r.list_words(levels=[10])] == ["ten"]
-    assert [w.id for w in r.list_words()] == ["nine", "ten", "unknown"]
+def test_schema_rejects_invalid_tier_rating_and_missing_word(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        with pytest.raises(sqlite3.IntegrityError):
+            repository.db.execute("INSERT INTO words VALUES('x','x',NULL,NULL,'x','unknown')")
+        with pytest.raises(sqlite3.IntegrityError):
+            repository.db.execute("INSERT INTO review_events VALUES('x','none','bad','now',NULL)")
 
 
-def test_active_review_excludes_and_void_reincludes_new(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    words(r)
-    e = event("nine", datetime.now(UTC))
-    r.append_event(e, 0)
-    assert "nine" not in [w.id for w in r.list_words()]
-    r.void_event(e.id)
-    assert "nine" in [w.id for w in r.list_words()]
-    assert not r.has_active_review("nine")
+def test_submit_review_retries_are_idempotent(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        words(repository)
+        now = datetime.now(UTC)
+        known_id = uuid4()
+        first = submit_review(repository, known_id, "nine", ReviewAction.KNOWN, now)
+        second = submit_review(repository, known_id, "nine", ReviewAction.KNOWN, now)
+        unknown_id = uuid4()
+        unknown = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
+        unknown_retry = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
+        assert first.rating is second.rating is Rating.EASY
+        assert first.state.version == second.state.version == 1
+        assert unknown.rating is unknown_retry.rating is Rating.AGAIN
+        assert unknown_retry.status == "idempotent"
 
 
-def test_active_review_is_user_scoped(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    alice = repo(path)
-    words(alice)
-    assert not alice.has_active_review("nine")
-    alice.append_event(event("nine", datetime.now(UTC)), 0)
-    assert alice.has_active_review("nine") and not repo(path, "bob").has_active_review("nine")
+def test_missing_word_and_stale_cas_leave_no_partial_event(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        with pytest.raises(MissingError):
+            repository.append_event(event("missing", datetime.now(UTC)), 0)
+        words(repository)
+        repository.append_event(event("nine", datetime.now(UTC)), 0)
+        stale = event("nine", datetime.now(UTC))
+        with pytest.raises(ConcurrentUpdateError):
+            repository.append_event(stale, 0)
+        assert repository.get_event(stale.id) is None
 
 
-def test_due_is_current_user_and_past_only(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    a = repo(path)
-    words(a)
-    now = datetime.now(UTC)
-    a.append_event(event("nine", now), 0)
-    assert not a.due_words(now, 10)
-    a.db.execute(
-        "UPDATE user_word_state SET due_at=? WHERE user_id=?",
-        ((now - timedelta(minutes=1)).isoformat(), "alice"),
-    )
-    assert [w.id for w in a.due_words(now, 10)] == ["nine"] and not repo(path, "bob").due_words(
-        now, 10
-    )
+def test_uuid_idempotency_compares_structured_event_fields(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        words(repository)
+        review = event("nine", datetime.now(UTC))
+        first = repository.append_event(review, 0)
+        same_instant = ReviewEvent(
+            review.id,
+            review.word_id,
+            review.rating,
+            review.reviewed_at.astimezone(timezone(timedelta(hours=9))),
+        )
+        second = repository.append_event(same_instant, 99)
+        assert first.version == second.version
+        for changed in (
+            ReviewEvent(review.id, "ten", review.rating, review.reviewed_at),
+            ReviewEvent(review.id, review.word_id, Rating.AGAIN, review.reviewed_at),
+            ReviewEvent(
+                review.id, review.word_id, review.rating, review.reviewed_at + timedelta(1)
+            ),
+        ):
+            with pytest.raises(EventConflictError):
+                repository.append_event(changed, 0)
 
 
-def test_settings_default_validation_persistence_and_isolation(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    alice = repo(path)
-    bob = repo(path, "bob")
-    assert alice.get_daily_target() == 30
-    assert alice.update_daily_target(17) == 17
-    assert bob.get_daily_target() == 30
-    with pytest.raises(ValueError):
-        alice.update_daily_target(0)
-    assert repo(path).get_daily_target() == 17
-
-
-def test_transcript_update_persists_and_missing_raises(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    r = repo(path)
-    words(r)
-    assert r.update_transcript("nine", "An English sentence.").transcript == "An English sentence."
-    stored = repo(path).get_word("nine")
-    assert stored is not None and stored.transcript == "An English sentence."
-    with pytest.raises(MissingError):
-        r.update_transcript("absent", "Nope")
-
-
-def test_progress_counts_active_reviews_due_and_user_scope(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    a = repo(path)
-    words(a)
-    now = datetime.now(UTC)
-    e = event("nine", now)
-    a.append_event(e, 0)
-    a.db.execute(
-        "UPDATE user_word_state SET due_at=? WHERE user_id=?",
-        ((now - timedelta(seconds=1)).isoformat(), "alice"),
-    )
-    assert a.progress(now) == {"total": 3, "due": 1, "reviewed": 1}
-    assert repo(path, "bob").progress(now) == {"total": 3, "due": 0, "reviewed": 0}
-    a.void_event(e.id)
-    assert a.progress(now)["reviewed"] == 0 and a.progress(now)["due"] == 1
-
-
-def test_schema_rejects_invalid_checks(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    with pytest.raises(sqlite3.IntegrityError):
-        r.db.execute("INSERT INTO user_settings VALUES('x',101)")
-    with pytest.raises(sqlite3.IntegrityError):
-        r.db.execute("INSERT INTO study_sessions VALUES('x','x','bad','now')")
-    with pytest.raises(sqlite3.IntegrityError):
-        r.db.execute("INSERT INTO review_events VALUES('x','x','no','bad','now',NULL,'x')")
-
-
-def test_schema_rejects_missing_foreign_key(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    with pytest.raises(sqlite3.IntegrityError):
-        r.db.execute("INSERT INTO session_items VALUES('none','none',0)")
-
-
-def test_schema_rejects_duplicate_session_ordinal(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    words(r)
-    r.db.execute("INSERT INTO study_sessions VALUES('s','alice','daily','now')")
-    r.db.execute("INSERT INTO session_items VALUES('s','nine',0)")
-    with pytest.raises(sqlite3.IntegrityError):
-        r.db.execute("INSERT INTO session_items VALUES('s','ten',0)")
-
-
-def test_submit_review_retry_is_idempotent_for_known_and_unknown(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    words(r)
-    event_id, now = uuid4(), datetime.now(UTC)
-    first = submit_review(r, event_id, "nine", ReviewAction.KNOWN, now)
-    second = submit_review(r, event_id, "nine", ReviewAction.KNOWN, now)
-    assert first.rating is second.rating is Rating.EASY
-    assert first.state.version == second.state.version == 1
-    unknown_id = uuid4()
-    unknown = submit_review(r, unknown_id, "ten", ReviewAction.UNKNOWN, now)
-    unknown_retry = submit_review(r, unknown_id, "ten", ReviewAction.UNKNOWN, now)
-    assert unknown.rating is unknown_retry.rating is Rating.AGAIN
-    assert unknown_retry.status == "idempotent"
-    assert r.progress(now)["reviewed"] == 2
-
-
-def test_missing_word_keeps_transaction_usable(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    with pytest.raises(MissingError):
-        r.append_event(event("missing", datetime.now(UTC)), 0)
-    words(r)
-    r.append_event(event("nine", datetime.now(UTC)), 0)
-    r.close()
-
-
-def test_stale_cas_has_no_partial_event(tmp_path: Path) -> None:
-    r = repo(tmp_path / "v.db")
-    words(r)
-    r.append_event(event("nine", datetime.now(UTC)), 0)
-    with pytest.raises(ConcurrentUpdateError):
-        r.append_event(event("nine", datetime.now(UTC)), 0)
-    assert r.progress(datetime.now(UTC))["reviewed"] == 1
-    r.close()
-
-
-def test_uuid_idempotency_and_conflicts(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    r = repo(path)
-    words(r)
-    e = event("nine", datetime.now(UTC))
-    one = r.append_event(e, 0)
-    two = r.append_event(e, 99)
-    assert one.version == two.version
-    with pytest.raises(EventConflictError):
-        r.append_event(ReviewEvent(e.id, "ten", Rating.EASY, e.reviewed_at), 0)
-    with pytest.raises(EventConflictError):
-        repo(path, "bob").append_event(e, 0)
-    r.close()
-
-
-def test_out_of_order_replay_and_double_void(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
+def test_out_of_order_replay_and_double_void_are_deterministic(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     first = event("nine", now)
     second = ReviewEvent(uuid4(), "nine", Rating.AGAIN, now + timedelta(days=1))
-    a = repo(path)
-    words(a)
-    a.append_event(second, 0)
-    state = a.append_event(first, 1)
-    b = repo(tmp_path / "other.db")
-    words(b)
-    b.append_event(first, 0)
-    expected = b.append_event(second, 1)
-    assert state.card_json == expected.card_json and state.due_at == expected.due_at
-    voided = a.void_event(second.id)
-    repeated = a.void_event(second.id)
+    with SQLiteVocabularyRepository(tmp_path / "one.db") as repository:
+        words(repository)
+        repository.append_event(second, 0)
+        actual = repository.append_event(first, 1)
+        voided = repository.void_event(second.id)
+        repeated = repository.void_event(second.id)
+    with SQLiteVocabularyRepository(tmp_path / "two.db") as repository:
+        words(repository)
+        repository.append_event(first, 0)
+        expected = repository.append_event(second, 1)
+    assert actual.card_json == expected.card_json and actual.due_at == expected.due_at
     assert voided.card_json == repeated.card_json and voided.version == repeated.version

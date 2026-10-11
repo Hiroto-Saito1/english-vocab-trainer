@@ -5,8 +5,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
-from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.ports.audio import (
     AudioMetadata,
     AudioResult,
@@ -19,11 +19,10 @@ from english_vocab_trainer.web.container import AppContainer
 
 
 def _audio_app_with_store(tmp_path: Path, store: AudioStore) -> FastAPI:
-    provider = SQLiteRepositoryProvider(tmp_path / "v.db")
-    repository = provider.for_user("local-user")
-    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
-    repository.close()
-    return create_app(AppContainer(provider, store, "test", "local-user"))
+    database = tmp_path / "v.db"
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3", Tier.UPPER)])
+    return create_app(AppContainer(database, store, "test"))
 
 
 def test_audio_api_full_and_range(tmp_path: Path) -> None:

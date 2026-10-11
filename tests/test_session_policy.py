@@ -5,8 +5,6 @@ from random import Random
 from typing import cast
 from uuid import uuid4
 
-import pytest
-
 from english_vocab_trainer.application.services import (
     select_session_words,
     submit_review,
@@ -24,36 +22,35 @@ from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 def words(count: int) -> list[Word]:
     return [
-        Word(str(index), f"term {index}", index % 4, None, f"{index}.mp3") for index in range(count)
+        Word(
+            str(index),
+            f"term {index}",
+            index % 4,
+            None,
+            f"{index}.mp3",
+            Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
+        )
+        for index in range(count)
     ]
 
 
 class SessionRepository:
-    def __init__(self, candidates: list[Word], due: list[Word], target: int) -> None:
+    def __init__(self, candidates: list[Word], due: list[Word]) -> None:
         self.candidates = candidates
         self.due = due
-        self.target = target
 
-    def list_words(self, *, levels: list[int] | None = None, limit: int = 100) -> list[Word]:
-        assert levels is None
+    def list_words(self, *, limit: int = 100) -> list[Word]:
         return self.candidates[:limit]
 
     def due_words(self, now: datetime, limit: int) -> list[Word]:
         assert now.tzinfo is UTC
         return self.due[:limit]
 
-    def get_daily_target(self) -> int:
-        return self.target
 
-
-def select(
-    repository: SessionRepository, *, mode: str = "daily", count: int | None = None, seed: int = 1
-) -> list[Word]:
+def select(repository: SessionRepository, *, seed: int = 1) -> list[Word]:
     return select_session_words(
         cast(VocabularyRepository, repository),
-        mode,
         datetime(2026, 1, 1, tzinfo=UTC),
-        count,
         Random(seed),
     )
 
@@ -61,46 +58,30 @@ def select(
 def test_daily_uses_target_as_total_cap_and_admits_due_first() -> None:
     candidates = words(200)
     due = candidates[:12]
-    result = select(SessionRepository(candidates, due, 30), seed=7)
+    result = select(SessionRepository(candidates, due), seed=7)
     assert len(result) == 30
     assert {word.id for word in due}.issubset({word.id for word in result})
     assert len({word.id for word in result}) == len(result)
 
 
-@pytest.mark.parametrize("target", [1, 30, 100])
-def test_daily_honours_every_configured_target(target: int) -> None:
-    result = select(SessionRepository(words(200), [], target), seed=7)
-    assert len(result) == target and len({word.id for word in result}) == target
-
-
 def test_daily_shortage_and_due_backlog_never_duplicate_or_exceed_target() -> None:
-    shortage = select(SessionRepository(words(3), [], 100))
-    backlog = select(SessionRepository(words(200), words(150), 30))
+    shortage = select(SessionRepository(words(3), []))
+    backlog = select(SessionRepository(words(200), words(150)))
     assert len(shortage) == 3 and len({word.id for word in shortage}) == 3
     assert {word.id for word in backlog} == {str(index) for index in range(30)}
 
 
 def test_presentation_order_is_random_without_level_bands_and_seedable() -> None:
     candidates = words(100)
-    first = select(SessionRepository(candidates, [], 100), seed=1)
-    same_seed = select(SessionRepository(candidates, [], 100), seed=1)
-    other_seed = select(SessionRepository(candidates, [], 100), seed=2)
+    first = select(SessionRepository(candidates, []), seed=1)
+    same_seed = select(SessionRepository(candidates, []), seed=1)
+    other_seed = select(SessionRepository(candidates, []), seed=2)
     assert [word.id for word in first] == [word.id for word in same_seed]
     assert [word.id for word in first] != [word.id for word in other_seed]
     assert first != sorted(first, key=lambda word: (word.level is None, word.level or 0, word.id))
 
 
-def test_screen_mode_keeps_its_existing_counts() -> None:
-    repository = SessionRepository(words(120), [], 30)
-    assert len(select(repository, mode="screen", count=20)) == 20
-    assert len(select(repository, mode="screen", count=50)) == 50
-    assert len(select(repository, mode="screen", count=100)) == 100
-    with pytest.raises(ValueError):
-        select(repository, mode="screen", count=19)
-
-
-@pytest.mark.parametrize("target", [1, 30, 100])
-def test_new_words_are_evenly_drawn_from_published_tiers(target: int) -> None:
+def test_new_words_are_evenly_drawn_from_published_tiers() -> None:
     candidates = [
         Word(str(index), f"upper {index}", 9, None, f"u{index}.mp3", Tier.UPPER)
         for index in range(1_000)
@@ -108,29 +89,25 @@ def test_new_words_are_evenly_drawn_from_published_tiers(target: int) -> None:
         Word(str(1_000 + index), f"ultra {index}", 10, None, f"x{index}.mp3", Tier.ULTRA)
         for index in range(1_000)
     ]
-    first = select(SessionRepository(candidates, [], target), seed=11)
-    again = select(SessionRepository(candidates, [], target), seed=11)
-    different = select(SessionRepository(candidates, [], target), seed=12)
+    first = select(SessionRepository(candidates, []), seed=11)
+    again = select(SessionRepository(candidates, []), seed=11)
+    different = select(SessionRepository(candidates, []), seed=12)
     upper = sum(word.tier is Tier.UPPER for word in first)
     ultra = sum(word.tier is Tier.ULTRA for word in first)
     assert abs(upper - ultra) <= 1
-    assert len({word.id for word in first}) == target
+    assert len({word.id for word in first}) == 30
     assert [word.id for word in first] == [word.id for word in again]
     assert [word.id for word in first] != [word.id for word in different]
 
 
-def test_new_tier_shortage_spills_before_legacy_unknown() -> None:
-    candidates = (
-        [Word("u", "upper", 9, None, "u.mp3", Tier.UPPER)]
-        + [
-            Word(str(index), f"ultra {index}", 10, None, f"x{index}.mp3", Tier.ULTRA)
-            for index in range(10)
-        ]
-        + [Word("legacy", "legacy", None, None, "legacy.mp3", Tier.UNKNOWN)]
-    )
-    result = select(SessionRepository(candidates, [], 6), seed=3)
-    assert sum(word.tier is Tier.UNKNOWN for word in result) == 0
-    assert sum(word.tier is Tier.ULTRA for word in result) == 5
+def test_new_tier_shortage_spills_to_the_other_tier() -> None:
+    candidates = [Word("u", "upper", 9, None, "u.mp3", Tier.UPPER)] + [
+        Word(str(index), f"ultra {index}", 10, None, f"x{index}.mp3", Tier.ULTRA)
+        for index in range(10)
+    ]
+    result = select(SessionRepository(candidates, []), seed=3)
+    assert sum(word.tier is Tier.UPPER for word in result) == 1
+    assert sum(word.tier is Tier.ULTRA for word in result) == 10
 
 
 class RetryingReviewRepository:

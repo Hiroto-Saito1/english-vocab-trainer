@@ -203,7 +203,7 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
     database = tmp_path / "vocab.db"
     records = _materialize_catalog_audio(tmp_path, _records())
     publish_records(database, records, root=tmp_path)
-    repository = SQLiteVocabularyRepository(database, "local-user")
+    repository = SQLiteVocabularyRepository(database)
     try:
         words = repository.list_words(limit=30)
         assert len(words) == 20 and words[0].transcript is not None
@@ -215,7 +215,7 @@ def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_pa
     database = tmp_path / "vocab.db"
     records = _materialize_catalog_audio(tmp_path, _records())
     publish_records(database, records, audio_backend="r2", root=tmp_path)
-    repository = SQLiteVocabularyRepository(database, "local-user")
+    repository = SQLiteVocabularyRepository(database)
     try:
         words = repository.list_words(limit=30)
         assert len(words) == 20
@@ -292,7 +292,7 @@ def test_tampered_source_rejects_validate_and_publish_without_db_mutation(tmp_pa
     database = tmp_path / "vocab.db"
     records = _materialize_catalog_audio(tmp_path, _records())
     publish_records(database, records, root=tmp_path)
-    repository = SQLiteVocabularyRepository(database, "local-user")
+    repository = SQLiteVocabularyRepository(database)
     try:
         original = repository.get_word(records[0].id)
         assert original is not None

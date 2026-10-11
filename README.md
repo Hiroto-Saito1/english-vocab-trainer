@@ -2,7 +2,7 @@
 
 This project is being rebuilt as a conventional FastAPI application for Fly.io. The previous Cloudflare prototype is preserved in Git as `cloudflare-prototype-2026-08-09`; it is not the deployment target.
 
-The application is English-only and audio-first. Its SQLite schema is created from versioned SQL migrations, and audio/catalogs/transcripts/secrets are excluded from Git.
+The application is English-only and audio-first. A fresh SQLite database is initialized from the packaged current schema, and audio/catalogs/transcripts/secrets are excluded from Git.
 
 ## M1/M2b: private catalog, private audio, and publishing
 
@@ -164,7 +164,7 @@ absolute `VOCAB_DB_PATH` below `/data` (normally `/data/vocab.db`). It fails wit
 secret if any required auth, audio, or backup setting is absent. Fly terminates it with SIGTERM and
 a 45-second kill timeout; Litestream 0.5.16 performs a final sync on graceful shutdown and its
 configuration gives that sync 30 seconds. `/healthz` is public liveness; `/readyz` is public
-readiness and opens/migrates SQLite without returning data. Production also validates the Host
+readiness and opens/initializes SQLite without returning data. Production also validates the Host
 header (`ALLOWED_HOSTS`, or a safely derived `FLY_APP_NAME.fly.dev`) and applies HSTS, CSP,
 `nosniff`, referrer, and permissions headers. The Uvicorn command enables trusted Fly proxy
 headers so HTTPS same-origin checks see the original scheme.
@@ -189,7 +189,7 @@ their SHA-256 metadata and sizes, with safe reruns); publish a new pristine R2-k
 then either seed the Fly volume or initialise and verify the Litestream replica from that seed.
 Only then perform the first deploy. Do not use a local acceptance database with review state as a
 production seed. `restore-if-db-not-exists` restores an existing replica, but without a verified
-seed or replica it allows the app to migrate an empty database; that first boot must be treated as
+seed or replica it allows the app to initialize an empty database; that first boot must be treated as
 blocked, not as a successful catalog deployment.
 
 Use three different least-privilege R2 credential pairs. The app's audio-read pair needs only
@@ -207,8 +207,8 @@ Run a restore drill against a **new** path while retaining the live database:
 `vocab-restore-drill --live-db /data/vocab.db --output /data/drills/restore-$(date +%Y%m%dT%H%M%S).db`
 
 The command refuses the live DB and its WAL/SHM paths or any existing output. It asks Litestream to
-restore into the new file, runs `PRAGMA quick_check`, verifies migrations `0001_initial.sql` and
-`0002_auth.sql` and `0003_tier.sql`, and prints only word/review counts. Rehearse this manually against backup R2
+restore into the new file, runs `PRAGMA quick_check`, verifies the exact current tables and columns,
+and prints only word/review counts. Rehearse this manually against backup R2
 credentials before relying on it. Actual disaster recovery requires stopping the app and attaching
 or swapping in a recovered volume/database; it never overwrites a live DB in place. Restore time
 depends on backup size and R2 availability, so this single-Machine personal setup has downtime and
@@ -218,8 +218,11 @@ one-user app.
 
 The manual GitHub **Deploy** workflow is `workflow_dispatch` only, protected by the `production`
 environment and uses `FLY_API_TOKEN`, `FLY_APP`, and `FLY_VOLUME` only at run time. CI never
-deploys; it builds the container, checks the pinned Litestream binary, and creates a migrated DB
+deploys; it builds the container, checks the pinned Litestream binary, and creates a current-schema DB
 from the installed wheel and container package.
+
+This release does not upgrade databases created by earlier versions. Recreate the database and
+republish the private catalog before deployment; doing so discards existing learning history.
 
 ## M3c-a: full private inventory and durable transcription
 

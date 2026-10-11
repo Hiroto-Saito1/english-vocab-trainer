@@ -49,12 +49,32 @@ def restore_drill(
         try:
             if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise RestoreDrillError("restored database failed SQLite quick_check")
-            versions = {
-                row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-            expected = {"0001_initial.sql", "0002_auth.sql", "0003_tier.sql"}
-            if not expected <= versions:
-                raise RestoreDrillError("restored database is missing expected migrations")
+            expected = {"words", "word_state", "review_events", "login_attempts"}
+            columns = {
+                table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                for table in expected
+            }
+            if tables != expected or columns != {
+                "words": {"id", "term", "level", "transcript", "audio_key", "tier"},
+                "word_state": {
+                    "word_id",
+                    "due_at",
+                    "stability",
+                    "difficulty",
+                    "card_json",
+                    "first_seen_at",
+                    "first_known_at",
+                    "last_known_at",
+                    "version",
+                },
+                "review_events": {"id", "word_id", "rating", "reviewed_at", "voided_at"},
+                "login_attempts": {"attempted_at"},
+            }:
+                raise RestoreDrillError("restored database does not match the current schema")
             return {
                 "words": int(connection.execute("SELECT count(*) FROM words").fetchone()[0]),
                 "review_events": int(

@@ -8,15 +8,15 @@ from random import Random
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.application.services import create_study_session, submit_review
 from english_vocab_trainer.domain.models import (
     LEARNING_STEP,
@@ -39,7 +39,6 @@ from english_vocab_trainer.ports.errors import (
     MissingError,
 )
 from english_vocab_trainer.ports.repositories import VocabularyRepository
-from english_vocab_trainer.validation import validate_english_transcript
 from english_vocab_trainer.web.audio import (
     build_audio_head_response,
     build_audio_response,
@@ -53,10 +52,9 @@ from english_vocab_trainer.web.container import (
     auth_from_env,
     trusted_hosts_from_env,
 )
-from english_vocab_trainer.web.dependencies import audio_store, csrf, identity
+from english_vocab_trainer.web.dependencies import audio_store, csrf
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
-Identity = Annotated[str, Depends(identity)]
 Csrf = Annotated[None, Depends(csrf)]
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 Audio = Annotated[AudioStore, Depends(audio_store)]
@@ -74,29 +72,6 @@ class EventIn(BaseModel):
     reviewed_at: datetime
 
 
-class TranscriptIn(BaseModel):
-    transcript: str = Field(min_length=1, max_length=20_000)
-
-    @field_validator("transcript")
-    @classmethod
-    def english_only(cls, value: str) -> str:
-        return validate_english_transcript(value)
-
-
-class SettingsIn(BaseModel):
-    daily_target: int = Field(default=30, ge=1, le=100)
-
-
-class ProgressOut(BaseModel):
-    total: int
-    due: int
-    reviewed: int
-
-
-class SettingsOut(BaseModel):
-    daily_target: int
-
-
 class WordOut(BaseModel):
     id: str
     term: str
@@ -106,14 +81,8 @@ class WordOut(BaseModel):
     tier: Tier
 
 
-class WordListOut(BaseModel):
-    items: list[WordOut]
-
-
 class SessionOut(BaseModel):
     id: str
-    mode: str
-    created_at: datetime
     items: list[WordOut]
     learning_step_seconds: int
 
@@ -155,8 +124,6 @@ def word_out(word: Word) -> WordOut:
 def session_out(session: StudySession) -> SessionOut:
     return SessionOut(
         id=session.id,
-        mode=session.mode,
-        created_at=session.created_at,
         items=[word_out(word) for word in session.words],
         learning_step_seconds=int(LEARNING_STEP.total_seconds()),
     )
@@ -177,9 +144,7 @@ def home(request: Request) -> Response:
     if container.environment not in {"local", "test"}:
         try:
             assert container.auth is not None
-            container.auth.user_from_session(
-                request.cookies.get(container.auth.session_cookie_name)
-            )
+            container.auth.validate_session(request.cookies.get(container.auth.session_cookie_name))
         except AuthenticationError:
             return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
@@ -193,14 +158,11 @@ def health() -> dict[str, str]:
 
 @router.get("/readyz", include_in_schema=False)
 def readiness(request: Request) -> dict[str, str]:
-    """A public readiness probe that exercises opening and migrating SQLite only."""
+    """A public readiness probe that opens and initializes the current SQLite schema."""
     container = request.app.state.container
     try:
-        repository = container.repositories.for_user("healthcheck")
-        try:
-            repository.progress(datetime.now(UTC))
-        finally:
-            repository.close()
+        with SQLiteVocabularyRepository(container.database) as repository:
+            repository.db.execute("SELECT 1 FROM words LIMIT 1").fetchone()
     except Exception as exc:
         raise HTTPException(503, "database is not ready") from exc
     return {"status": "ready"}
@@ -262,7 +224,7 @@ async def login(request: Request) -> Response:
 
 
 @router.post("/auth/logout", status_code=204)
-def logout(request: Request, _: Identity, __: Csrf) -> Response:
+def logout(request: Request, _: Csrf) -> Response:
     container = request.app.state.container
     response = Response(status_code=204, headers={"Cache-Control": "no-store"})
     if container.auth is not None:
@@ -284,28 +246,13 @@ def service_worker() -> FileResponse:
 
 
 @router.get("/api/v1/sessions", response_model=SessionOut)
-def sessions(
-    _: Identity, repository: Repository, mode: str = "daily", count: int | None = None
-) -> SessionOut:
-    try:
-        session = create_study_session(
-            repository, mode, datetime.now(UTC), str(uuid4()), count, Random()
-        )
-        return session_out(session)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
-
-@router.get("/api/v1/sessions/{session_id}", response_model=SessionOut)
-def get_session(session_id: str, _: Identity, repository: Repository) -> SessionOut:
-    session = repository.get_session(session_id)
-    if session is None:
-        raise HTTPException(404, "session not found")
+def sessions(repository: Repository) -> SessionOut:
+    session = create_study_session(repository, datetime.now(UTC), str(uuid4()), Random())
     return session_out(session)
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
-def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repository) -> BatchOut:
+def review_batch(events: list[EventIn], repository: Repository, _: Csrf) -> BatchOut:
     if len(events) > 100:
         raise HTTPException(422, "at most 100 events")
     results: list[EventResultOut] = []
@@ -342,7 +289,7 @@ def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repos
 
 
 @router.post("/api/v1/review-events/{event_id}/void", response_model=VoidOut)
-def void_event(event_id: UUID, _: Identity, __: Csrf, repository: Repository) -> VoidOut:
+def void_event(event_id: UUID, repository: Repository, _: Csrf) -> VoidOut:
     try:
         state = repository.void_event(event_id)
     except MissingError as exc:
@@ -361,7 +308,6 @@ def void_event(event_id: UUID, _: Identity, __: Csrf, repository: Repository) ->
 @router.get("/api/v1/audio/{word_id}")
 def audio(
     word_id: str,
-    _: Identity,
     repository: Repository,
     store: Audio,
     range_header: RangeHeader = None,
@@ -406,7 +352,6 @@ def audio(
 @router.head("/api/v1/audio/{word_id}")
 def audio_head(
     word_id: str,
-    _: Identity,
     repository: Repository,
     store: Audio,
     range_header: RangeHeader = None,
@@ -423,43 +368,6 @@ def audio_head(
             status_code=416,
             headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
         )
-
-
-@router.get("/api/v1/progress", response_model=ProgressOut)
-def progress(_: Identity, repository: Repository) -> ProgressOut:
-    return ProgressOut(**repository.progress(datetime.now(UTC)))
-
-
-@router.get("/api/v1/settings", response_model=SettingsOut)
-def get_settings(_: Identity, repository: Repository) -> SettingsOut:
-    return SettingsOut(daily_target=repository.get_daily_target())
-
-
-@router.patch("/api/v1/settings", response_model=SettingsOut)
-def settings(settings: SettingsIn, _: Identity, __: Csrf, repository: Repository) -> SettingsOut:
-    return SettingsOut(daily_target=repository.update_daily_target(settings.daily_target))
-
-
-@router.get("/api/v1/words", response_model=WordListOut)
-def words(
-    _: Identity,
-    repository: Repository,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    levels: Annotated[list[int] | None, Query()] = None,
-) -> WordListOut:
-    return WordListOut(
-        items=[word_out(word) for word in repository.list_words(levels=levels, limit=limit)]
-    )
-
-
-@router.patch("/api/v1/words/{word_id}/transcript", response_model=WordOut)
-def transcript(
-    word_id: str, body: TranscriptIn, _: Identity, __: Csrf, repository: Repository
-) -> WordOut:
-    try:
-        return word_out(repository.update_transcript(word_id, body.transcript))
-    except MissingError as exc:
-        raise HTTPException(404, "word not found") from exc
 
 
 def create_app(container: AppContainer) -> FastAPI:
@@ -508,15 +416,14 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
         except KeyError as exc:
             raise ConfigurationError("VOCAB_DB_PATH is required") from exc
         return AppContainer(
-            SQLiteRepositoryProvider(database),
+            database,
             audio_store_from_env(environ),
             environment,
-            environ.get("LOCAL_USER_ID", "local-user"),
         )
     try:
         database = Path(environ["VOCAB_DB_PATH"])
         return AppContainer(
-            SQLiteRepositoryProvider(database),
+            database,
             audio_store_from_env(environ),
             "production",
             auth=auth_from_env(environ, database, secure_cookies=True),

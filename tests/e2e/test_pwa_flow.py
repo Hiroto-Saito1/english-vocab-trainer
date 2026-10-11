@@ -18,7 +18,7 @@ from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
@@ -52,8 +52,7 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     database = tmp_path / "vocab.db"
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
-    provider = SQLiteRepositoryProvider(database)
-    repository = provider.for_user("local-user")
+    repository = SQLiteVocabularyRepository(database)
     try:
         for index in range(3):
             (audio_root / f"word-{index}.mp3").write_bytes(b"ID3\x04\x00\x00")
@@ -72,7 +71,7 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         )
     finally:
         repository.close()
-    app = create_app(AppContainer(provider, FilesystemAudioStore(audio_root), "test", "local-user"))
+    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
     with _serve(app) as base_url:
         yield base_url, database
 
@@ -83,8 +82,7 @@ def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     database = tmp_path / "production.db"
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
-    provider = SQLiteRepositoryProvider(database)
-    repository = provider.for_user("primary")
+    repository = SQLiteVocabularyRepository(database)
     try:
         for index in range(2):
             (audio_root / f"protected-{index}.mp3").write_bytes(b"ID3\x04\x00\x00protected")
@@ -96,6 +94,7 @@ def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
                     2,
                     f"An English definition for protected word {index}.",
                     f"protected-{index}.mp3",
+                    Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
                 )
                 for index in range(2)
             ]
@@ -109,7 +108,7 @@ def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         secure_cookies=False,
     )
     app = create_app(
-        AppContainer(provider, FilesystemAudioStore(audio_root), "production", auth=auth)
+        AppContainer(database, FilesystemAudioStore(audio_root), "production", auth=auth)
     )
     with _serve(app) as base_url:
         yield base_url, database
@@ -444,47 +443,6 @@ def test_undo_persists_after_clock_jump_without_replaying_audio(
 
 
 @pytest.mark.e2e
-def test_boot_migrates_legacy_undo_cursor_state(page: Page, pwa_server: tuple[str, Path]) -> None:
-    base_url, _ = pwa_server
-    page.goto(base_url)
-    page.get_by_role("button", name="Unknown", exact=True).click()
-    expect(page.locator("#term")).to_be_visible()
-    page.evaluate(
-        """async () => {
-          const state = window.__pwa.getState();
-          delete state.event.previousCurrent;
-          state.event.wasLearning = false;
-          state.undoDeadline = Date.now() + 30_000;
-          state.revealedLearningWordId = null;
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction("state", "readwrite");
-            tx.objectStore("state").put({key: "active-session", value: state});
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-          });
-          db.close();
-        }"""
-    )
-
-    page.reload()
-    expect(page.locator("#term")).to_be_visible()
-    migrated = page.evaluate("window.__pwa.getState()")
-    assert migrated["event"]["previousCurrent"] == 0
-    assert "wasLearning" not in migrated["event"]
-    assert "revealedLearningWordId" not in migrated
-    assert "undoDeadline" not in migrated
-    page.get_by_role("button", name="Undo", exact=True).click()
-    expect(page.locator("#card")).to_have_text("Listen, then choose.")
-    restored = page.evaluate("window.__pwa.getState()")
-    assert restored["current"] == 0 and restored["event"] is None
-
-
-@pytest.mark.e2e
 def test_mobile_pwa_empty_daily_session_says_all_caught_up(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
@@ -788,8 +746,7 @@ def test_offline_audio_outbox_rotation_and_private_reset(
     expect(page.locator("#card")).to_have_text("Daily study complete.")
     audio_root = database.parent / "audio"
     (audio_root / "word-new.mp3").write_bytes(b"ID3\x04\x00\x00new")
-    provider = SQLiteRepositoryProvider(database)
-    repository = provider.for_user("local-user")
+    repository = SQLiteVocabularyRepository(database)
     try:
         repository.bulk_upsert_words(
             [
@@ -799,6 +756,7 @@ def test_offline_audio_outbox_rotation_and_private_reset(
                     2,
                     "An English definition for a new word.",
                     "word-new.mp3",
+                    Tier.UPPER,
                 )
             ]
         )
@@ -911,7 +869,7 @@ def test_mobile_production_login_csrf_and_logout_privacy_boundary(
           const token = document.cookie.split(";").map((value) => value.trim()).find(
             (value) => value.startsWith("vocab-csrf=")
           ).split("=").slice(1).join("=");
-          const session = await fetch("/api/v1/sessions?mode=daily");
+          const session = await fetch("/api/v1/sessions");
           const audio = await fetch(state.cards[0].audio_url);
           const review = await fetch("/api/v1/review-events/batch", {
             method: "POST",
@@ -948,7 +906,7 @@ def test_mobile_production_login_csrf_and_logout_privacy_boundary(
     private_keys, db_values = private_storage_state(page)
     api_status = page.evaluate(
         """async () => Promise.race([
-          fetch("/api/v1/progress").then((response) => response.status),
+          fetch("/api/v1/sessions").then((response) => response.status),
           new Promise((_, reject) => setTimeout(
             () => reject(new Error("production logout verification timed out")), 10_000
           )),

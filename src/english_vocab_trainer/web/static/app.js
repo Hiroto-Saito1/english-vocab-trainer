@@ -45,7 +45,7 @@ function currentLearning() {
 }
 function currentWord() { return state.cards[state.current] || currentLearning()?.word; }
 function formatTier(word) {
-  const name = word.tier === "upper" ? "Upper" : word.tier === "ultra" ? "Ultra" : "Unknown";
+  const name = word.tier === "upper" ? "Upper" : "Ultra";
   return `${name} · ${word.level == null ? "level unknown" : `SVL ${word.level}`}`;
 }
 function setActions(disabled) { known.disabled = disabled; unknown.disabled = disabled; continueButton.disabled = disabled; }
@@ -260,35 +260,16 @@ async function clearPrivateCaches() {
   clearLearningTimer(); render(); showStatus("Private study data was cleared.");
 }
 
-function normalizeSavedState(saved) {
-  const { undoDeadline: _legacyUndoDeadline, revealedLearningWordId: _legacyRevealedId, ...savedState } = saved;
-  const cards = Array.isArray(saved.cards) ? saved.cards : [];
-  const current = Number.isInteger(saved.current) ? Math.max(0, Math.min(saved.current, cards.length)) : 0;
-  const learningQueue = Array.isArray(saved.learningQueue) ? saved.learningQueue.filter((item) => item && item.word && Number.isFinite(item.due_at)) : [];
-  let event = saved.event && typeof saved.event === "object" ? { ...saved.event } : null;
-  if (event) {
-    event.learningEntry = event.learningEntry || null;
-    if (!Number.isInteger(event.previousCurrent)) {
-      const cursorWasNotAdvanced = event.wasLearning === true || saved.phase === "revealed";
-      event.previousCurrent = cursorWasNotAdvanced ? current : Math.max(0, current - 1);
-    }
-    event.previousCurrent = Math.max(0, Math.min(event.previousCurrent, cards.length));
-    delete event.wasLearning;
-  }
-  return { ...state, ...savedState, cards, current, event, learningQueue, learningStepSeconds: Number.isFinite(saved.learningStepSeconds) ? saved.learningStepSeconds : 600 };
-}
-
 async function boot() {
   let saved = null;
   try { saved = await getState(); } catch (_) { showStatus("Local study storage is unavailable."); }
-  if (saved) saved = normalizeSavedState(saved);
   if (saved && saved.cards && saved.phase !== "complete") {
     state = saved;
     try { await saveState(); } catch (_) { showStatus("Local study storage is unavailable."); }
     try { await configureAudioCache(false); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
   } else {
     try {
-      const response = await apiFetch("/api/v1/sessions?mode=daily");
+      const response = await apiFetch("/api/v1/sessions");
       if (!response.ok) throw new Error("session unavailable");
       const session = await response.json();
       state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, learningQueue: [], learningStepSeconds: session.learning_step_seconds };

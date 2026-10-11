@@ -21,13 +21,9 @@ from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
 def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]:
-    """Take new words without replacement, balancing the two published tiers.
-
-    Unknown legacy rows intentionally remain a last-resort pool: they must not
-    crowd out either tier in a catalog which has been republished with 0003.
-    """
+    """Take new words without replacement, balancing the two published tiers."""
     pools: dict[Tier, list[Word]] = {}
-    for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN):
+    for tier in Tier:
         tier_words = [word for word in words if word.tier is tier]
         pools[tier] = rng.sample(tier_words, k=len(tier_words))
     # For an odd quota either tier may receive the extra slot; this avoids a
@@ -35,25 +31,13 @@ def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]
     upper_quota = limit // 2 + rng.randrange(2 if limit % 2 else 1)
     ultra_quota = limit - upper_quota
     selected = pools[Tier.UPPER][:upper_quota] + pools[Tier.ULTRA][:ultra_quota]
-    # If a tier is short, spill to the other real tier before the legacy pool.
-    remainder = (
-        pools[Tier.UPPER][upper_quota:] + pools[Tier.ULTRA][ultra_quota:] + pools[Tier.UNKNOWN]
-    )
+    remainder = pools[Tier.UPPER][upper_quota:] + pools[Tier.ULTRA][ultra_quota:]
     return (selected + remainder)[:limit]
 
 
-def select_session_words(
-    repo: VocabularyRepository, mode: str, now: datetime, count: int | None, rng: Random
-) -> list[Word]:
+def select_session_words(repo: VocabularyRepository, now: datetime, rng: Random) -> list[Word]:
     unseen = repo.list_words(limit=10_000)
-    if mode == "screen":
-        if count not in {20, 50, 100}:
-            raise ValueError("screen count must be 20, 50, or 100")
-        selected = balanced_new_words(unseen, count, rng)
-        return rng.sample(selected, k=len(selected))
-    if mode != "daily":
-        raise ValueError("mode must be daily or screen")
-    target = repo.get_daily_target()
+    target = 30
     due = repo.due_words(now, target)
     due_ids = {word.id for word in due}
     quota = max(0, target - len(due))
@@ -67,14 +51,12 @@ def select_session_words(
 
 def create_study_session(
     repo: VocabularyRepository,
-    mode: str,
     now: datetime,
     session_id: str,
-    count: int | None,
     rng: Random,
 ) -> StudySession:
-    words = select_session_words(repo, mode, now, count, rng)
-    return repo.create_session(session_id, mode, [word.id for word in words], now)
+    words = select_session_words(repo, now, rng)
+    return StudySession(session_id, tuple(words))
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from english_vocab_trainer.adapters.local.migrations import apply_migrations
+from english_vocab_trainer.adapters.local.database import initialize_database
 
 
 class SQLiteLoginAttemptLimiter:
@@ -17,7 +17,7 @@ class SQLiteLoginAttemptLimiter:
         cutoff = int((now - timedelta(minutes=15)).timestamp())
         connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         try:
-            apply_migrations(connection)
+            initialize_database(connection)
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM login_attempts WHERE attempted_at<?", (cutoff,))
             count = int(connection.execute("SELECT count(*) FROM login_attempts").fetchone()[0])
@@ -40,7 +40,7 @@ class SQLiteLoginAttemptLimiter:
     def clear(self) -> None:
         connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         try:
-            apply_migrations(connection)
+            initialize_database(connection)
             connection.execute("DELETE FROM login_attempts")
         finally:
             connection.close()

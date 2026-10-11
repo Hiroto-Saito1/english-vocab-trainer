@@ -1,5 +1,4 @@
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 from argon2 import PasswordHasher
@@ -7,8 +6,6 @@ from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
-from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
-from english_vocab_trainer.ports.repositories import RepositoryProvider
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import (
@@ -29,7 +26,7 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(
         create_app(
             AppContainer(
-                SQLiteRepositoryProvider(database),
+                database,
                 FilesystemAudioStore(tmp_path),
                 "production",
                 auth=auth,
@@ -40,11 +37,12 @@ def client(tmp_path: Path) -> TestClient:
 
 def test_login_protects_api_and_enforces_csrf_logout(tmp_path: Path) -> None:
     with client(tmp_path) as app:
-        unauthenticated = app.get("/api/v1/progress")
+        unauthenticated = app.get("/api/v1/sessions")
         assert (
             unauthenticated.status_code == 401
             and unauthenticated.headers["cache-control"] == "no-store"
         )
+        assert app.post("/api/v1/review-events/batch", json=[]).status_code == 401
         bad = app.post("/login", data={"password": "wrong"})
         assert (
             bad.status_code == 401
@@ -54,13 +52,13 @@ def test_login_protects_api_and_enforces_csrf_logout(tmp_path: Path) -> None:
         login = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
         assert login.status_code == 303
         assert "vocab-session" in login.headers["set-cookie"]
-        assert app.get("/api/v1/progress").status_code == 200
+        assert app.get("/api/v1/sessions").status_code == 200
         assert app.post("/auth/logout").status_code == 403
         csrf = app.cookies.get("vocab-csrf")
         assert csrf is not None
         logout = app.post("/auth/logout", headers={"X-CSRF-Token": csrf})
         assert logout.status_code == 204 and logout.headers["cache-control"] == "no-store"
-        assert app.get("/api/v1/progress").status_code == 401
+        assert app.get("/api/v1/sessions").status_code == 401
 
 
 def test_login_origin_and_global_throttle(tmp_path: Path) -> None:
@@ -80,8 +78,8 @@ def test_login_origin_and_global_throttle(tmp_path: Path) -> None:
 
 def test_malformed_cookie_and_csrf_never_become_server_errors(tmp_path: Path) -> None:
     with client(tmp_path) as app:
-        for session in ("v1.bad*.x", "v1.e30.e30", "v1.W10.e30", "v1.bnVsbA.e30"):
-            response = app.get("/api/v1/progress", headers={"Cookie": f"vocab-session={session}"})
+        for session in ("bad*.x", "e30.e30", "W10.e30", "bnVsbA.e30"):
+            response = app.get("/api/v1/sessions", headers={"Cookie": f"vocab-session={session}"})
             assert response.status_code == 401
         login = app.post("/login", data={"password": "test-password"}, follow_redirects=False)
         assert login.status_code == 303
@@ -104,7 +102,7 @@ def test_login_size_cap_and_production_cookie_attributes(tmp_path: Path) -> None
     with TestClient(
         create_app(
             AppContainer(
-                SQLiteRepositoryProvider(database),
+                database,
                 FilesystemAudioStore(tmp_path),
                 "production",
                 auth=auth,
@@ -134,12 +132,10 @@ def test_production_host_security_headers_and_readiness_are_public(tmp_path: Pat
         assert "object-src 'none'" in liveness.headers["content-security-policy"]
         assert app.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
 
-    failing_repositories = Mock(spec=RepositoryProvider)
-    failing_repositories.for_user.side_effect = ConfigurationError("repository is not configured")
     unavailable = TestClient(
         create_app(
             AppContainer(
-                failing_repositories,
+                tmp_path / "missing" / "v.db",
                 FilesystemAudioStore(tmp_path),
                 "production",
                 auth=AuthService(

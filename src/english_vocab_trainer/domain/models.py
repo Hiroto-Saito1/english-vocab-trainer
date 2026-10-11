@@ -25,7 +25,6 @@ class Tier(StrEnum):
 
     UPPER = "upper"
     ULTRA = "ultra"
-    UNKNOWN = "unknown"  # Safe compatibility value for catalogs published before 0003.
 
 
 # This is both the scheduler's learning interval and the client contract.  Do
@@ -46,7 +45,7 @@ class Word:
     level: int | None
     transcript: str | None
     audio_key: str
-    tier: Tier = Tier.UNKNOWN
+    tier: Tier
 
 
 @dataclass(slots=True)
@@ -74,8 +73,6 @@ class ReviewEvent:
 @dataclass(frozen=True, slots=True)
 class StudySession:
     id: str
-    mode: str
-    created_at: datetime
     words: tuple[Word, ...]
 
 

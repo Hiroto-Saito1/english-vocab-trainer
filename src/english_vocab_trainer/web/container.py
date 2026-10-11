@@ -10,7 +10,6 @@ from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, S3LikeClient
 from english_vocab_trainer.ports.audio import AudioStore
-from english_vocab_trainer.ports.repositories import RepositoryProvider
 from english_vocab_trainer.web.auth import AuthService
 
 
@@ -66,10 +65,9 @@ def audio_store_from_env(
 
 @dataclass(frozen=True, slots=True)
 class AppContainer:
-    repositories: RepositoryProvider
+    database: Path
     audio: AudioStore
     environment: str
-    local_user_id: str | None = None
     auth: AuthService | None = None
     trusted_hosts: tuple[str, ...] = ()
 

@@ -1022,7 +1022,7 @@ def publish_records(
         )
         for record in validated
     ]
-    with SQLiteVocabularyRepository(database, "local-user") as repository:
+    with SQLiteVocabularyRepository(database) as repository:
         repository.bulk_upsert_words(words)
 
 

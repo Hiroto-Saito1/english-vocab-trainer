@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from english_vocab_trainer.adapters.local.migrations import apply_migrations
+from english_vocab_trainer.adapters.local.database import initialize_database
 from english_vocab_trainer.restore_drill import RestoreDrillError, restore_drill
 
 ROOT = Path(__file__).parents[1]
@@ -137,7 +137,7 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
 ) -> None:
     live = tmp_path / "live.db"
     connection = sqlite3.connect(live)
-    apply_migrations(connection)
+    initialize_database(connection)
     connection.execute(
         "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
         "VALUES('one','one',1,NULL,'one.mp3','upper')"
@@ -179,7 +179,7 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
 def test_restore_drill_removes_only_its_partial_output(tmp_path: Path) -> None:
     live, output = tmp_path / "live.db", tmp_path / "new.db"
     connection = sqlite3.connect(live)
-    apply_migrations(connection)
+    initialize_database(connection)
     connection.close()
 
     def partial(_: Sequence[str]) -> None:
