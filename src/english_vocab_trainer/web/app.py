@@ -439,13 +439,12 @@ def progress(_: Identity, repository: Repository) -> ProgressOut:
 
 @router.get("/api/v1/settings", response_model=SettingsOut)
 def get_settings(_: Identity, repository: Repository) -> SettingsOut:
-    return SettingsOut(daily_target=repository.get_settings().daily_target)
+    return SettingsOut(daily_target=repository.get_daily_target())
 
 
 @router.patch("/api/v1/settings", response_model=SettingsOut)
 def settings(settings: SettingsIn, _: Identity, __: Csrf, repository: Repository) -> SettingsOut:
-    updated = repository.update_settings(settings.daily_target)
-    return SettingsOut(daily_target=updated.daily_target)
+    return SettingsOut(daily_target=repository.update_daily_target(settings.daily_target))
 
 
 @router.get("/api/v1/words", response_model=WordListOut)

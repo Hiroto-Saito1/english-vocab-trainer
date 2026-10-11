@@ -118,6 +118,8 @@ def test_selection_is_lowest_deterministic_and_approved_only(tmp_path: Path) -> 
     assert records_from_audio(selected)[0].id.startswith("audio-")
     with pytest.raises(ValueError):
         select_audio(tmp_path, 0)
+    with pytest.raises(ValueError):
+        profile_for("mvp").expected_count(0)
     invalid = tmp_path / "outside" / "9" / "STAGE 01\u30000001 invalid.mp3"
     invalid.parent.mkdir(parents=True)
     invalid.touch()

@@ -14,7 +14,7 @@ def test_audio_head_full_and_range(tmp_path: Path) -> None:
     (tmp_path / "x.mp3").write_bytes(b"abcde")
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:
@@ -49,7 +49,7 @@ class MetadataOnlyStore:
 def test_audio_head_uses_metadata_only_and_sanitizes_storage_failure(tmp_path: Path) -> None:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     store = MetadataOnlyStore()
     app = create_app(AppContainer(provider, store, "test", "local-user"))

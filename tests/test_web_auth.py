@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from argon2 import PasswordHasher
@@ -7,12 +8,12 @@ from fastapi.testclient import TestClient
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
+from english_vocab_trainer.ports.repositories import RepositoryProvider
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import (
     AppContainer,
     ConfigurationError,
-    UnavailableRepositoryProvider,
     trusted_hosts_from_env,
 )
 
@@ -133,10 +134,12 @@ def test_production_host_security_headers_and_readiness_are_public(tmp_path: Pat
         assert "object-src 'none'" in liveness.headers["content-security-policy"]
         assert app.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
 
+    failing_repositories = Mock(spec=RepositoryProvider)
+    failing_repositories.for_user.side_effect = ConfigurationError("repository is not configured")
     unavailable = TestClient(
         create_app(
             AppContainer(
-                UnavailableRepositoryProvider(),
+                failing_repositories,
                 FilesystemAudioStore(tmp_path),
                 "production",
                 auth=AuthService(

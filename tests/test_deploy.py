@@ -18,7 +18,7 @@ ENTRYPOINT = ROOT / "deploy" / "docker-entrypoint.sh"
 LITESTREAM_CONFIG = ROOT / "deploy" / "litestream.yml"
 
 
-def deployment_environment(data: Path, executable_directory: Path) -> dict[str, str]:
+def deployment_environment(executable_directory: Path) -> dict[str, str]:
     return {
         "PATH": f"{executable_directory}{os.pathsep}{os.environ['PATH']}",
         "APP_ENV": "production",
@@ -36,6 +36,16 @@ def deployment_environment(data: Path, executable_directory: Path) -> dict[str, 
         "LITESTREAM_R2_ENDPOINT_URL": "https://abc123.r2.cloudflarestorage.com",
         "LITESTREAM_R2_BUCKET": "backups",
     }
+
+
+def _run_entrypoint(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["sh", str(ENTRYPOINT)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
 
 
 def fake_litestream(directory: Path) -> None:
@@ -61,10 +71,8 @@ def test_entrypoint_validates_env_and_uses_constant_litestream_argv(tmp_path: Pa
     executable_directory = tmp_path / "bin"
     executable_directory.mkdir()
     fake_litestream(executable_directory)
-    environment = deployment_environment(tmp_path / "data", executable_directory)
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=environment, check=False
-    )
+    environment = deployment_environment(executable_directory)
+    completed = _run_entrypoint(environment)
     assert completed.returncode == 0
     assert completed.stdout.splitlines()[:4] == [
         "replicate",
@@ -84,35 +92,27 @@ def test_entrypoint_fails_without_echoing_a_secret_or_accepting_non_volume_path(
     executable_directory = tmp_path / "bin"
     executable_directory.mkdir()
     fake_litestream(executable_directory)
-    missing = deployment_environment(tmp_path / "data", executable_directory)
+    missing = deployment_environment(executable_directory)
     missing.pop("LITESTREAM_SECRET_ACCESS_KEY")
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=missing, check=False
-    )
+    completed = _run_entrypoint(missing)
     assert completed.returncode == 64
     assert "LITESTREAM_SECRET_ACCESS_KEY" in completed.stderr
     assert "backup-secret-not-printed" not in completed.stderr
 
-    invalid = deployment_environment(tmp_path / "data", executable_directory)
+    invalid = deployment_environment(executable_directory)
     invalid["VOCAB_DB_PATH"] = "/data/../outside.db"
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=invalid, check=False
-    )
+    completed = _run_entrypoint(invalid)
     assert completed.returncode == 64
     assert "canonical" in completed.stderr
 
-    invalid = deployment_environment(tmp_path / "data", executable_directory)
+    invalid = deployment_environment(executable_directory)
     invalid["APP_ENV"] = "test"
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=invalid, check=False
-    )
+    completed = _run_entrypoint(invalid)
     assert completed.returncode == 64 and "APP_ENV=production" in completed.stderr
 
-    invalid = deployment_environment(tmp_path / "data", executable_directory)
+    invalid = deployment_environment(executable_directory)
     invalid["AUDIO_BACKEND"] = "filesystem"
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=invalid, check=False
-    )
+    completed = _run_entrypoint(invalid)
     assert completed.returncode == 64 and "AUDIO_BACKEND=r2" in completed.stderr
 
     for key, value, message in (
@@ -120,19 +120,15 @@ def test_entrypoint_fails_without_echoing_a_secret_or_accepting_non_volume_path(
         ("LITESTREAM_R2_BUCKET", "bad_bucket", "R2-safe"),
         ("LITESTREAM_R2_ENDPOINT_URL", "https://bad.example/path", "Cloudflare R2 HTTPS"),
     ):
-        invalid = deployment_environment(tmp_path / "data", executable_directory)
+        invalid = deployment_environment(executable_directory)
         invalid[key] = value
-        completed = subprocess.run(
-            ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=invalid, check=False
-        )
+        completed = _run_entrypoint(invalid)
         assert completed.returncode == 64 and message in completed.stderr
 
-    derived = deployment_environment(tmp_path / "data", executable_directory)
+    derived = deployment_environment(executable_directory)
     derived.pop("ALLOWED_HOSTS")
     derived["FLY_APP_NAME"] = "vocab-study"
-    completed = subprocess.run(
-        ["sh", str(ENTRYPOINT)], text=True, capture_output=True, env=derived, check=False
-    )
+    completed = _run_entrypoint(derived)
     assert completed.returncode == 0
 
 

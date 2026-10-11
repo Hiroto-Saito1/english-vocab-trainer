@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -10,7 +12,6 @@ from english_vocab_trainer.adapters.local.migrations import apply_migrations
 from english_vocab_trainer.domain.models import (
     Rating,
     ReviewEvent,
-    Settings,
     StudySession,
     Tier,
     Word,
@@ -50,16 +51,19 @@ class SQLiteVocabularyRepository:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def add_word(self, word: Word) -> None:
-        self.db.execute(
-            "INSERT OR REPLACE INTO words(id,term,level,transcript,audio_key,tier) VALUES(?,?,?,?,?,?)",
-            (word.id, word.term, word.level, word.transcript, word.audio_key, word.tier.value),
-        )
+    @contextmanager
+    def _transaction(self) -> Iterator[None]:
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def bulk_upsert_words(self, words: list[Word]) -> None:
         """Atomically publish a fully validated catalog without touching review history."""
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
+        with self._transaction():
             self.db.executemany(
                 "INSERT INTO words(id,term,level,transcript,audio_key,tier) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
@@ -76,10 +80,6 @@ class SQLiteVocabularyRepository:
                     for word in words
                 ],
             )
-            self.db.execute("COMMIT")
-        except Exception:
-            self.db.execute("ROLLBACK")
-            raise
 
     def get_word(self, word_id: str) -> Word | None:
         r = self.db.execute("SELECT * FROM words WHERE id=?", (word_id,)).fetchone()
@@ -181,8 +181,8 @@ class SQLiteVocabularyRepository:
         )
 
     def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
+        committed_state: WordState | None = None
+        with self._transaction():
             old = self.db.execute(
                 "SELECT user_id,payload FROM review_events WHERE id=?", (str(event.id),)
             ).fetchone()
@@ -190,57 +190,51 @@ class SQLiteVocabularyRepository:
             if old:
                 if old["user_id"] != self.user_id or old["payload"] != payload:
                     raise EventConflictError("event UUID payload conflict")
-                self.db.execute("COMMIT")
-                return self.state(event.word_id)
-            if self.get_word(event.word_id) is None:
-                raise MissingError("word not found")
-            state = self.state(event.word_id)
-            if state.version != expected_version:
-                raise ConcurrentUpdateError("CAS conflict")
-            self.db.execute(
-                "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
-                (
-                    str(event.id),
-                    self.user_id,
-                    event.word_id,
-                    event.rating,
-                    _iso(event.reviewed_at),
-                    None,
-                    payload,
-                ),
-            )
-            state = replay_word_state(event.word_id, self._events(event.word_id), state.version + 1)
-            self._save(state)
-            self.db.execute("COMMIT")
-            return state
-        except Exception:
-            self.db.execute("ROLLBACK")
-            raise
+            else:
+                if self.get_word(event.word_id) is None:
+                    raise MissingError("word not found")
+                state = self.state(event.word_id)
+                if state.version != expected_version:
+                    raise ConcurrentUpdateError("CAS conflict")
+                self.db.execute(
+                    "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
+                    (
+                        str(event.id),
+                        self.user_id,
+                        event.word_id,
+                        event.rating,
+                        _iso(event.reviewed_at),
+                        None,
+                        payload,
+                    ),
+                )
+                committed_state = replay_word_state(
+                    event.word_id, self._events(event.word_id), state.version + 1
+                )
+                self._save(committed_state)
+        return committed_state if committed_state is not None else self.state(event.word_id)
 
     def void_event(self, event_id: UUID) -> WordState:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            r = self.db.execute(
+        committed_state: WordState | None = None
+        with self._transaction():
+            row = self.db.execute(
                 "SELECT word_id,voided_at FROM review_events WHERE id=? AND user_id=?",
                 (str(event_id), self.user_id),
             ).fetchone()
-            if not r:
+            if not row:
                 raise MissingError("event not found")
-            if r["voided_at"] is not None:
-                self.db.execute("COMMIT")
-                return self.state(r["word_id"])
-            self.db.execute(
-                "UPDATE review_events SET voided_at=? WHERE id=?",
-                (_iso(datetime.now(UTC)), str(event_id)),
-            )
-            prior = self.state(r[0])
-            state = replay_word_state(r[0], self._events(r[0]), prior.version + 1)
-            self._save(state)
-            self.db.execute("COMMIT")
-            return state
-        except Exception:
-            self.db.execute("ROLLBACK")
-            raise
+            word_id = row["word_id"]
+            if row["voided_at"] is None:
+                self.db.execute(
+                    "UPDATE review_events SET voided_at=? WHERE id=?",
+                    (_iso(datetime.now(UTC)), str(event_id)),
+                )
+                prior = self.state(word_id)
+                committed_state = replay_word_state(
+                    word_id, self._events(word_id), prior.version + 1
+                )
+                self._save(committed_state)
+        return committed_state if committed_state is not None else self.state(word_id)
 
     def update_transcript(self, word_id: str, transcript: str) -> Word:
         if (
@@ -264,26 +258,25 @@ class SQLiteVocabularyRepository:
             ).fetchone()[0],
         }
 
-    def get_settings(self) -> Settings:
+    def get_daily_target(self) -> int:
         row = self.db.execute(
             "SELECT daily_target FROM user_settings WHERE user_id=?", (self.user_id,)
         ).fetchone()
-        return Settings(row[0] if row else 30)
+        return row[0] if row else 30
 
-    def update_settings(self, daily_target: int) -> Settings:
+    def update_daily_target(self, daily_target: int) -> int:
         if not 1 <= daily_target <= 100:
             raise ValueError("daily_target must be between 1 and 100")
         self.db.execute(
             "INSERT INTO user_settings VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET daily_target=excluded.daily_target",
             (self.user_id, daily_target),
         )
-        return self.get_settings()
+        return self.get_daily_target()
 
     def create_session(
         self, session_id: str, kind: str, words: list[str], created_at: datetime
     ) -> StudySession:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
+        with self._transaction():
             self.db.execute(
                 "INSERT INTO study_sessions VALUES(?,?,?,?)",
                 (session_id, self.user_id, kind, _iso(created_at)),
@@ -292,13 +285,9 @@ class SQLiteVocabularyRepository:
                 "INSERT INTO session_items VALUES(?,?,?)",
                 [(session_id, word, index) for index, word in enumerate(words)],
             )
-            self.db.execute("COMMIT")
-            session = self.get_session(session_id)
-            assert session is not None
-            return session
-        except Exception:
-            self.db.execute("ROLLBACK")
-            raise
+        session = self.get_session(session_id)
+        assert session is not None
+        return session
 
     def get_session(self, session_id: str) -> StudySession | None:
         meta = self.db.execute(

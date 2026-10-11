@@ -58,7 +58,7 @@ def select_session_words(
         return shuffled(balanced_new_words(unseen, count, rng), rng)
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
-    target = repo.get_settings().daily_target
+    target = repo.get_daily_target()
     due = repo.due_words(now, target)
     due_ids = {word.id for word in due}
     quota = max(0, target - len(due))
@@ -84,9 +84,6 @@ def create_study_session(
 
 @dataclass(frozen=True, slots=True)
 class ReviewResult:
-    id: UUID
-    word_id: str
-    action: ReviewAction
     rating: Rating
     state: WordState
     created: bool
@@ -112,9 +109,6 @@ def submit_review(
         if not compatible:
             raise EventConflictError("review event conflict")
         return ReviewResult(
-            id=event_id,
-            word_id=word_id,
-            action=action,
             rating=existing.rating,
             state=repo.state(word_id),
             created=False,
@@ -126,9 +120,6 @@ def submit_review(
         try:
             state = repo.append_event(event, repo.state(word_id).version)
             return ReviewResult(
-                id=event_id,
-                word_id=word_id,
-                action=action,
                 rating=rating,
                 state=state,
                 created=True,

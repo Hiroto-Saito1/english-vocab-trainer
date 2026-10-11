@@ -62,6 +62,8 @@ class CatalogProfile:
     per_source: int | None
 
     def expected_count(self, mvp_limit: int = 10) -> int:
+        if mvp_limit < 1:
+            raise ValueError("limit_per_source must be positive")
         return len(APPROVED_SOURCES) * (
             self.per_source if self.per_source is not None else mvp_limit
         )
@@ -241,7 +243,6 @@ def select_audio(
     if limit_per_source < 1:
         raise ValueError("limit_per_source must be positive")
     selected: list[AudioCandidate] = []
-    all_candidates: list[AudioCandidate] = []
     full_profile = profile == FULL_PROFILE
     candidates_by_source = {source: _source_candidates(root, source) for source in APPROVED_SOURCES}
     if full_profile:
@@ -256,13 +257,12 @@ def select_audio(
         chosen = candidates if full_profile else candidates[:wanted]
         completed = [replace(candidate, checksum=checksum(candidate.path)) for candidate in chosen]
         selected.extend(completed)
-        all_candidates.extend(completed)
     if full_profile:
-        if len({item.audio_key for item in all_candidates}) != len(all_candidates):
+        if len({item.audio_key for item in selected}) != len(selected):
             raise ValueError("full profile contains duplicate audio paths")
-        if len({item.checksum for item in all_candidates}) != len(all_candidates):
+        if len({item.checksum for item in selected}) != len(selected):
             raise ValueError("full profile contains duplicate audio checksums")
-        if len({item.term.casefold() for item in all_candidates}) != len(all_candidates):
+        if len({item.term.casefold() for item in selected}) != len(selected):
             raise ValueError("full profile contains duplicate terms")
     return selected
 
@@ -836,12 +836,6 @@ def validate_records(
     )
 
 
-def expected_count_for(profile: CatalogProfile, limit_per_source: int) -> int:
-    if limit_per_source < 1:
-        raise ValueError("limit_per_source must be positive")
-    return profile.expected_count(limit_per_source)
-
-
 def scan_catalog(
     root: Path,
     catalog: Path,
@@ -867,7 +861,7 @@ def scan_catalog(
             raise ValueError("existing transcript state requires --resume or --force")
         candidates = select_audio(root, limit_per_source, profile=profile)
         records = records_from_audio(candidates)
-        expected = expected_count_for(profile, limit_per_source)
+        expected = profile.expected_count(limit_per_source)
         if len(records) != expected:
             raise ValueError(
                 f"profile {profile.name} expected {expected} records, found {len(records)}"
@@ -983,7 +977,7 @@ def _verify_catalog_inventory(
     manifest = read_manifest(catalog)
     if manifest is None:
         raise ValueError("catalog provenance manifest is missing")
-    expected = expected_count_for(profile, limit_per_source)
+    expected = profile.expected_count(limit_per_source)
     if (
         manifest.schema_version != CATALOG_SCHEMA_VERSION
         or manifest.profile != profile.name
@@ -1117,17 +1111,18 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     args = parser.parse_args()
 
     profile = profile_for(args.profile)
-    expected_count = expected_count_for(profile, args.limit_per_source)
+    expected_count = profile.expected_count(args.limit_per_source)
     if args.max_records is not None and args.max_records < 1:
         raise SystemExit("--max-records must be positive")
     if args.command == "scan":
-        candidates = select_audio(args.source, args.limit_per_source, profile=profile)
-        records = records_from_audio(candidates)
-        if len(records) != expected_count:
-            raise SystemExit(
-                f"profile {profile.name} expected {expected_count} records, found {len(records)}"
-            )
         if args.dry_run:
+            candidates = select_audio(args.source, args.limit_per_source, profile=profile)
+            records = records_from_audio(candidates)
+            if len(records) != expected_count:
+                raise SystemExit(
+                    f"profile {profile.name} expected {expected_count} records, "
+                    f"found {len(records)}"
+                )
             print(f"would write {len(records)} private catalog records")
         else:
             records, _ = scan_catalog(

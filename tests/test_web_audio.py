@@ -21,7 +21,7 @@ def test_audio_api_full_and_range(tmp_path: Path) -> None:
     (tmp_path / "x.mp3").write_bytes(b"abcde")
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:
@@ -44,7 +44,7 @@ def test_audio_api_invalid_range_and_etag(tmp_path: Path) -> None:
     (tmp_path / "x.mp3").write_bytes(b"abcde")
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:
@@ -78,7 +78,7 @@ def test_conditional_audio_get_precedes_range_and_never_fetches_body(
 ) -> None:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     store = ConditionalStore()
     app = create_app(AppContainer(provider, store, "test", "local-user"))
@@ -95,7 +95,7 @@ def test_conditional_audio_get_precedes_range_and_never_fetches_body(
 def test_conditional_audio_get_fetches_when_validator_does_not_match(tmp_path: Path) -> None:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     store = ConditionalStore()
     app = create_app(AppContainer(provider, store, "test", "local-user"))
@@ -120,7 +120,7 @@ class UnavailableGetStore(ConditionalStore):
 def _audio_app_with_store(tmp_path: Path, store: ConditionalStore) -> FastAPI:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "x.mp3"))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "x.mp3")])
     repository.close()
     return create_app(AppContainer(provider, store, "test", "local-user"))
 

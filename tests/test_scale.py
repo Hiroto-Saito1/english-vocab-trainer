@@ -21,7 +21,7 @@ def test_two_thousand_word_session_progress_and_review_smoke(tmp_path: Path) -> 
                 for index in range(2_000)
             ]
         )
-        repository.update_settings(100)
+        repository.update_daily_target(100)
         now = datetime(2026, 1, 1, tzinfo=UTC)
         session = create_study_session(repository, "daily", now, "scale", None, Random(7))
         review = submit_review(repository, uuid4(), session.words[0].id, ReviewAction.KNOWN, now)

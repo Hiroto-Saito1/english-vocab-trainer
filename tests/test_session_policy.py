@@ -14,7 +14,6 @@ from english_vocab_trainer.application.services import (
 from english_vocab_trainer.domain.models import (
     ReviewAction,
     ReviewEvent,
-    Settings,
     Tier,
     Word,
     WordState,
@@ -43,8 +42,8 @@ class SessionRepository:
         assert now.tzinfo is UTC
         return self.due[:limit]
 
-    def get_settings(self) -> Settings:
-        return Settings(self.target)
+    def get_daily_target(self) -> int:
+        return self.target
 
 
 def select(

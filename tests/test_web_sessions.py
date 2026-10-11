@@ -12,7 +12,7 @@ from english_vocab_trainer.web.container import AppContainer
 def test_screen_session_is_persisted(tmp_path: Path) -> None:
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    repository.add_word(Word("one", "one", 9, None, "one.mp3", Tier.UPPER))
+    repository.bulk_upsert_words([Word("one", "one", 9, None, "one.mp3", Tier.UPPER)])
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:
@@ -38,8 +38,9 @@ def test_daily_session_honours_configured_target(tmp_path: Path) -> None:
     target = 100
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
-    for index in range(100):
-        repository.add_word(Word(str(index), f"term {index}", index % 4, None, f"{index}.mp3"))
+    repository.bulk_upsert_words(
+        [Word(str(index), f"term {index}", index % 4, None, f"{index}.mp3") for index in range(100)]
+    )
     repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(tmp_path), "test", "local-user"))
     with TestClient(app) as client:

@@ -56,18 +56,20 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     repository = provider.for_user("local-user")
     try:
         for index in range(3):
-            audio_key = f"word-{index}.mp3"
-            (audio_root / audio_key).write_bytes(b"ID3\x04\x00\x00")
-            repository.add_word(
+            (audio_root / f"word-{index}.mp3").write_bytes(b"ID3\x04\x00\x00")
+        repository.bulk_upsert_words(
+            [
                 Word(
                     f"word-{index}",
                     f"word {index}",
                     2,
                     f"An English definition for word {index} includes an example.",
-                    audio_key,
+                    f"word-{index}.mp3",
                     Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
                 )
-            )
+                for index in range(3)
+            ]
+        )
     finally:
         repository.close()
     app = create_app(AppContainer(provider, FilesystemAudioStore(audio_root), "test", "local-user"))
@@ -85,17 +87,19 @@ def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     repository = provider.for_user("primary")
     try:
         for index in range(2):
-            audio_key = f"protected-{index}.mp3"
-            (audio_root / audio_key).write_bytes(b"ID3\x04\x00\x00protected")
-            repository.add_word(
+            (audio_root / f"protected-{index}.mp3").write_bytes(b"ID3\x04\x00\x00protected")
+        repository.bulk_upsert_words(
+            [
                 Word(
                     f"protected-{index}",
                     f"protected word {index}",
                     2,
                     f"An English definition for protected word {index}.",
-                    audio_key,
+                    f"protected-{index}.mp3",
                 )
-            )
+                for index in range(2)
+            ]
+        )
     finally:
         repository.close()
     auth = AuthService(
@@ -170,35 +174,6 @@ def active_audio_urls(page: Page) -> list[str]:
     )
 
 
-def wait_for_empty_outbox(page: Page) -> None:
-    empty = page.evaluate(
-        """async () => {
-          const deadline = Date.now() + 10_000;
-          const eventCount = () => Promise.race([
-            new Promise((resolve, reject) => {
-              const request = indexedDB.open("english-vocab-trainer", 1);
-              request.onerror = () => reject(request.error);
-              request.onsuccess = () => {
-                const db = request.result;
-                const count = db.transaction("events").objectStore("events").count();
-                count.onerror = () => { db.close(); reject(count.error); };
-                count.onsuccess = () => { db.close(); resolve(count.result); };
-              };
-            }),
-            new Promise((_, reject) => setTimeout(
-              () => reject(new Error("outbox probe timed out")), 1_000
-            )),
-          ]);
-          while (Date.now() < deadline) {
-            if (await eventCount() === 0) return true;
-            await new Promise((resolve) => setTimeout(resolve, 50));
-          }
-          return false;
-        }"""
-    )
-    assert empty is True, "outbox did not empty within 10 seconds"
-
-
 def wait_for_outbox_ids(page: Page, expected: list[str]) -> None:
     matched = page.evaluate(
         """async (expected) => {
@@ -228,6 +203,32 @@ def wait_for_outbox_ids(page: Page, expected: list[str]) -> None:
         expected,
     )
     assert matched is True, f"outbox IDs did not become {expected!r} within 10 seconds"
+
+
+def put_outbox_events(page: Page, events: list[dict[str, str]]) -> None:
+    stored = page.evaluate(
+        """async (events) => Promise.race([((async () => {
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          try {
+            await new Promise((resolve, reject) => {
+              const tx = db.transaction("events", "readwrite");
+              events.forEach((event) => tx.objectStore("events").put(event));
+              tx.oncomplete = resolve;
+              tx.onerror = () => reject(tx.error);
+              tx.onabort = () => reject(tx.error);
+            });
+          } finally { db.close(); }
+          return true;
+        })()), new Promise((_, reject) => setTimeout(
+          () => reject(new Error("outbox setup timed out")), 10_000
+        ))])""",
+        events,
+    )
+    assert stored is True
 
 
 def install_audio_presentation_spy(page: Page) -> None:
@@ -403,7 +404,7 @@ def test_final_offline_unknown_continue_undo_restores_the_final_card(
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
     expect(page.locator("#progress")).to_have_text("3 of 3")
     expect(page.locator("#undo")).to_be_disabled()
-    wait_for_empty_outbox(page)
+    wait_for_outbox_ids(page, [])
     assert len(event_rows(database)) == 2
     restored = page.evaluate("window.__pwa.getState()")
     assert restored["event"] is None
@@ -600,30 +601,24 @@ def test_sync_keeps_only_conflicted_indexeddb_events(
     page.route("**/api/v1/review-events/batch", batch_response)
     page.goto(base_url)
     wait_for_audio_cache(page)
-    page.evaluate(
-        """async ([first, second]) => Promise.race([((async () => {
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction("events", "readwrite");
-            tx.objectStore("events").put({
-              id:first, word_id:"word-0", action:"known", reviewed_at:"2026-01-01T00:00:00Z"
-            });
-            tx.objectStore("events").put({
-              id:second, word_id:"word-1", action:"unknown", reviewed_at:"2026-01-01T00:00:01Z"
-            });
-            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-          });
-          db.close();
-          window.dispatchEvent(new Event("online"));
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("conflict outbox setup timed out")), 10_000
-        ))])""",
-        [acknowledged, conflicted],
+    put_outbox_events(
+        page,
+        [
+            {
+                "id": acknowledged,
+                "word_id": "word-0",
+                "action": "known",
+                "reviewed_at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": conflicted,
+                "word_id": "word-1",
+                "action": "unknown",
+                "reviewed_at": "2026-01-01T00:00:01Z",
+            },
+        ],
     )
+    page.evaluate("window.dispatchEvent(new Event('online'))")
     wait_for_outbox_ids(page, [conflicted])
     expect(page.locator("#status")).to_have_text(
         "Some review updates need attention and remain on this device."
@@ -668,23 +663,10 @@ def test_online_reconnect_chunks_more_than_two_hundred_outbox_events(
         }
         for index in range(1, 206)
     ]
-    page.evaluate(
-        """async (events) => new Promise((resolve, reject) => {
-          const request = indexedDB.open("english-vocab-trainer", 1);
-          request.onerror = () => reject(request.error);
-          request.onsuccess = () => {
-            const db = request.result;
-            const tx = db.transaction("events", "readwrite");
-            events.forEach((event) => tx.objectStore("events").put(event));
-            tx.oncomplete = () => { db.close(); resolve(); };
-            tx.onerror = () => { db.close(); reject(tx.error); };
-          };
-        })""",
-        events,
-    )
+    put_outbox_events(page, events)
     page.context.set_offline(False)
     page.evaluate("window.dispatchEvent(new Event('online'))")
-    wait_for_empty_outbox(page)
+    wait_for_outbox_ids(page, [])
     assert batches == [100, 100, 5]
 
 
@@ -789,9 +771,9 @@ def test_offline_audio_outbox_rotation_and_private_reset(
     page.evaluate("window.dispatchEvent(new Event('online'))")
     rows = wait_for_rows(database, 2)
     assert [row["rating"] for row in rows] == ["again", "easy"]
-    wait_for_empty_outbox(page)
+    wait_for_outbox_ids(page, [])
     page.evaluate("window.dispatchEvent(new Event('online'))")
-    wait_for_empty_outbox(page)
+    wait_for_outbox_ids(page, [])
     assert len(event_rows(database)) == 2
 
     page.get_by_role("button", name="Known", exact=True).click()
@@ -813,8 +795,16 @@ def test_offline_audio_outbox_rotation_and_private_reset(
     provider = SQLiteRepositoryProvider(database)
     repository = provider.for_user("local-user")
     try:
-        repository.add_word(
-            Word("word-new", "new word", 2, "An English definition for a new word.", "word-new.mp3")
+        repository.bulk_upsert_words(
+            [
+                Word(
+                    "word-new",
+                    "new word",
+                    2,
+                    "An English definition for a new word.",
+                    "word-new.mp3",
+                )
+            ]
         )
     finally:
         repository.close()
@@ -827,25 +817,16 @@ def test_offline_audio_outbox_rotation_and_private_reset(
     assert not set(initial_urls).difference(next_urls).intersection(cache_urls)
 
     page.context.set_offline(True)
-    page.evaluate(
-        """async () => Promise.race([((async () => {
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction("events", "readwrite");
-            tx.objectStore("events").put({
-              id: crypto.randomUUID(), word_id: "word-new", action: "known",
-              reviewed_at: new Date().toISOString()
-            });
-            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-          });
-          db.close();
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("outbox setup timed out")), 10_000
-        ))])"""
+    put_outbox_events(
+        page,
+        [
+            {
+                "id": "00000000-0000-0000-0000-000000000201",
+                "word_id": "word-new",
+                "action": "known",
+                "reviewed_at": "2026-01-01T00:00:00Z",
+            }
+        ],
     )
     page.evaluate(
         """async () => Promise.race([
@@ -974,27 +955,16 @@ def test_mobile_production_login_csrf_and_logout_privacy_boundary(
     assert [session_status, audio_status, csrf_mutation] == [200, 200, 200]
 
     # Seed a durable event to show that logout clears both user stores, not just audio.
-    page.evaluate(
-        """async () => Promise.race([((async () => {
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction("events", "readwrite");
-            tx.objectStore("events").put({
-              id: crypto.randomUUID(), word_id: "protected-0", action: "known",
-              reviewed_at: new Date().toISOString()
-            });
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-            tx.onabort = () => reject(tx.error);
-          });
-          db.close();
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("production outbox setup timed out")), 10_000
-        ))])"""
+    put_outbox_events(
+        page,
+        [
+            {
+                "id": "00000000-0000-0000-0000-000000000202",
+                "word_id": "protected-0",
+                "action": "known",
+                "reviewed_at": "2026-01-01T00:00:00Z",
+            }
+        ],
     )
     page.get_by_role("button", name="Logout", exact=True).click()
     expect(page).to_have_url(f"{base_url}/login")

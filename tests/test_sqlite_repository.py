@@ -32,9 +32,13 @@ def repo(path: Path, user: str = "alice") -> SQLiteVocabularyRepository:
 
 
 def words(r: SQLiteVocabularyRepository) -> None:
-    r.add_word(Word("nine", "nine", 9, None, "nine.mp3"))
-    r.add_word(Word("ten", "ten", 10, None, "ten.mp3"))
-    r.add_word(Word("unknown", "unknown", None, None, "unknown.mp3"))
+    r.bulk_upsert_words(
+        [
+            Word("nine", "nine", 9, None, "nine.mp3"),
+            Word("ten", "ten", 10, None, "ten.mp3"),
+            Word("unknown", "unknown", None, None, "unknown.mp3"),
+        ]
+    )
 
 
 def event(word: str, when: datetime) -> ReviewEvent:
@@ -53,7 +57,7 @@ def test_reopen_persists_word_state_and_event(tmp_path: Path) -> None:
 
 def test_word_tier_is_persisted_and_legacy_default_is_unknown(tmp_path: Path) -> None:
     r = repo(tmp_path / "v.db")
-    r.add_word(Word("upper", "upper", 9, None, "upper.mp3", Tier.UPPER))
+    r.bulk_upsert_words([Word("upper", "upper", 9, None, "upper.mp3", Tier.UPPER)])
     stored = r.get_word("upper")
     assert stored is not None and stored.tier is Tier.UPPER
 
@@ -117,12 +121,12 @@ def test_settings_default_validation_persistence_and_isolation(tmp_path: Path) -
     path = tmp_path / "v.db"
     alice = repo(path)
     bob = repo(path, "bob")
-    assert alice.get_settings().daily_target == 30
-    assert alice.update_settings(17).daily_target == 17
-    assert bob.get_settings().daily_target == 30
+    assert alice.get_daily_target() == 30
+    assert alice.update_daily_target(17) == 17
+    assert bob.get_daily_target() == 30
     with pytest.raises(ValueError):
-        alice.update_settings(0)
-    assert repo(path).get_settings().daily_target == 17
+        alice.update_daily_target(0)
+    assert repo(path).get_daily_target() == 17
 
 
 def test_transcript_update_persists_and_missing_raises(tmp_path: Path) -> None:

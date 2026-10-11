@@ -72,11 +72,6 @@ class ReviewEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class Settings:
-    daily_target: int = 30
-
-
-@dataclass(frozen=True, slots=True)
 class StudySession:
     id: str
     kind: str
