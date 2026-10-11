@@ -116,7 +116,7 @@ class SQLiteVocabularyRepository:
                 UUID(r["id"]),
                 word_id,
                 Rating(r["rating"]),
-                _dt(r["reviewed_at"]) or datetime.now(UTC),
+                datetime.fromisoformat(r["reviewed_at"]),
                 _dt(r["voided_at"]),
             )
             for r in self.db.execute(
@@ -130,10 +130,12 @@ class SQLiteVocabularyRepository:
         ).fetchone()
         if row is None:
             return None
-        reviewed = _dt(row["reviewed_at"])
-        assert reviewed is not None
         return ReviewEvent(
-            event_id, row["word_id"], Rating(row["rating"]), reviewed, _dt(row["voided_at"])
+            event_id,
+            row["word_id"],
+            Rating(row["rating"]),
+            datetime.fromisoformat(row["reviewed_at"]),
+            _dt(row["voided_at"]),
         )
 
     def state(self, word_id: str) -> WordState:
@@ -143,7 +145,7 @@ class SQLiteVocabularyRepository:
         return (
             WordState(
                 word_id,
-                _dt(r["due_at"]) or datetime.min.replace(tzinfo=UTC),
+                datetime.fromisoformat(r["due_at"]),
                 r["stability"],
                 r["difficulty"],
                 _dt(r["first_seen_at"]),
@@ -181,7 +183,6 @@ class SQLiteVocabularyRepository:
         )
 
     def append_event(self, event: ReviewEvent, expected_version: int) -> WordState:
-        committed_state: WordState | None = None
         with self._transaction():
             old = self.db.execute(
                 "SELECT user_id,payload FROM review_events WHERE id=?", (str(event.id),)
@@ -190,32 +191,29 @@ class SQLiteVocabularyRepository:
             if old:
                 if old["user_id"] != self.user_id or old["payload"] != payload:
                     raise EventConflictError("event UUID payload conflict")
-            else:
-                if self.get_word(event.word_id) is None:
-                    raise MissingError("word not found")
-                state = self.state(event.word_id)
-                if state.version != expected_version:
-                    raise ConcurrentUpdateError("CAS conflict")
-                self.db.execute(
-                    "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
-                    (
-                        str(event.id),
-                        self.user_id,
-                        event.word_id,
-                        event.rating,
-                        _iso(event.reviewed_at),
-                        None,
-                        payload,
-                    ),
-                )
-                committed_state = replay_word_state(
-                    event.word_id, self._events(event.word_id), state.version + 1
-                )
-                self._save(committed_state)
-        return committed_state if committed_state is not None else self.state(event.word_id)
+                return self.state(event.word_id)
+            if self.get_word(event.word_id) is None:
+                raise MissingError("word not found")
+            state = self.state(event.word_id)
+            if state.version != expected_version:
+                raise ConcurrentUpdateError("CAS conflict")
+            self.db.execute(
+                "INSERT INTO review_events VALUES(?,?,?,?,?,?,?)",
+                (
+                    str(event.id),
+                    self.user_id,
+                    event.word_id,
+                    event.rating,
+                    _iso(event.reviewed_at),
+                    None,
+                    payload,
+                ),
+            )
+            state = replay_word_state(event.word_id, self._events(event.word_id), state.version + 1)
+            self._save(state)
+            return state
 
     def void_event(self, event_id: UUID) -> WordState:
-        committed_state: WordState | None = None
         with self._transaction():
             row = self.db.execute(
                 "SELECT word_id,voided_at FROM review_events WHERE id=? AND user_id=?",
@@ -224,17 +222,17 @@ class SQLiteVocabularyRepository:
             if not row:
                 raise MissingError("event not found")
             word_id = row["word_id"]
-            if row["voided_at"] is None:
-                self.db.execute(
-                    "UPDATE review_events SET voided_at=? WHERE id=?",
-                    (_iso(datetime.now(UTC)), str(event_id)),
-                )
-                prior = self.state(word_id)
-                committed_state = replay_word_state(
-                    word_id, self._events(word_id), prior.version + 1
-                )
-                self._save(committed_state)
-        return committed_state if committed_state is not None else self.state(word_id)
+            if row["voided_at"] is not None:
+                return self.state(word_id)
+            self.db.execute(
+                "UPDATE review_events SET voided_at=? WHERE id=?",
+                (_iso(datetime.now(UTC)), str(event_id)),
+            )
+            state = replay_word_state(
+                word_id, self._events(word_id), self.state(word_id).version + 1
+            )
+            self._save(state)
+            return state
 
     def update_transcript(self, word_id: str, transcript: str) -> Word:
         if (
@@ -302,6 +300,6 @@ class SQLiteVocabularyRepository:
         return StudySession(
             session_id,
             meta["kind"],
-            _dt(meta["created_at"]) or datetime.min.replace(tzinfo=UTC),
+            datetime.fromisoformat(meta["created_at"]),
             words,
         )

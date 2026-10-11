@@ -5,8 +5,6 @@ from pathlib import Path
 
 from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, parse_single_range
 
-__all__ = ["FilesystemAudioStore", "parse_single_range"]
-
 
 class FilesystemAudioStore:
     def __init__(self, root: Path) -> None:

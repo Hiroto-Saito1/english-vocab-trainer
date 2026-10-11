@@ -11,11 +11,6 @@ class MigrationError(RuntimeError):
     pass
 
 
-def packaged_migrations() -> Traversable:
-    """Return migrations bundled inside the installed Python package."""
-    return importlib.resources.files("english_vocab_trainer.migrations")
-
-
 def configure_connection(connection: sqlite3.Connection) -> None:
     """Use the same safe SQLite settings for every repository and auth connection."""
     connection.execute("PRAGMA foreign_keys = ON")
@@ -50,7 +45,7 @@ def apply_migrations(
     directory: Path | Traversable | None = None,
 ) -> None:
     configure_connection(connection)
-    migration_directory = directory or packaged_migrations()
+    migration_directory = directory or importlib.resources.files("english_vocab_trainer.migrations")
     connection.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations("
         "version TEXT PRIMARY KEY, checksum TEXT NOT NULL, "

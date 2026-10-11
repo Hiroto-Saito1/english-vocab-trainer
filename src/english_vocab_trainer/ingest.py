@@ -1158,8 +1158,8 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
         print(f"audit valid: {len(valid)} records; warnings {len(warnings)}")
     elif args.command == "upload-audio":
         records = read_catalog(args.catalog)
-        validated = validate_records(records, expected_count, root=args.source)
         if args.dry_run:
+            validated = validate_records(records, expected_count, root=args.source)
             print(f"would upload {len(validated)} private R2 audio objects")
         else:
             try:
@@ -1168,7 +1168,7 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
                 raise SystemExit(str(exc)) from exc
             upload_summary = upload_audio(
                 args.source,
-                validated,
+                records,
                 client,
                 bucket,
                 force=args.force,

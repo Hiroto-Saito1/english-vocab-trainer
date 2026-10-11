@@ -134,7 +134,7 @@ async function configureAudioCache(rotate) {
   // Cache Storage is shared with the worker, so this completed rotation is the
   // privacy boundary before any preload can write a new response.  The worker
   // receives the same allow-list before playback requests can populate it.
-  await sendWorkerMessage({ type: "set-active-audio", urls, rotate: false });
+  await sendWorkerMessage({ type: "set-active-audio", urls });
 }
 
 async function preload() {

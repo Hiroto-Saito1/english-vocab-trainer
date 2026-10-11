@@ -79,37 +79,6 @@ class StudySession:
     words: tuple[Word, ...]
 
 
-def next_state(state: WordState, event: ReviewEvent) -> WordState:
-    """Apply canonical Py-FSRS 6 scheduling; only the server runs this policy."""
-    now = event.reviewed_at.astimezone(UTC)
-    state.first_seen_at = state.first_seen_at or now
-    card = Card.from_json(state.card_json) if state.card_json else Card()
-    scheduler = Scheduler(
-        desired_retention=0.90,
-        learning_steps=(LEARNING_STEP,),
-        relearning_steps=(LEARNING_STEP,),
-        maximum_interval=365,
-        # States are rebuilt for offline arrival and undo.  Random interval
-        # fuzz would make the same event history produce a different card.
-        enable_fuzzing=False,
-    )
-    rating = {
-        Rating.AGAIN: FsrsRating.Again,
-        Rating.GOOD: FsrsRating.Good,
-        Rating.EASY: FsrsRating.Easy,
-    }[event.rating]
-    card, _ = scheduler.review_card(card, rating, now)
-    if event.rating is not Rating.AGAIN:
-        state.first_known_at = state.first_known_at or now
-        state.last_known_at = now
-    state.card_json = card.to_json()
-    state.stability = card.stability or 0.0
-    state.difficulty = card.difficulty or 5.0
-    state.due_at = card.due
-    state.version += 1
-    return state
-
-
 def replay_word_state(word_id: str, events: list[ReviewEvent], revision: int = 0) -> WordState:
     """Rebuild state from genesis. Ordering is stable even for offline arrivals."""
     active = sorted(
@@ -125,8 +94,31 @@ def replay_word_state(word_id: str, events: list[ReviewEvent], revision: int = 0
         version=revision,
         card_json=Card(card_id=seed).to_json(),
     )
+    scheduler = Scheduler(
+        desired_retention=0.90,
+        learning_steps=(LEARNING_STEP,),
+        relearning_steps=(LEARNING_STEP,),
+        maximum_interval=365,
+        # States are rebuilt for offline arrival and undo.  Random interval
+        # fuzz would make the same event history produce a different card.
+        enable_fuzzing=False,
+    )
     for event in active:
-        prior_revision = state.version
-        state = next_state(state, event)
-        state.version = prior_revision  # replay must not decrease the persistent CAS revision
+        now = event.reviewed_at.astimezone(UTC)
+        state.first_seen_at = state.first_seen_at or now
+        assert state.card_json is not None
+        card = Card.from_json(state.card_json)
+        rating = {
+            Rating.AGAIN: FsrsRating.Again,
+            Rating.GOOD: FsrsRating.Good,
+            Rating.EASY: FsrsRating.Easy,
+        }[event.rating]
+        card, _ = scheduler.review_card(card, rating, now)
+        if event.rating is not Rating.AGAIN:
+            state.first_known_at = state.first_known_at or now
+            state.last_known_at = now
+        state.card_json = card.to_json()
+        state.stability = card.stability or 0.0
+        state.difficulty = card.difficulty or 5.0
+        state.due_at = card.due
     return state

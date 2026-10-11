@@ -14,15 +14,13 @@ const isShell = (request) => {
   return parsed.origin === self.location.origin && request.method === "GET" && (parsed.pathname === "/" || parsed.pathname.startsWith("/static/"));
 };
 
-async function rotateAudioCache(urls, rotate) {
+async function updateActiveAudio(urls) {
   const cache = await caches.open(AUDIO);
   const expected = new Set(urls.map((url) => new URL(url, self.location.origin).href));
-  if (rotate) await caches.delete(AUDIO);
-  const current = rotate ? await caches.open(AUDIO) : cache;
   await Promise.all(
-    (await current.keys())
+    (await cache.keys())
       .filter((request) => !expected.has(request.url))
-      .map((request) => current.delete(request)),
+      .map((request) => cache.delete(request)),
   );
   activeAudioUrls = expected;
 }
@@ -115,7 +113,7 @@ self.addEventListener("message", (event) => {
   const data = event.data || {};
   const reply = (payload) => event.ports[0] && event.ports[0].postMessage(payload);
   if (data.type === "set-active-audio") {
-    event.waitUntil(rotateAudioCache(data.urls || [], Boolean(data.rotate)).then(() => reply({ ok: true })).catch(() => reply({ ok: false })));
+    event.waitUntil(updateActiveAudio(data.urls || []).then(() => reply({ ok: true })).catch(() => reply({ ok: false })));
   }
   if (data.type === "clear-private-caches") {
     event.waitUntil(clearPrivateCaches().then(() => reply({ ok: true })).catch(() => reply({ ok: false })));

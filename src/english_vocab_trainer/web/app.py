@@ -167,7 +167,7 @@ def _audio_metadata(store: AudioStore, key: str) -> AudioMetadata:
         return store.head(key)
     except FileNotFoundError as exc:
         raise HTTPException(404, "audio not found") from exc
-    except (AudioStorageError, ConfigurationError) as exc:
+    except AudioStorageError as exc:
         raise HTTPException(502, "audio storage is unavailable") from exc
 
 
@@ -332,7 +332,7 @@ def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repos
                     id=event.id, word_id=event.word_id, status="conflict", detail=str(exc)
                 )
             )
-        except (MissingError, KeyError) as exc:
+        except MissingError as exc:
             results.append(
                 EventResultOut(
                     id=event.id, word_id=event.word_id, status="missing", detail=str(exc)
@@ -399,7 +399,7 @@ def audio(
             status_code=416,
             headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
         )
-    except (AudioStorageError, ConfigurationError) as exc:
+    except AudioStorageError as exc:
         raise HTTPException(502, "audio storage is unavailable") from exc
     return build_audio_response(result, if_none_match)
 
@@ -459,7 +459,7 @@ def transcript(
 ) -> WordOut:
     try:
         return word_out(repository.update_transcript(word_id, body.transcript))
-    except (MissingError, KeyError) as exc:
+    except MissingError as exc:
         raise HTTPException(404, "word not found") from exc
 
 

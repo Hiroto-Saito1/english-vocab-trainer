@@ -2,8 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore, parse_single_range
+from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.ingest import parse_audio_path
+from english_vocab_trainer.ports.audio import parse_single_range
 
 
 def test_range_parser() -> None:

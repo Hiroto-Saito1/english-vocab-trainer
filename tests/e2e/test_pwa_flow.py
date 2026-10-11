@@ -136,6 +136,15 @@ def wait_for_rows(database: Path, count: int) -> list[sqlite3.Row]:
     raise AssertionError(f"expected {count} review events, got {event_rows(database)}")
 
 
+def wait_for_voided_event(database: Path, index: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if event_rows(database)[index]["voided_at"] is not None:
+            return
+        time.sleep(0.03)
+    assert event_rows(database)[index]["voided_at"] is not None
+
+
 def wait_for_audio_cache(page: Page) -> list[str]:
     worker_ready = page.evaluate(
         """async () => Promise.race([
@@ -288,37 +297,6 @@ def install_audio_presentation_spy(page: Page) -> None:
     )
 
 
-def store_legacy_undo_metadata(page: Page) -> None:
-    updated = page.evaluate(
-        """async () => Promise.race([((async () => {
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction("state", "readwrite");
-            const store = tx.objectStore("state"), request = store.get("active-session");
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => {
-              const saved = request.result;
-              if (!saved?.value?.event) return reject(new Error("missing saved event"));
-              saved.value.undoDeadline = 1;
-              store.put(saved);
-            };
-            tx.oncomplete = () => resolve(true);
-            tx.onerror = () => reject(tx.error);
-            tx.onabort = () => reject(tx.error);
-          });
-          db.close();
-          return true;
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("legacy state update timed out")), 10_000
-        ))])"""
-    )
-    assert updated is True
-
-
 @pytest.mark.e2e
 def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[str, Path]) -> None:
     base_url, database = pwa_server
@@ -337,9 +315,6 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#transcript")).to_contain_text("English definition")
     expect(page.locator("#undo")).to_be_enabled()
     assert wait_for_rows(database, 1)[0]["rating"] == "again"
-    # A persisted deadline from the previous implementation is intentionally
-    # ignored: the latest saved event stays undoable after reload.
-    store_legacy_undo_metadata(page)
     page.reload()
     expect(page.locator("#term")).to_be_visible()
     expect(page.locator("#undo")).to_be_enabled()
@@ -349,10 +324,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     expect(page.locator("#progress")).to_have_text("2 of 3")
     expect(page.locator("#undo")).to_be_enabled()
     page.get_by_role("button", name="Undo").click()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and event_rows(database)[0]["voided_at"] is None:
-        time.sleep(0.03)
-    assert event_rows(database)[0]["voided_at"] is not None
+    wait_for_voided_event(database, 0)
     expect(page.locator("#progress")).to_have_text("1 of 3")
     expect(page.locator("#undo")).to_be_disabled()
     assert page.evaluate("window.__pwa.getState().learningQueue") == []
@@ -365,10 +337,7 @@ def test_mobile_pwa_known_unknown_reload_and_undo(page: Page, pwa_server: tuple[
     page.get_by_role("button", name="Unknown", exact=True).click()
     assert len(wait_for_rows(database, 3)) == 3
     page.get_by_role("button", name="Undo").click()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and event_rows(database)[2]["voided_at"] is None:
-        time.sleep(0.03)
-    assert event_rows(database)[2]["voided_at"] is not None
+    wait_for_voided_event(database, 2)
     assert event_rows(database)[1]["voided_at"] is None
     expect(page.locator("#progress")).to_have_text("2 of 3")
     expect(page.locator("#undo")).to_be_disabled()
@@ -400,10 +369,7 @@ def test_final_known_undo_restores_the_final_card(page: Page, pwa_server: tuple[
     expect(page.locator("#undo")).to_be_enabled()
 
     page.get_by_role("button", name="Undo", exact=True).click()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and event_rows(database)[2]["voided_at"] is None:
-        time.sleep(0.03)
-    assert event_rows(database)[2]["voided_at"] is not None
+    wait_for_voided_event(database, 2)
     expect(page.locator("#card")).to_have_text("Listen, then choose.")
     expect(page.locator("#progress")).to_have_text("3 of 3")
     expect(page.locator("#undo")).to_be_disabled()
