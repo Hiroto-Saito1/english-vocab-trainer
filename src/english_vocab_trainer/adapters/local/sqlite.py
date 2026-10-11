@@ -274,12 +274,12 @@ class SQLiteVocabularyRepository:
         return self.get_daily_target()
 
     def create_session(
-        self, session_id: str, kind: str, words: list[str], created_at: datetime
+        self, session_id: str, mode: str, words: list[str], created_at: datetime
     ) -> StudySession:
         with self._transaction():
             self.db.execute(
                 "INSERT INTO study_sessions VALUES(?,?,?,?)",
-                (session_id, self.user_id, kind, _iso(created_at)),
+                (session_id, self.user_id, mode, _iso(created_at)),
             )
             self.db.executemany(
                 "INSERT INTO session_items VALUES(?,?,?)",

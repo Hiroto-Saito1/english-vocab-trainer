@@ -59,25 +59,18 @@ def get_container(request: Request) -> AppContainer:
     return cast(AppContainer, request.app.state.container)
 
 
-def repository_for_user(request: Request, user_id: str) -> Iterator[VocabularyRepository]:
-    try:
-        repository = get_container(request).repositories.for_user(user_id)
-    except ConfigurationError as exc:
-        raise HTTPException(503, "repository is unavailable") from exc
-    try:
-        yield repository
-    finally:
-        repository.close()
-
-
 def repository(
     request: Request, user_id: Annotated[str, Depends(identity)]
 ) -> Iterator[VocabularyRepository]:
-    yield from repository_for_user(request, user_id)
+    try:
+        user_repository = get_container(request).repositories.for_user(user_id)
+    except ConfigurationError as exc:
+        raise HTTPException(503, "repository is unavailable") from exc
+    try:
+        yield user_repository
+    finally:
+        user_repository.close()
 
 
 def audio_store(request: Request) -> AudioStore:
-    try:
-        return get_container(request).audio
-    except ConfigurationError as exc:
-        raise HTTPException(503, "audio store is unavailable") from exc
+    return get_container(request).audio

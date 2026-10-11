@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from random import Random
+from typing import Literal
 from uuid import UUID
 
 from english_vocab_trainer.domain.models import (
@@ -86,8 +87,7 @@ def create_study_session(
 class ReviewResult:
     rating: Rating
     state: WordState
-    created: bool
-    voided: bool = False
+    status: Literal["applied", "idempotent", "voided"]
 
 
 def submit_review(
@@ -111,8 +111,7 @@ def submit_review(
         return ReviewResult(
             rating=existing.rating,
             state=repo.state(word_id),
-            created=False,
-            voided=existing.voided_at is not None,
+            status="voided" if existing.voided_at is not None else "idempotent",
         )
     rating = rating_for_action(action, repo.has_active_review(word_id))
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
@@ -122,7 +121,7 @@ def submit_review(
             return ReviewResult(
                 rating=rating,
                 state=state,
-                created=True,
+                status="applied",
             )
         except ConcurrentUpdateError:
             continue

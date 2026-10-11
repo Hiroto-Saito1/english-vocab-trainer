@@ -163,4 +163,4 @@ def test_submit_review_retries_once_after_a_cas_conflict() -> None:
         ReviewAction.KNOWN,
         now,
     )
-    assert result.created and repository.attempts == 2 and result.state.version == 1
+    assert result.status == "applied" and repository.attempts == 2 and result.state.version == 1

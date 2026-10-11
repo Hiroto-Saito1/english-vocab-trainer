@@ -190,13 +190,6 @@ def r2_audio_key(checksum_value: str) -> str:
     return f"audio/{checksum_value}.mp3"
 
 
-def profile_for(name: str) -> CatalogProfile:
-    try:
-        return PROFILES[name]
-    except KeyError as exc:
-        raise ValueError("profile must be mvp or full") from exc
-
-
 def _source_candidates(root: Path, source: str) -> list[AudioCandidate]:
     candidates: list[AudioCandidate] = []
     source_root = root / source
@@ -801,14 +794,14 @@ def _validate_record(
         validate_transcript(record.transcript)
 
 
-def _validate_catalog_records(
+def validate_records(
     records: Iterable[CatalogRecord],
     expected_count: int = 20,
     *,
     root: Path | None = None,
     require_transcript: bool = True,
 ) -> list[CatalogRecord]:
-    """Internal structural validator; root=None is only for catalog construction/tests."""
+    """Validate catalog structure and, when root is provided, its local source files."""
     result = list(records)
     if len(result) != expected_count:
         raise ValueError(f"expected {expected_count} records, found {len(result)}")
@@ -821,19 +814,6 @@ def _validate_catalog_records(
     for record in result:
         _validate_record(record, root, require_transcript=require_transcript)
     return result
-
-
-def validate_records(
-    records: Iterable[CatalogRecord],
-    expected_count: int = 20,
-    *,
-    root: Path,
-    require_transcript: bool = True,
-) -> list[CatalogRecord]:
-    """Validate a publishable catalog against its approved, immutable local source files."""
-    return _validate_catalog_records(
-        records, expected_count, root=root, require_transcript=require_transcript
-    )
 
 
 def scan_catalog(
@@ -875,17 +855,13 @@ def scan_catalog(
             "en",
         )
 
-        if force:
+        if force or not resume:
             write_catalog(catalog, records)
             write_manifest(catalog, manifest)
-            _unlink_durable(journal_path(catalog))
-            _unlink_durable(error_journal_path(catalog))
-            _unlink_durable(error_report_path(catalog))
-            return records, manifest
-
-        if not resume:
-            write_catalog(catalog, records)
-            write_manifest(catalog, manifest)
+            if force:
+                _unlink_durable(journal_path(catalog))
+                _unlink_durable(error_journal_path(catalog))
+                _unlink_durable(error_report_path(catalog))
             return records, manifest
 
         updates: dict[str, CatalogRecord] = {}
@@ -1110,7 +1086,7 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    profile = profile_for(args.profile)
+    profile = PROFILES[args.profile]
     expected_count = profile.expected_count(args.limit_per_source)
     if args.max_records is not None and args.max_records < 1:
         raise SystemExit("--max-records must be positive")

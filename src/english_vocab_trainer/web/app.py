@@ -155,7 +155,7 @@ def word_out(word: Word) -> WordOut:
 def session_out(session: StudySession) -> SessionOut:
     return SessionOut(
         id=session.id,
-        mode=session.kind,
+        mode=session.mode,
         created_at=session.created_at,
         items=[word_out(word) for word in session.words],
         learning_step_seconds=int(LEARNING_STEP.total_seconds()),
@@ -315,14 +315,11 @@ def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repos
             result = submit_review(
                 repository, event.id, event.word_id, event.action, event.reviewed_at
             )
-            status: Literal["applied", "idempotent", "voided"] = (
-                "voided" if result.voided else "applied" if result.created else "idempotent"
-            )
             results.append(
                 EventResultOut(
                     id=event.id,
                     word_id=event.word_id,
-                    status=status,
+                    status=result.status,
                     rating=result.rating,
                     due_at=result.state.due_at,
                     version=result.state.version,
@@ -346,9 +343,6 @@ def review_batch(events: list[EventIn], _: Identity, __: Csrf, repository: Repos
 
 @router.post("/api/v1/review-events/{event_id}/void", response_model=VoidOut)
 def void_event(event_id: UUID, _: Identity, __: Csrf, repository: Repository) -> VoidOut:
-    event = repository.get_event(event_id)
-    if event is None:
-        raise HTTPException(404, "event not found")
     try:
         state = repository.void_event(event_id)
     except MissingError as exc:
@@ -358,7 +352,7 @@ def void_event(event_id: UUID, _: Identity, __: Csrf, repository: Repository) ->
     return VoidOut(
         id=event_id,
         status="voided",
-        word_id=event.word_id,
+        word_id=state.word_id,
         due_at=state.due_at,
         version=state.version,
     )
@@ -407,7 +401,7 @@ def audio(
         )
     except (AudioStorageError, ConfigurationError) as exc:
         raise HTTPException(502, "audio storage is unavailable") from exc
-    return build_audio_response(result, False, if_none_match)
+    return build_audio_response(result, if_none_match)
 
 
 @router.head("/api/v1/audio/{word_id}")

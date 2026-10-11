@@ -9,7 +9,7 @@ def if_none_match_matches(etag: str, if_none_match: str | None) -> bool:
     return canonical in candidates or f"W/{canonical}" in candidates
 
 
-def build_audio_response(result: AudioResult, head: bool, if_none_match: str | None) -> Response:
+def build_audio_response(result: AudioResult, if_none_match: str | None) -> Response:
     etag = f'"{result.etag}"'
     headers = {
         "Accept-Ranges": "bytes",
@@ -22,7 +22,7 @@ def build_audio_response(result: AudioResult, head: bool, if_none_match: str | N
     if result.partial:
         headers["Content-Range"] = f"bytes {result.start}-{result.end}/{result.size}"
     return Response(
-        content=b"" if head else result.body,
+        content=result.body,
         status_code=206 if result.partial else 200,
         headers=headers,
     )
@@ -36,6 +36,5 @@ def build_audio_head_response(
     start, end = selected if selected is not None else (0, metadata.size - 1)
     return build_audio_response(
         AudioResult(b"", metadata.size, metadata.etag, start, end, selected is not None),
-        True,
         if_none_match,
     )

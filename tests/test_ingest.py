@@ -15,6 +15,7 @@ import pytest
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.ingest import (
     FULL_PROFILE,
+    MVP_PROFILE,
     AudioCandidate,
     CatalogRecord,
     MlxWhisperTranscriber,
@@ -22,7 +23,6 @@ from english_vocab_trainer.ingest import (
     _failure_reason,
     _merge_journal,
     _read_current_error_report,
-    _validate_catalog_records,
     audit_catalog,
     audit_records,
     catalog_lock,
@@ -32,7 +32,6 @@ from english_vocab_trainer.ingest import (
     main,
     manifest_path,
     parse_audio_path,
-    profile_for,
     publish_records,
     r2_audio_key,
     read_catalog,
@@ -119,7 +118,7 @@ def test_selection_is_lowest_deterministic_and_approved_only(tmp_path: Path) -> 
     with pytest.raises(ValueError):
         select_audio(tmp_path, 0)
     with pytest.raises(ValueError):
-        profile_for("mvp").expected_count(0)
+        MVP_PROFILE.expected_count(0)
     invalid = tmp_path / "outside" / "9" / "STAGE 01\u30000001 invalid.mp3"
     invalid.parent.mkdir(parents=True)
     invalid.touch()
@@ -138,17 +137,17 @@ def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> Non
     assert read_catalog(catalog) == [record]
     assert read_catalog(tmp_path / "absent.jsonl") == []
 
-    assert _validate_catalog_records(_records(4), expected_count=4)
+    assert validate_records(_records(4), expected_count=4)
     with pytest.raises(ValueError, match="missing transcript"):
-        _validate_catalog_records([replace(record, transcript=None)], 1)
+        validate_records([replace(record, transcript=None)], 1)
     with pytest.raises(ValueError, match="English only"):
         validate_transcript("これは English definition example")
     with pytest.raises(ValueError, match="too short"):
         validate_transcript("too short")
     with pytest.raises(ValueError, match="expected"):
-        _validate_catalog_records([], expected_count=1)
+        validate_records([], expected_count=1)
     with pytest.raises(ValueError, match="duplicate"):
-        _validate_catalog_records([record, record], expected_count=2)
+        validate_records([record, record], expected_count=2)
     for non_latin in (
         "A clear definition пример sentence.",
         "A clear definition 한국어 sentence.",
@@ -255,7 +254,7 @@ def test_catalog_integrity_rejects_tampering_and_canonical_key() -> None:
         replace(record, term="wrong"),
     ):
         with pytest.raises(ValueError):
-            _validate_catalog_records([altered], expected_count=1)
+            validate_records([altered], expected_count=1)
 
 
 class _UploadClient:
@@ -762,10 +761,10 @@ def test_audit_catalog_blocks_source_inventory_drift(tmp_path: Path) -> None:
             for record in records
         ],
     )
-    assert audit_catalog(tmp_path, catalog, profile=profile_for("mvp"), limit_per_source=2)[0]
+    assert audit_catalog(tmp_path, catalog, profile=MVP_PROFILE, limit_per_source=2)[0]
     (tmp_path / records[0].audio_key).write_bytes(b"mutated")
     with pytest.raises(ValueError, match="inventory"):
-        audit_catalog(tmp_path, catalog, profile=profile_for("mvp"), limit_per_source=2)
+        audit_catalog(tmp_path, catalog, profile=MVP_PROFILE, limit_per_source=2)
 
 
 def test_scan_rejects_source_change_while_a_matching_journal_is_pending(tmp_path: Path) -> None:
@@ -809,8 +808,6 @@ def test_cli_status_accepts_untranscribed_profile_inventory(
 
 
 def test_profile_manifest_and_error_report_reject_malformed_state(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="mvp or full"):
-        profile_for("other")
     with pytest.raises(ValueError, match="approved source is missing"):
         select_audio(tmp_path)
     catalog = tmp_path / ".private" / "catalog.jsonl"

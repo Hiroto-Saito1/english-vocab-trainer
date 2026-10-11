@@ -74,7 +74,7 @@ class ReviewEvent:
 @dataclass(frozen=True, slots=True)
 class StudySession:
     id: str
-    kind: str
+    mode: str
     created_at: datetime
     words: tuple[Word, ...]
 

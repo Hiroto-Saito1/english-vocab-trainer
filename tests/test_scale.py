@@ -29,5 +29,5 @@ def test_two_thousand_word_session_progress_and_review_smoke(tmp_path: Path) -> 
     finally:
         repository.close()
     assert len(session.words) == 100 and len({word.id for word in session.words}) == 100
-    assert review.created and progress == {"total": 2_000, "due": 0, "reviewed": 1}
+    assert review.status == "applied" and progress == {"total": 2_000, "due": 0, "reviewed": 1}
     assert monotonic() - started < 8

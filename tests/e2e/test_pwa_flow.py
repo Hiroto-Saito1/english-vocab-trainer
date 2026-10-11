@@ -231,6 +231,36 @@ def put_outbox_events(page: Page, events: list[dict[str, str]]) -> None:
     assert stored is True
 
 
+def private_storage_state(page: Page) -> tuple[list[str], list[list[object]]]:
+    return cast(
+        tuple[list[str], list[list[object]]],
+        page.evaluate(
+            """async () => Promise.race([((async () => {
+              const privateKeys = (await caches.keys()).filter((key) =>
+                key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
+              );
+              const db = await new Promise((resolve, reject) => {
+                const request = indexedDB.open("english-vocab-trainer", 1);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+              });
+              try {
+                const values = await Promise.all(["events", "state"].map((name) =>
+                  new Promise((resolve, reject) => {
+                    const request = db.transaction(name).objectStore(name).getAll();
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                  })
+                ));
+                return [privateKeys, values];
+              } finally { db.close(); }
+            })()), new Promise((_, reject) => setTimeout(
+              () => reject(new Error("private storage verification timed out")), 10_000
+            ))])"""
+        ),
+    )
+
+
 def install_audio_presentation_spy(page: Page) -> None:
     page.evaluate(
         """() => {
@@ -836,29 +866,7 @@ def test_offline_audio_outbox_rotation_and_private_reset(
           )),
         ])"""
     )
-    private_keys, db_state = page.evaluate(
-        """async () => Promise.race([((async () => {
-          const privateKeys = (await caches.keys()).filter((key) =>
-            key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
-          );
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          const values = await Promise.all(["events", "state"].map((name) =>
-            new Promise((resolve, reject) => {
-              const request = db.transaction(name).objectStore(name).getAll();
-              request.onsuccess = () => resolve(request.result);
-              request.onerror = () => reject(request.error);
-            })
-          ));
-          db.close();
-          return [privateKeys, values];
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("private reset verification timed out")), 10_000
-        ))])"""
-    )
+    private_keys, db_state = private_storage_state(page)
     assert private_keys == []
     assert db_state == [[], []]
     expect(page.locator("#undo")).to_be_visible()
@@ -971,28 +979,14 @@ def test_mobile_production_login_csrf_and_logout_privacy_boundary(
     cookie_names = [cookie["name"] for cookie in page.context.cookies()]
     assert "vocab-session" not in cookie_names and "vocab-csrf" not in cookie_names
 
-    private_keys, db_values, api_status = page.evaluate(
-        """async () => Promise.race([((async () => {
-          const privateKeys = (await caches.keys()).filter((key) =>
-            key === "pwa-private-audio-v3" || key.startsWith("pwa-user-")
-          );
-          const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 1);
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          const values = await Promise.all(["events", "state"].map((name) =>
-            new Promise((resolve, reject) => {
-              const request = db.transaction(name).objectStore(name).getAll();
-              request.onsuccess = () => resolve(request.result);
-              request.onerror = () => reject(request.error);
-            })
-          ));
-          db.close();
-          return [privateKeys, values, (await fetch("/api/v1/progress")).status];
-        })()), new Promise((_, reject) => setTimeout(
-          () => reject(new Error("production logout verification timed out")), 10_000
-        ))])"""
+    private_keys, db_values = private_storage_state(page)
+    api_status = page.evaluate(
+        """async () => Promise.race([
+          fetch("/api/v1/progress").then((response) => response.status),
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error("production logout verification timed out")), 10_000
+          )),
+        ])"""
     )
     assert private_keys == []
     assert db_values == [[], []]
