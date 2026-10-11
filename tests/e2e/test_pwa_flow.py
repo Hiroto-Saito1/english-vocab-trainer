@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from json import dumps
 from pathlib import Path
 from typing import cast
@@ -12,6 +13,7 @@ from typing import cast
 import pytest
 import uvicorn
 from argon2 import PasswordHasher
+from fastapi import FastAPI
 from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
@@ -21,6 +23,28 @@ from english_vocab_trainer.domain.models import Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import AppContainer
+
+
+@contextmanager
+def _serve(app: FastAPI) -> Iterator[str]:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        if not thread.is_alive():
+            raise RuntimeError("uvicorn stopped before startup completed")
+        if time.monotonic() > deadline:
+            raise RuntimeError("uvicorn did not start")
+        time.sleep(0.02)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
 
 
 @pytest.fixture
@@ -46,31 +70,9 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
             )
     finally:
         repository.close()
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(
-        uvicorn.Config(
-            create_app(
-                AppContainer(provider, FilesystemAudioStore(audio_root), "test", "local-user")
-            ),
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-        )
-    )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline:
-            raise RuntimeError("uvicorn did not start")
-        time.sleep(0.02)
-    try:
-        yield f"http://127.0.0.1:{port}", database
-    finally:
-        server.should_exit = True
-        thread.join(timeout=10)
+    app = create_app(AppContainer(provider, FilesystemAudioStore(audio_root), "test", "local-user"))
+    with _serve(app) as base_url:
+        yield base_url, database
 
 
 @pytest.fixture
@@ -102,31 +104,11 @@ def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         SQLiteLoginAttemptLimiter(database),
         secure_cookies=False,
     )
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(
-        uvicorn.Config(
-            create_app(
-                AppContainer(provider, FilesystemAudioStore(audio_root), "production", auth=auth)
-            ),
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-        )
+    app = create_app(
+        AppContainer(provider, FilesystemAudioStore(audio_root), "production", auth=auth)
     )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline:
-            raise RuntimeError("uvicorn did not start")
-        time.sleep(0.02)
-    try:
-        yield f"http://127.0.0.1:{port}", database
-    finally:
-        server.should_exit = True
-        thread.join(timeout=10)
+    with _serve(app) as base_url:
+        yield base_url, database
 
 
 def event_rows(database: Path) -> list[sqlite3.Row]:
@@ -465,6 +447,47 @@ def test_undo_persists_after_clock_jump_without_replaying_audio(
 
 
 @pytest.mark.e2e
+def test_boot_migrates_legacy_undo_cursor_state(page: Page, pwa_server: tuple[str, Path]) -> None:
+    base_url, _ = pwa_server
+    page.goto(base_url)
+    page.get_by_role("button", name="Unknown", exact=True).click()
+    expect(page.locator("#term")).to_be_visible()
+    page.evaluate(
+        """async () => {
+          const state = window.__pwa.getState();
+          delete state.event.previousCurrent;
+          state.event.wasLearning = false;
+          state.undoDeadline = Date.now() + 30_000;
+          state.revealedLearningWordId = null;
+          const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open("english-vocab-trainer", 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("state", "readwrite");
+            tx.objectStore("state").put({key: "active-session", value: state});
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+          });
+          db.close();
+        }"""
+    )
+
+    page.reload()
+    expect(page.locator("#term")).to_be_visible()
+    migrated = page.evaluate("window.__pwa.getState()")
+    assert migrated["event"]["previousCurrent"] == 0
+    assert "wasLearning" not in migrated["event"]
+    assert "revealedLearningWordId" not in migrated
+    assert "undoDeadline" not in migrated
+    page.get_by_role("button", name="Undo", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Listen, then choose.")
+    restored = page.evaluate("window.__pwa.getState()")
+    assert restored["current"] == 0 and restored["event"] is None
+
+
+@pytest.mark.e2e
 def test_mobile_pwa_empty_daily_session_says_all_caught_up(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
@@ -523,7 +546,7 @@ def test_unknown_learning_replays_after_injected_ten_minute_clock(
     expect(page.locator("#undo")).to_be_enabled()
     retry = page.evaluate("window.__pwa.getState().learningQueue[0]")
     resumed = page.evaluate("window.__pwa.getState()")
-    assert resumed["revealedLearningWordId"], resumed
+    assert resumed["event"]["word_id"] == retry["word"]["id"], resumed
     assert resumed["phase"] == "revealed", resumed
     expect(page.locator("#continue")).to_be_visible()
     page.get_by_role("button", name="Continue", exact=True).click()

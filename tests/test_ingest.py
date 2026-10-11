@@ -41,7 +41,6 @@ from english_vocab_trainer.ingest import (
     scan_catalog,
     select_audio,
     transcribe_catalog,
-    transcribe_records,
     upload_audio,
     validate_records,
     validate_term,
@@ -60,6 +59,19 @@ def _audio(root: Path, source: str, level: str, name: str, content: bytes) -> Pa
 
 def _term(index: int) -> str:
     return f"term {chr(ord('a') + index)}"
+
+
+def _approved_source_tree(root: Path, count: int = 1, *, label: str = "") -> None:
+    for source_index, source in enumerate(("上級SVL", "超上級SVL")):
+        for index in range(count):
+            term = f"{label} {_term(index + source_index * 10)}".strip()
+            _audio(
+                root,
+                source,
+                "2",
+                f"STAGE 01\u3000{index:04d} {term}.mp3",
+                f"{source}-{index}".encode(),
+            )
 
 
 def _records(count: int = 20) -> list[CatalogRecord]:
@@ -124,18 +136,6 @@ def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> Non
     assert read_catalog(catalog) == [record]
     assert read_catalog(tmp_path / "absent.jsonl") == []
 
-    class FakeTranscriber:
-        calls = 0
-
-        def transcribe(self, _: Path) -> str:
-            self.calls += 1
-            return "A useful English definition with a short example."
-
-    fake = FakeTranscriber()
-    completed = transcribe_records(tmp_path, [record], fake)
-    assert completed[0].transcript == record.transcript and fake.calls == 0
-    forced = transcribe_records(tmp_path, [record], fake, force=True)
-    assert forced[0].transcript is not None and fake.calls == 1
     assert _validate_catalog_records(_records(4), expected_count=4)
     with pytest.raises(ValueError, match="missing transcript"):
         _validate_catalog_records([replace(record, transcript=None)], 1)
@@ -388,15 +388,7 @@ def test_cli_upload_dry_run_needs_no_client_and_normal_upload_resumes(
 def test_cli_scan_and_validate_private_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        for index in range(10):
-            _audio(
-                tmp_path,
-                source,
-                "2",
-                f"STAGE 01\u3000{index:04d} {_term(index)}.mp3",
-                f"{source}-{index}".encode(),
-            )
+    _approved_source_tree(tmp_path, 10)
     catalog = tmp_path / ".private" / "catalog.jsonl"
     monkeypatch.setattr(
         sys, "argv", ["vocab-ingest", "scan", "--source", str(tmp_path), "--catalog", str(catalog)]
@@ -419,8 +411,7 @@ def test_cli_scan_and_validate_private_catalog(
 def test_cli_scan_dry_run_does_not_write_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        _audio(tmp_path, source, "2", "STAGE 01\u30000001 sample term.mp3", source.encode())
+    _approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     monkeypatch.setattr(
         sys,
@@ -527,15 +518,7 @@ def test_transcribe_checkpoints_and_resumes_after_failure(tmp_path: Path) -> Non
 def test_full_profile_requires_exact_inventory_and_reuses_only_checksum_transcripts(
     tmp_path: Path,
 ) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        for index in range(2):
-            _audio(
-                tmp_path,
-                source,
-                "2",
-                f"STAGE 01\u3000{index:04d} full term {_term(index)}.mp3",
-                f"{source}-{index}".encode(),
-            )
+    _approved_source_tree(tmp_path, 2, label="full term")
     with pytest.raises(ValueError, match="exactly 1000"):
         select_audio(tmp_path, profile=FULL_PROFILE)
 
@@ -552,8 +535,7 @@ def test_full_profile_requires_exact_inventory_and_reuses_only_checksum_transcri
 
 
 def test_scan_preserves_existing_state_only_with_resume_or_force(tmp_path: Path) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        _audio(tmp_path, source, "2", "STAGE 01　0001 sample term.mp3", source.encode())
+    _approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     records, _ = scan_catalog(tmp_path, catalog, limit_per_source=1)
     write_catalog(
@@ -573,8 +555,7 @@ def test_scan_preserves_existing_state_only_with_resume_or_force(tmp_path: Path)
 
 
 def test_scan_force_discards_mismatched_pending_journal(tmp_path: Path) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        _audio(tmp_path, source, "2", "STAGE 01　0001 sample term.mp3", source.encode())
+    _approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     records, _ = scan_catalog(tmp_path, catalog, limit_per_source=1)
 
@@ -591,8 +572,7 @@ def test_scan_force_discards_mismatched_pending_journal(tmp_path: Path) -> None:
 
 
 def test_scan_reconciles_or_force_clears_current_error_state(tmp_path: Path) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        _audio(tmp_path, source, "2", "STAGE 01　0001 sample term.mp3", source.encode())
+    _approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     records, _ = scan_catalog(tmp_path, catalog, limit_per_source=1)
 
@@ -770,16 +750,7 @@ def test_audit_writes_machine_readable_private_warnings(tmp_path: Path) -> None:
 
 
 def test_audit_catalog_blocks_source_inventory_drift(tmp_path: Path) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        for index in range(2):
-            term_index = index + (0 if source == "上級SVL" else 10)
-            _audio(
-                tmp_path,
-                source,
-                "2",
-                f"STAGE 01\u3000{index:04d} audit {_term(term_index)}.mp3",
-                f"{source}-{index}".encode(),
-            )
+    _approved_source_tree(tmp_path, 2, label="audit")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     records, _ = scan_catalog(tmp_path, catalog, limit_per_source=2)
     write_catalog(
@@ -796,16 +767,7 @@ def test_audit_catalog_blocks_source_inventory_drift(tmp_path: Path) -> None:
 
 
 def test_scan_rejects_source_change_while_a_matching_journal_is_pending(tmp_path: Path) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        for index in range(2):
-            term_index = index + (10 if source == "超上級SVL" else 0)
-            _audio(
-                tmp_path,
-                source,
-                "2",
-                f"STAGE 01\u3000{index:04d} journal {_term(term_index)}.mp3",
-                f"{source}-{index}".encode(),
-            )
+    _approved_source_tree(tmp_path, 2, label="journal")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     scan_catalog(tmp_path, catalog, limit_per_source=2)
 
@@ -823,16 +785,7 @@ def test_scan_rejects_source_change_while_a_matching_journal_is_pending(tmp_path
 def test_cli_status_accepts_untranscribed_profile_inventory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for source in ("上級SVL", "超上級SVL"):
-        for index in range(2):
-            term_index = index + (10 if source == "超上級SVL" else 0)
-            _audio(
-                tmp_path,
-                source,
-                "2",
-                f"STAGE 01\u3000{index:04d} status {_term(term_index)}.mp3",
-                f"{source}-{index}".encode(),
-            )
+    _approved_source_tree(tmp_path, 2, label="status")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     scan_catalog(tmp_path, catalog, limit_per_source=2)
     monkeypatch.setattr(

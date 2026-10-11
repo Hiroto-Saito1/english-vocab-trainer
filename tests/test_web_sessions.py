@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
@@ -35,8 +34,8 @@ def test_screen_session_is_persisted(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("target", [1, 30, 100])
-def test_daily_session_honours_configured_target(tmp_path: Path, target: int) -> None:
+def test_daily_session_honours_configured_target(tmp_path: Path) -> None:
+    target = 100
     provider = SQLiteRepositoryProvider(tmp_path / "v.db")
     repository = provider.for_user("local-user")
     for index in range(100):

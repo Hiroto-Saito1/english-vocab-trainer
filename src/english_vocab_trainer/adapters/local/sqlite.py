@@ -17,14 +17,11 @@ from english_vocab_trainer.domain.models import (
     WordState,
     replay_word_state,
 )
-
-# SQL DDL and parameterized statements are intentionally kept verbatim so that
-# the local adapter can be audited against the D1 migration.
-from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConflictError
-from english_vocab_trainer.ports.errors import MissingError as PortMissingError
-
-ConflictError = EventConflictError
-MissingError = PortMissingError
+from english_vocab_trainer.ports.errors import (
+    ConcurrentUpdateError,
+    EventConflictError,
+    MissingError,
+)
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -52,11 +49,6 @@ class SQLiteVocabularyRepository:
 
     def __exit__(self, *_: object) -> None:
         self.close()
-
-    def for_user(self, user_id: str) -> SQLiteVocabularyRepository:
-        return SQLiteVocabularyRepository(
-            Path(self.db.execute("PRAGMA database_list").fetchone()[2]), user_id
-        )
 
     def add_word(self, word: Word) -> None:
         self.db.execute(

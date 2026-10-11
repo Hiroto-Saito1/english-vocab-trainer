@@ -689,32 +689,6 @@ def catalog_lock(path: Path) -> Iterator[None]:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def transcribe_records(
-    root: Path,
-    records: Iterable[CatalogRecord],
-    transcriber: Transcriber,
-    *,
-    force: bool = False,
-) -> list[CatalogRecord]:
-    completed: list[CatalogRecord] = []
-    for record in records:
-        transcript = record.transcript
-        if force or transcript is None:
-            transcript = validate_transcript(transcriber.transcribe(root / record.audio_key))
-        completed.append(
-            CatalogRecord(
-                record.id,
-                record.audio_key,
-                record.source,
-                record.level,
-                record.term,
-                record.checksum,
-                transcript,
-            )
-        )
-    return completed
-
-
 def transcribe_catalog(
     root: Path,
     catalog: Path,
@@ -883,16 +857,13 @@ def scan_catalog(
         pending_journal = journal_path(catalog).exists()
         pending_error_journal = error_journal_path(catalog).exists()
         pending_error_report = error_report_path(catalog).exists()
-        if (
-            (
-                pending_journal
-                or pending_error_journal
-                or pending_error_report
-                or any(record.transcript is not None for record in base_records)
-            )
-            and not resume
-            and not force
-        ):
+        has_transcript_state = (
+            pending_journal
+            or pending_error_journal
+            or pending_error_report
+            or any(record.transcript is not None for record in base_records)
+        )
+        if has_transcript_state and not (resume or force):
             raise ValueError("existing transcript state requires --resume or --force")
         candidates = select_audio(root, limit_per_source, profile=profile)
         records = records_from_audio(candidates)
@@ -909,6 +880,20 @@ def scan_catalog(
             MlxWhisperTranscriber.model,
             "en",
         )
+
+        if force:
+            write_catalog(catalog, records)
+            write_manifest(catalog, manifest)
+            _unlink_durable(journal_path(catalog))
+            _unlink_durable(error_journal_path(catalog))
+            _unlink_durable(error_report_path(catalog))
+            return records, manifest
+
+        if not resume:
+            write_catalog(catalog, records)
+            write_manifest(catalog, manifest)
+            return records, manifest
+
         updates: dict[str, CatalogRecord] = {}
         unresolved: dict[str, dict[str, str]] = {}
         prior_manifest: CatalogManifest | None = None
@@ -916,44 +901,43 @@ def scan_catalog(
             prior_manifest = read_manifest(catalog)
             if prior_manifest is None:
                 raise ValueError("checkpoint state exists without a provenance manifest")
-        if pending_journal and not force:
+
+        if pending_journal:
             assert prior_manifest is not None
             updates = _journal_updates(catalog, prior_manifest.fingerprint)
             if prior_manifest.fingerprint != manifest.fingerprint:
                 raise ValueError("catalog identity does not match transcription journal")
-        if pending_error_journal and not force:
+
+        if pending_error_journal:
             assert prior_manifest is not None
             unresolved = _error_updates(catalog, prior_manifest.fingerprint)
-        elif pending_error_report and not force:
+        elif pending_error_report:
             unresolved = _read_current_error_report(catalog)
-        if resume and not force:
-            prior = {record.checksum: record for record in _merge_journal(base_records, updates)}
-            reused: list[CatalogRecord] = []
-            for record in records:
-                old = prior.get(record.checksum)
-                if old is not None and old.transcript is not None:
-                    transcript = validate_transcript(old.transcript)
-                    reused.append(replace(record, transcript=transcript))
-                else:
-                    reused.append(record)
-            records = reused
+
+        prior = {record.checksum: record for record in _merge_journal(base_records, updates)}
+        reused: list[CatalogRecord] = []
+        for record in records:
+            old = prior.get(record.checksum)
+            if old is not None and old.transcript is not None:
+                transcript = validate_transcript(old.transcript)
+                reused.append(replace(record, transcript=transcript))
+            else:
+                reused.append(record)
+        records = reused
+
         write_catalog(catalog, records)
         write_manifest(catalog, manifest)
-        if force:
+        if pending_journal:
             _unlink_durable(journal_path(catalog))
-            _unlink_durable(error_journal_path(catalog))
-            _unlink_durable(error_report_path(catalog))
-        elif pending_journal:
-            _unlink_durable(journal_path(catalog))
-        if resume and not force:
-            current_missing = {record.checksum for record in records if record.transcript is None}
-            unresolved = {
-                checksum_value: error
-                for checksum_value, error in unresolved.items()
-                if checksum_value in current_missing
-            }
-            _replace_error_journal(catalog, manifest.fingerprint, unresolved)
-            _write_current_error_report(catalog, unresolved)
+
+        current_missing = {record.checksum for record in records if record.transcript is None}
+        unresolved = {
+            checksum_value: error
+            for checksum_value, error in unresolved.items()
+            if checksum_value in current_missing
+        }
+        _replace_error_journal(catalog, manifest.fingerprint, unresolved)
+        _write_current_error_report(catalog, unresolved)
     return records, manifest
 
 
@@ -989,14 +973,13 @@ def audit_records(
     return valid, warnings
 
 
-def audit_catalog(
+def _verify_catalog_inventory(
     root: Path,
     catalog: Path,
     *,
     profile: CatalogProfile,
     limit_per_source: int,
-) -> tuple[list[CatalogRecord], list[dict[str, str]]]:
-    """Verify catalog provenance against the current immutable source inventory."""
+) -> int:
     manifest = read_manifest(catalog)
     if manifest is None:
         raise ValueError("catalog provenance manifest is missing")
@@ -1010,6 +993,20 @@ def audit_catalog(
     candidates = select_audio(root, limit_per_source, profile=profile)
     if inventory_digest(candidates) != manifest.inventory_digest:
         raise ValueError("approved source inventory does not match catalog provenance")
+    return expected
+
+
+def audit_catalog(
+    root: Path,
+    catalog: Path,
+    *,
+    profile: CatalogProfile,
+    limit_per_source: int,
+) -> tuple[list[CatalogRecord], list[dict[str, str]]]:
+    """Verify catalog provenance against the current immutable source inventory."""
+    expected = _verify_catalog_inventory(
+        root, catalog, profile=profile, limit_per_source=limit_per_source
+    )
     return audit_records(root, read_catalog(catalog), expected_count=expected)
 
 
@@ -1021,19 +1018,9 @@ def catalog_status(
     limit_per_source: int,
 ) -> tuple[int, int]:
     """Check provenance and immutable inventory before any transcript exists."""
-    manifest = read_manifest(catalog)
-    if manifest is None:
-        raise ValueError("catalog provenance manifest is missing")
-    expected = expected_count_for(profile, limit_per_source)
-    if (
-        manifest.schema_version != CATALOG_SCHEMA_VERSION
-        or manifest.profile != profile.name
-        or manifest.expected_count != expected
-    ):
-        raise ValueError("catalog profile does not match provenance manifest")
-    candidates = select_audio(root, limit_per_source, profile=profile)
-    if inventory_digest(candidates) != manifest.inventory_digest:
-        raise ValueError("approved source inventory does not match catalog provenance")
+    expected = _verify_catalog_inventory(
+        root, catalog, profile=profile, limit_per_source=limit_per_source
+    )
     records = validate_records(read_catalog(catalog), expected, root=root, require_transcript=False)
     return len(records), sum(record.transcript is not None for record in records)
 

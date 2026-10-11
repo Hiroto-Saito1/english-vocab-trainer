@@ -5,14 +5,14 @@ from uuid import uuid4
 
 import pytest
 
-from english_vocab_trainer.adapters.local.sqlite import (
-    ConflictError,
-    MissingError,
-    SQLiteVocabularyRepository,
-)
+from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.application.services import submit_review
 from english_vocab_trainer.domain.models import Rating, ReviewAction, ReviewEvent, Tier, Word
-from english_vocab_trainer.ports.errors import ConcurrentUpdateError
+from english_vocab_trainer.ports.errors import (
+    ConcurrentUpdateError,
+    EventConflictError,
+    MissingError,
+)
 
 _OPEN: list[SQLiteVocabularyRepository] = []
 
@@ -216,9 +216,9 @@ def test_uuid_idempotency_and_conflicts(tmp_path: Path) -> None:
     one = r.append_event(e, 0)
     two = r.append_event(e, 99)
     assert one.version == two.version
-    with pytest.raises(ConflictError):
+    with pytest.raises(EventConflictError):
         r.append_event(ReviewEvent(e.id, "ten", Rating.EASY, e.reviewed_at), 0)
-    with pytest.raises(ConflictError):
+    with pytest.raises(EventConflictError):
         repo(path, "bob").append_event(e, 0)
     r.close()
 

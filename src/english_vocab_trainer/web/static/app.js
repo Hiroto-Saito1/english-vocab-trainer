@@ -3,7 +3,7 @@ const STATE_KEY = "active-session";
 const AUDIO_CACHE = "pwa-private-audio-v3";
 const AUDIO_PRELOAD_CONCURRENCY = 4;
 const SYNC_BATCH_SIZE = 100;
-let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600, revealedLearningWordId: null };
+let state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
 let busy = false, syncFlight = null, learningTimer = null;
 let audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
 let audioCacheEpoch = 0, preloadFlight = null;
@@ -38,8 +38,8 @@ function nowMs() { return window.__pwaTestClock?.now?.() ?? Date.now(); }
 function nextLearning() { return state.learningQueue.filter((item) => item.due_at <= nowMs()).sort((a, b) => a.due_at - b.due_at)[0]; }
 function currentLearning() {
   if (state.current < state.cards.length) return undefined;
-  if (state.phase === "revealed" && state.revealedLearningWordId) {
-    return state.learningQueue.find((item) => item.word.id === state.revealedLearningWordId);
+  if (state.phase === "revealed" && state.event?.action === "unknown") {
+    return state.learningQueue.find((item) => item.word.id === state.event.word_id);
   }
   return nextLearning();
 }
@@ -74,11 +74,6 @@ function armLearningTimer() {
 }
 function updateUndoPresentation() { undoButton.disabled = !state.event; }
 function render() {
-  if (
-    state.current >= state.cards.length
-    && state.revealedLearningWordId
-    && state.learningQueue.some((item) => item.word.id === state.revealedLearningWordId)
-  ) state.phase = "revealed";
   const word = currentWord();
   if (word && state.phase === "waiting") state.phase = "listening";
   const revealed = state.phase === "revealed";
@@ -214,24 +209,22 @@ async function answer(action) {
   if (busy || !currentWord() || state.phase !== "listening") return;
   busy = true; setActions(true); audio.pause();
   const word = currentWord(), learning = currentLearning();
-  state.event = { id: crypto.randomUUID(), word_id: word.id, action, reviewed_at: new Date(nowMs()).toISOString(), wasLearning: Boolean(learning), learningEntry: learning || null };
+  state.event = { id: crypto.randomUUID(), word_id: word.id, action, reviewed_at: new Date(nowMs()).toISOString(), previousCurrent: state.current, learningEntry: learning || null };
   await addEvent(state.event);
   if (action === "known") {
     if (learning) {
       state.learningQueue = state.learningQueue.filter((item) => item.word.id !== word.id);
-      state.revealedLearningWordId = null;
     }
     else state.current += 1;
     state.phase = "listening";
   } else {
     state.learningQueue = state.learningQueue.filter((item) => item.word.id !== word.id);
     state.learningQueue.push({ eventId: state.event.id, word, due_at: nowMs() + state.learningStepSeconds * 1000 });
-    state.revealedLearningWordId = learning ? word.id : null;
     state.phase = "revealed";
   }
   await saveState(); render(); if (!currentWord()) await saveState(); busy = false; sync();
 }
-async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; if (state.current < state.cards.length) state.current += 1; state.revealedLearningWordId = null; state.phase = "listening"; await saveState(); render(); if (!currentWord()) await saveState(); busy = false; }
+async function continueStudy() { if (busy || state.phase !== "revealed") return; busy = true; if (state.current < state.cards.length) state.current += 1; state.phase = "listening"; await saveState(); render(); if (!currentWord()) await saveState(); busy = false; }
 async function undoLast() {
   if (busy || !state.event) return;
   busy = true; setActions(true); const event = state.event; await sync();
@@ -241,14 +234,10 @@ async function undoLast() {
     else { const response = await apiFetch(`/api/v1/review-events/${event.id}/void`, { method: "POST" }); if (!response.ok) throw new Error("void failed"); }
     if (event.action === "unknown") {
       state.learningQueue = state.learningQueue.filter((item) => item.eventId !== event.id);
-      if (event.wasLearning && event.learningEntry) state.learningQueue.push(event.learningEntry);
+      if (event.learningEntry !== null) state.learningQueue.push(event.learningEntry);
     }
-    if (event.action === "known" && event.learningEntry) state.learningQueue.push(event.learningEntry);
-    // An initial-card answer advances its cursor immediately for Known and on
-    // Continue for Unknown.  A revealed Unknown has not advanced yet; all
-    // other non-learning phases (including waiting and complete) have.
-    const restoreInitialCursor = !event.wasLearning && state.phase !== "revealed";
-    state.current = Math.max(0, state.current - (restoreInitialCursor ? 1 : 0)); state.revealedLearningWordId = null; state.phase = "listening"; state.event = null; await saveState(); render();
+    if (event.action === "known" && event.learningEntry !== null) state.learningQueue.push(event.learningEntry);
+    state.current = event.previousCurrent; state.phase = "listening"; state.event = null; await saveState(); render();
   } catch (_) { showStatus("Undo could not be completed. Please try again."); render(); }
   busy = false;
 }
@@ -266,28 +255,43 @@ async function clearPrivateCaches() {
   // a live browser connection can otherwise block deleteDatabase indefinitely.
   await transaction("events", "readwrite", (store) => store.clear());
   await transaction("state", "readwrite", (store) => store.clear());
-  state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600, revealedLearningWordId: null };
+  state = { sessionId: null, cards: [], current: 0, phase: "unavailable", event: null, learningQueue: [], learningStepSeconds: 600 };
   audioCacheState = { sessionId: null, expected: 0, cached: 0, ready: false, failed: 0 };
   clearLearningTimer(); render(); showStatus("Private study data was cleared.");
+}
+
+function normalizeSavedState(saved) {
+  const { undoDeadline: _legacyUndoDeadline, revealedLearningWordId: _legacyRevealedId, ...savedState } = saved;
+  const cards = Array.isArray(saved.cards) ? saved.cards : [];
+  const current = Number.isInteger(saved.current) ? Math.max(0, Math.min(saved.current, cards.length)) : 0;
+  const learningQueue = Array.isArray(saved.learningQueue) ? saved.learningQueue.filter((item) => item && item.word && Number.isFinite(item.due_at)) : [];
+  let event = saved.event && typeof saved.event === "object" ? { ...saved.event } : null;
+  if (event) {
+    event.learningEntry = event.learningEntry || null;
+    if (!Number.isInteger(event.previousCurrent)) {
+      const cursorWasNotAdvanced = event.wasLearning === true || saved.phase === "revealed";
+      event.previousCurrent = cursorWasNotAdvanced ? current : Math.max(0, current - 1);
+    }
+    event.previousCurrent = Math.max(0, Math.min(event.previousCurrent, cards.length));
+    delete event.wasLearning;
+  }
+  return { ...state, ...savedState, cards, current, event, learningQueue, learningStepSeconds: Number.isFinite(saved.learningStepSeconds) ? saved.learningStepSeconds : 600 };
 }
 
 async function boot() {
   let saved = null;
   try { saved = await getState(); } catch (_) { showStatus("Local study storage is unavailable."); }
+  if (saved) saved = normalizeSavedState(saved);
   if (saved && saved.cards && saved.phase !== "complete") {
-    // Versions before persistent Undo recorded a deadline.  Deliberately
-    // discard it: a saved latest event is now always undoable.
-    const { undoDeadline: _ignoredLegacyDeadline, ...savedState } = saved;
-    state = { ...state, ...savedState, learningQueue: Array.isArray(saved.learningQueue) ? saved.learningQueue.filter((item) => item && item.word && Number.isFinite(item.due_at)) : [], learningStepSeconds: Number.isFinite(saved.learningStepSeconds) ? saved.learningStepSeconds : 600 };
-    state.current = Number.isInteger(saved.current) ? Math.max(0, Math.min(saved.current, state.cards.length)) : 0;
-    state.revealedLearningWordId = typeof saved.revealedLearningWordId === "string" ? saved.revealedLearningWordId : null;
+    state = saved;
+    try { await saveState(); } catch (_) { showStatus("Local study storage is unavailable."); }
     try { await configureAudioCache(false); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
   } else {
     try {
       const response = await apiFetch("/api/v1/sessions?mode=daily");
       if (!response.ok) throw new Error("session unavailable");
       const session = await response.json();
-      state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, learningQueue: [], learningStepSeconds: session.learning_step_seconds, revealedLearningWordId: null };
+      state = { sessionId: session.id, cards: session.items, current: 0, phase: "listening", event: null, learningQueue: [], learningStepSeconds: session.learning_step_seconds };
       try { await configureAudioCache(true); } catch (_) { showStatus("Audio cache is unavailable; listening still works online."); }
       await saveState();
     } catch (_) {

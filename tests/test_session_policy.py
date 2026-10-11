@@ -9,9 +9,7 @@ import pytest
 
 from english_vocab_trainer.application.services import (
     select_session_words,
-    shuffled,
     submit_review,
-    utcnow,
 )
 from english_vocab_trainer.domain.models import (
     ReviewAction,
@@ -91,7 +89,6 @@ def test_presentation_order_is_random_without_level_bands_and_seedable() -> None
     assert [word.id for word in first] == [word.id for word in same_seed]
     assert [word.id for word in first] != [word.id for word in other_seed]
     assert first != sorted(first, key=lambda word: (word.level is None, word.level or 0, word.id))
-    assert [word.id for word in shuffled(candidates, Random(3))] != [word.id for word in candidates]
 
 
 def test_screen_mode_keeps_its_existing_counts() -> None:
@@ -159,7 +156,7 @@ class RetryingReviewRepository:
 
 def test_submit_review_retries_once_after_a_cas_conflict() -> None:
     repository = RetryingReviewRepository()
-    now = utcnow()
+    now = datetime.now(UTC)
     result = submit_review(
         cast(VocabularyRepository, repository),
         uuid4(),

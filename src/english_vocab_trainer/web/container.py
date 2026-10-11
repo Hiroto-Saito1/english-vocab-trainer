@@ -9,7 +9,7 @@ from typing import Any, cast
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, S3LikeClient
-from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, AudioStore
+from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.ports.repositories import RepositoryProvider, VocabularyRepository
 from english_vocab_trainer.web.auth import AuthService
 
@@ -129,11 +129,3 @@ def _is_valid_host(host: str) -> bool:
 class UnavailableRepositoryProvider:
     def for_user(self, user_id: str) -> VocabularyRepository:
         raise ConfigurationError("repository is not configured")
-
-
-class UnavailableAudioStore:
-    def head(self, key: str) -> AudioMetadata:
-        raise ConfigurationError("audio store is not configured")
-
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
-        raise ConfigurationError("audio store is not configured")

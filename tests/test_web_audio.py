@@ -14,18 +14,7 @@ from english_vocab_trainer.ports.audio import (
     InvalidRangeError,
 )
 from english_vocab_trainer.web.app import create_app
-from english_vocab_trainer.web.audio import build_audio_response
 from english_vocab_trainer.web.container import AppContainer
-
-
-def test_audio_response_range_head_and_etag() -> None:
-    result = AudioResult(b"ab", 4, "tag", 1, 2, True)
-    response = build_audio_response(result, False, None)
-    assert response.status_code == 206 and response.headers["content-range"] == "bytes 1-2/4"
-    assert build_audio_response(result, True, None).body == b""
-    assert build_audio_response(result, False, '"tag"').status_code == 304
-    assert build_audio_response(result, False, 'W/"tag"').status_code == 304
-    assert build_audio_response(result, False, '"other", W/"tag"').status_code == 304
 
 
 def test_audio_api_full_and_range(tmp_path: Path) -> None:

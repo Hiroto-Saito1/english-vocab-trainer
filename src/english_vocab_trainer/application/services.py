@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from random import Random
 from uuid import UUID
 
@@ -17,10 +17,6 @@ from english_vocab_trainer.domain.models import (
 )
 from english_vocab_trainer.ports.errors import ConcurrentUpdateError, EventConflictError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
-
-
-def utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def shuffled(words: list[Word], rng: Random) -> list[Word]:
@@ -45,26 +41,21 @@ def balanced_new_words(words: list[Word], limit: int, rng: Random) -> list[Word]
     upper_quota = limit // 2 + rng.randrange(2 if limit % 2 else 1)
     ultra_quota = limit - upper_quota
     selected = pools[Tier.UPPER][:upper_quota] + pools[Tier.ULTRA][:ultra_quota]
-    selected_ids = {word.id for word in selected}
     # If a tier is short, spill to the other real tier before the legacy pool.
-    for tier in (Tier.UPPER, Tier.ULTRA, Tier.UNKNOWN):
-        for word in pools[tier]:
-            if len(selected) >= limit:
-                break
-            if word.id not in selected_ids:
-                selected.append(word)
-                selected_ids.add(word.id)
-    return selected
+    remainder = (
+        pools[Tier.UPPER][upper_quota:] + pools[Tier.ULTRA][ultra_quota:] + pools[Tier.UNKNOWN]
+    )
+    return (selected + remainder)[:limit]
 
 
 def select_session_words(
     repo: VocabularyRepository, mode: str, now: datetime, count: int | None, rng: Random
 ) -> list[Word]:
-    new = repo.list_words(limit=10_000)
+    unseen = repo.list_words(limit=10_000)
     if mode == "screen":
         if count not in {20, 50, 100}:
             raise ValueError("screen count must be 20, 50, or 100")
-        return shuffled(balanced_new_words(new, count, rng), rng)
+        return shuffled(balanced_new_words(unseen, count, rng), rng)
     if mode != "daily":
         raise ValueError("mode must be daily or screen")
     target = repo.get_settings().daily_target
@@ -72,7 +63,7 @@ def select_session_words(
     due_ids = {word.id for word in due}
     quota = max(0, target - len(due))
     selected = due + balanced_new_words(
-        [word for word in new if word.id not in due_ids], quota, rng
+        [word for word in unseen if word.id not in due_ids], quota, rng
     )
     # Due cards win admission to the daily quota; their presentation order, and
     # the new cards' order, are still random so a level band cannot dominate.

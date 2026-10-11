@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from random import Random
@@ -19,8 +18,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.provider import SQLiteRepositoryProvider
 from english_vocab_trainer.application.services import create_study_session, submit_review
-from english_vocab_trainer.domain.models import LEARNING_STEP, Rating, ReviewAction, Tier, Word
+from english_vocab_trainer.domain.models import (
+    LEARNING_STEP,
+    Rating,
+    ReviewAction,
+    StudySession,
+    Tier,
+    Word,
+)
 from english_vocab_trainer.ports.audio import (
+    AudioMetadata,
     AudioStorageError,
     AudioStore,
     InvalidRangeError,
@@ -135,15 +142,33 @@ class VoidOut(BaseModel):
 
 
 def word_out(word: Word) -> WordOut:
-    values = asdict(word)
     return WordOut(
-        id=values["id"],
-        term=values["term"],
-        level=values["level"],
-        transcript=values["transcript"],
-        audio_url=f"/api/v1/audio/{values['id']}",
-        tier=values["tier"],
+        id=word.id,
+        term=word.term,
+        level=word.level,
+        transcript=word.transcript,
+        audio_url=f"/api/v1/audio/{word.id}",
+        tier=word.tier,
     )
+
+
+def session_out(session: StudySession) -> SessionOut:
+    return SessionOut(
+        id=session.id,
+        mode=session.kind,
+        created_at=session.created_at,
+        items=[word_out(word) for word in session.words],
+        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
+    )
+
+
+def _audio_metadata(store: AudioStore, key: str) -> AudioMetadata:
+    try:
+        return store.head(key)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "audio not found") from exc
+    except (AudioStorageError, ConfigurationError) as exc:
+        raise HTTPException(502, "audio storage is unavailable") from exc
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -266,13 +291,7 @@ def sessions(
         session = create_study_session(
             repository, mode, datetime.now(UTC), str(uuid4()), count, Random()
         )
-        return SessionOut(
-            id=session.id,
-            mode=session.kind,
-            created_at=session.created_at,
-            items=[word_out(word) for word in session.words],
-            learning_step_seconds=int(LEARNING_STEP.total_seconds()),
-        )
+        return session_out(session)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -282,13 +301,7 @@ def get_session(session_id: str, _: Identity, repository: Repository) -> Session
     session = repository.get_session(session_id)
     if session is None:
         raise HTTPException(404, "session not found")
-    return SessionOut(
-        id=session.id,
-        mode=session.kind,
-        created_at=session.created_at,
-        items=[word_out(word) for word in session.words],
-        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
-    )
+    return session_out(session)
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)
@@ -367,41 +380,27 @@ def audio(
     # RFC 7233 evaluates Range only after preconditions: a matching cache validator
     # wins even over an otherwise invalid range and must not fetch the object body.
     if if_none_match is not None:
-        try:
-            metadata = store.head(word.audio_key)
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "audio not found") from exc
-        except (AudioStorageError, ConfigurationError) as exc:
-            raise HTTPException(502, "audio storage is unavailable") from exc
+        metadata = _audio_metadata(store, word.audio_key)
         if if_none_match_matches(metadata.etag, if_none_match):
             return build_audio_head_response(metadata, None, if_none_match)
     if range_header is not None:
         try:
-            metadata = metadata or store.head(word.audio_key)
+            metadata = metadata or _audio_metadata(store, word.audio_key)
             assert metadata is not None
             parse_single_range(range_header, metadata.size)
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "audio not found") from exc
         except InvalidRangeError:
             assert metadata is not None
             return Response(
                 status_code=416,
                 headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
             )
-        except (AudioStorageError, ConfigurationError) as exc:
-            raise HTTPException(502, "audio storage is unavailable") from exc
     try:
         result = store.get(word.audio_key, range_header)
     except FileNotFoundError as exc:
         raise HTTPException(404, "audio not found") from exc
     except InvalidRangeError:
         # An upstream may reject a range after local validation (for example, a race).
-        try:
-            metadata = store.head(word.audio_key)
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "audio not found") from exc
-        except (AudioStorageError, ConfigurationError) as exc:
-            raise HTTPException(502, "audio storage is unavailable") from exc
+        metadata = _audio_metadata(store, word.audio_key)
         return Response(
             status_code=416,
             headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
@@ -423,19 +422,14 @@ def audio_head(
     word = repository.get_word(word_id)
     if word is None:
         raise HTTPException(404, "word not found")
+    metadata = _audio_metadata(store, word.audio_key)
     try:
-        metadata = store.head(word.audio_key)
-        try:
-            return build_audio_head_response(metadata, range_header, if_none_match)
-        except InvalidRangeError:
-            return Response(
-                status_code=416,
-                headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
-            )
-    except FileNotFoundError as exc:
-        raise HTTPException(404, "audio not found") from exc
-    except (AudioStorageError, ConfigurationError) as exc:
-        raise HTTPException(502, "audio storage is unavailable") from exc
+        return build_audio_head_response(metadata, range_header, if_none_match)
+    except InvalidRangeError:
+        return Response(
+            status_code=416,
+            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
+        )
 
 
 @router.get("/api/v1/progress", response_model=ProgressOut)
