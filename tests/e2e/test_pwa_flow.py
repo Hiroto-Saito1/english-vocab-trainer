@@ -221,6 +221,27 @@ def test_historical_same_answer_moves_forward_and_opposite_updates_event(
 
 
 @pytest.mark.e2e
+def test_correcting_current_due_word_refreshes_server_selection(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, database = pwa_server
+    reviewed_at = datetime.now(UTC) - timedelta(minutes=20)
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.save_event(ReviewEvent(UUID(int=91), "word-0", Rating.AGAIN, reviewed_at))
+
+    page.goto(base_url)
+    expect(page.locator("#term")).to_have_text("word word 0")
+    page.get_by_role("button", name="Previous", exact=True).click()
+    expect(page.locator("#saved-answer")).to_have_text("Saved answer: Unknown")
+    page.get_by_role("button", name="Known", exact=True).click()
+    expect(page.locator("#term")).to_have_text("word word 1")
+
+    rows = wait_for_rows(database, 1)
+    assert rows[0]["id"] == str(UUID(int=91))
+    assert rows[0]["rating"] == "good"
+
+
+@pytest.mark.e2e
 def test_response_loss_retains_card_and_retries_same_uuid(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
@@ -241,13 +262,61 @@ def test_response_loss_retains_card_and_retries_same_uuid(
     page.get_by_role("button", name="Known", exact=True).click()
     expect(page.locator("#term")).to_have_text(initial or "")
     expect(page.get_by_role("button", name="Retry answer", exact=True)).to_be_visible()
+    for action in ("Previous", "Next", "Unknown", "Known"):
+        expect(page.get_by_role("button", name=action, exact=True)).to_be_disabled()
     rows = wait_for_rows(database, 1)
     assert rows[0]["id"] == lost[0]
 
     page.get_by_role("button", name="Retry answer", exact=True).click()
     expect(page.locator("#term")).not_to_have_text(initial or "")
+    expect(page.get_by_role("button", name="Previous", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     rows = wait_for_rows(database, 1)
     assert rows[0]["id"] == lost[0]
+
+
+@pytest.mark.e2e
+def test_due_card_failure_waits_for_explicit_retry(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, database = pwa_server
+    now = datetime.now(UTC)
+    with SQLiteVocabularyRepository(database) as repository:
+        for index in range(4):
+            repository.save_event(
+                ReviewEvent(UUID(int=index + 1), f"word-{index}", Rating.GOOD, now)
+            )
+        repository.db.execute(
+            "UPDATE word_state SET due_at=?",
+            ((now + timedelta(days=1)).isoformat(),),
+        )
+        repository.db.execute(
+            "UPDATE word_state SET due_at=? WHERE word_id='word-0'",
+            ((datetime.now(UTC) + timedelta(seconds=1)).isoformat(),),
+        )
+
+    requests = 0
+
+    def fail_automatic_retry(route: Route) -> None:
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            route.abort()
+        else:
+            route.continue_()
+
+    page.route("**/api/v1/card", fail_automatic_retry)
+    page.goto(base_url)
+    expect(page.locator("#card")).to_contain_text("next review is due")
+    expect(page.get_by_role("button", name="Retry next card", exact=True)).to_be_visible()
+    page.wait_for_timeout(500)
+    assert requests == 2
+    expect(page.locator("#term")).to_be_hidden()
+
+    page.get_by_role("button", name="Retry next card", exact=True).click()
+    expect(page.locator("#term")).to_have_text("word word 0")
+    assert requests == 3
 
 
 @pytest.mark.e2e

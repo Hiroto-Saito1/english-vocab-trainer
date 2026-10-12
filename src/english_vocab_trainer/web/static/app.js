@@ -67,7 +67,7 @@ function moveNext() {
 function scheduleNextDue() {
   if (nextDueTimer !== null) clearTimeout(nextDueTimer);
   nextDueTimer = null;
-  if (emptyStatus !== "next_due" || nextDue === null || !writer) return;
+  if (emptyStatus !== "next_due" || nextDue === null || !writer || busy || retry !== null) return;
   const delay = Date.parse(nextDue) - Date.now();
   if (delay <= 0) {
     queueMicrotask(() => void loadCard());
@@ -85,7 +85,8 @@ function scheduleNextDue() {
 function render() {
   const historical = historicalEntry();
   const word = displayedWord();
-  const locked = busy || !writer;
+  const retryLocked = busy || !writer;
+  const studyLocked = retryLocked || retry !== null;
 
   term.hidden = !word;
   definition.hidden = !word;
@@ -113,11 +114,11 @@ function render() {
     }
   }
 
-  previousButton.disabled = locked || (!history.length && historyIndex < 0)
+  previousButton.disabled = studyLocked || (!history.length && historyIndex < 0)
     || (historyIndex === history.length - 1 && olderCursor === null);
-  nextButton.disabled = locked || historyIndex < 0;
-  unknownButton.disabled = locked || !word;
-  knownButton.disabled = locked || !word;
+  nextButton.disabled = studyLocked || historyIndex < 0;
+  unknownButton.disabled = studyLocked || !word;
+  knownButton.disabled = studyLocked || !word;
   savedAnswer.hidden = !historical;
   savedAnswer.textContent = historical
     ? `Saved answer: ${historical.action === "known" ? "Known" : "Unknown"}`
@@ -130,9 +131,9 @@ function render() {
     : problem || "";
   status.hidden = !status.textContent;
   retryButton.hidden = retry === null;
-  retryButton.disabled = locked;
+  retryButton.disabled = retryLocked;
   retryButton.textContent = retry?.label || "Try again";
-  if (logoutButton) logoutButton.disabled = locked;
+  if (logoutButton) logoutButton.disabled = studyLocked;
 
   const focused = document.activeElement;
   if (focused?.disabled || focused?.hidden || focused?.closest("[hidden]")) focused.blur();
@@ -191,7 +192,7 @@ async function loadHistory(reset = false) {
 }
 
 async function previous() {
-  if (busy || !writer) return;
+  if (busy || !writer || retry !== null) return;
   if (historyIndex < 0) {
     if (!history.length) return;
     historyIndex = 0;
@@ -211,7 +212,7 @@ async function previous() {
 }
 
 function next() {
-  if (busy || !writer || historyIndex < 0) return;
+  if (busy || !writer || retry !== null || historyIndex < 0) return;
   moveNext();
   render();
 }
@@ -250,6 +251,9 @@ async function saveAnswer(operation) {
       history[operation.index] = { ...history[operation.index], action: operation.payload.action };
       historyIndex = operation.index;
       moveNext();
+      currentCard = null;
+      emptyStatus = null;
+      nextDue = null;
       retry = null;
     } else {
       const answered = {
@@ -278,11 +282,11 @@ async function saveAnswer(operation) {
   }
   busy = false;
   render();
-  if (operation.kind === "current") await loadCard();
+  await loadCard();
 }
 
 async function rate(action) {
-  if (busy || !writer) return;
+  if (busy || !writer || retry !== null) return;
   const entry = historicalEntry();
   const word = displayedWord();
   if (!word) return;
@@ -300,7 +304,7 @@ async function rate(action) {
 }
 
 async function logout() {
-  if (busy || !writer) return;
+  if (busy || !writer || retry !== null) return;
   busy = true;
   problem = null;
   render();
