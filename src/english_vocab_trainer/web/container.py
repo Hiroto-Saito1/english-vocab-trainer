@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -92,3 +93,26 @@ def _is_valid_host(host: str) -> bool:
     if not candidate or len(candidate) > 253 or any(character.isspace() for character in host):
         return False
     return all(_HOST_LABEL.fullmatch(label) is not None for label in candidate.split("."))
+
+
+def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
+    environment = environ.get("APP_ENV", "production")
+    if environment in {"local", "test"}:
+        try:
+            database = Path(environ["VOCAB_DB_PATH"])
+        except KeyError as exc:
+            raise ConfigurationError("VOCAB_DB_PATH is required") from exc
+        return AppContainer(database, audio_store_from_env(environ), environment)
+    try:
+        database = Path(environ["VOCAB_DB_PATH"])
+        return AppContainer(
+            database,
+            audio_store_from_env(environ),
+            "production",
+            auth=auth_from_env(environ, database, secure_cookies=True),
+            trusted_hosts=trusted_hosts_from_env(environ),
+        )
+    except (KeyError, ConfigurationError) as exc:
+        raise ConfigurationError(
+            "production storage or authentication configuration is incomplete"
+        ) from exc

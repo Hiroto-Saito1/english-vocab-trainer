@@ -1,3 +1,5 @@
+"""Build cache-aware HTTP responses for private audio objects."""
+
 from fastapi.responses import Response
 
 from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, parse_single_range
