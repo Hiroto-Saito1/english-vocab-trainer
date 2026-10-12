@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from random import Random
 from time import monotonic
 from uuid import uuid4
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import select_set_words, submit_review
+from english_vocab_trainer.application.services import select_next_word, submit_review
 from english_vocab_trainer.domain.models import ReviewAction, Tier, Word
 
 
-def test_two_thousand_word_set_selection_and_review_smoke(tmp_path: Path) -> None:
+def test_two_thousand_word_next_card_and_review_smoke(tmp_path: Path) -> None:
     started = monotonic()
     repository = SQLiteVocabularyRepository(tmp_path / "v.db")
     try:
@@ -29,12 +28,13 @@ def test_two_thousand_word_set_selection_and_review_smoke(tmp_path: Path) -> Non
             ]
         )
         now = datetime(2026, 1, 1, tzinfo=UTC)
-        selected = select_set_words(repository, now, Random(7))
+        selected = select_next_word(repository, now)
+        assert selected is not None
         event_id = uuid4()
-        review = submit_review(repository, event_id, selected[0].id, ReviewAction.KNOWN, now)
+        review = submit_review(repository, event_id, selected.id, ReviewAction.KNOWN, now)
         stored = repository.get_event(event_id)
     finally:
         repository.close()
-    assert len(selected) == 30 and len({word.id for word in selected}) == 30
+    assert selected.id == "0"
     assert review.status == "applied" and stored is not None
     assert monotonic() - started < 8

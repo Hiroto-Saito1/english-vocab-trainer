@@ -139,7 +139,7 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
     connection = sqlite3.connect(live)
     initialize_database(connection)
     connection.execute(
-        "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+        "INSERT INTO words(id,term,level,definition,audio_key,tier) "
         "VALUES('one','one',1,NULL,'one.mp3','upper')"
     )
     connection.commit()

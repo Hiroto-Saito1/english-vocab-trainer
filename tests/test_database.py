@@ -36,11 +36,17 @@ def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
         "id",
         "term",
         "level",
-        "transcript",
+        "definition",
         "audio_key",
         "tier",
     }
-    assert SCHEMA_VERSION == 2
+    assert {row[1] for row in connection.execute("PRAGMA table_info(review_events)")} == {
+        "id",
+        "word_id",
+        "rating",
+        "reviewed_at",
+    }
+    assert SCHEMA_VERSION == 3
     assert connection.execute("SELECT version FROM schema_metadata").fetchone() == (SCHEMA_VERSION,)
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -53,7 +59,7 @@ def test_current_schema_initialization_is_idempotent_across_reopen(tmp_path: Pat
     connection = sqlite3.connect(path)
     initialize_database(connection)
     connection.execute(
-        "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+        "INSERT INTO words(id,term,level,definition,audio_key,tier) "
         "VALUES('one','one',9,NULL,'one.mp3','upper')"
     )
     connection.commit()

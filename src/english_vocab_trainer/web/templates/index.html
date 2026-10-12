@@ -17,15 +17,11 @@
     #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
     #unknown { background: #7b341e; }
     #previous, #next { background: #744210; }
-    #navigation-actions, #rating-actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
-    #secondary-actions { grid-template-columns: 1fr; }
-    #term, #transcript { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
-    #progress, #status { color: #486581; font-size: .9rem; }
+    #navigation-actions, #rating-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+    #term, #definition { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
+    #saved-answer, #status { color: #486581; font-size: .9rem; }
     #status { margin: .3rem 0; }
-    #sync-issues { background: #fff5f5; border: 1px solid #feb2b2; border-radius: .5rem; padding: 1rem; }
-    #sync-issues ul { padding-left: 1.2rem; }
-    #sync-issues li { margin: .75rem 0; }
-    #sync-issues button { min-height: 2.5rem; margin: .25rem .25rem 0 0; }
+    #retry { width: 100%; margin: 1rem 0; }
     audio { width: 100%; margin: .5rem 0; }
     @media (max-width: 390px) {
       main { padding: .9rem; }
@@ -37,31 +33,23 @@
 </head>
 <body>
 <main>
-  <button id="logout">Logout</button>
+  {% if show_logout %}<button id="logout">Logout</button>{% endif %}
   <h1>English Vocab Trainer</h1>
-  <p id="progress" aria-live="polite">Loading…</p>
   <p id="status" hidden aria-live="assertive"></p>
-  <p id="card" aria-live="polite">Loading your study set…</p>
+  <p id="card">Loading a card…</p>
   <h2 id="term" hidden></h2>
-  <audio id="audio" controls preload="metadata"></audio>
-  <p id="tier" hidden aria-live="polite"></p>
-  <p id="transcript" hidden aria-live="polite"></p>
+  <audio id="audio" hidden controls preload="metadata"></audio>
+  <p id="definition" hidden></p>
+  <p id="saved-answer" hidden></p>
   <div id="navigation-actions">
-    <button id="previous" hidden>Previous</button>
-    <button id="next" hidden>Next</button>
+    <button id="previous" disabled>Previous</button>
+    <button id="next" disabled>Next</button>
   </div>
   <div id="rating-actions">
-    <button id="unknown" hidden>Unknown</button>
-    <button id="known" hidden>Known</button>
+    <button id="unknown" disabled>Unknown</button>
+    <button id="known" disabled>Known</button>
   </div>
-  <div id="secondary-actions">
-    <button id="retry-sync" hidden>Try again</button>
-  </div>
-  <section id="sync-issues" hidden>
-    <h2>Answers not saved</h2>
-    <p>Choose whether to retry each answer or discard its local change.</p>
-    <ul id="sync-issues-list"></ul>
-  </section>
+  <button id="retry" hidden>Try again</button>
 </main>
 <script src="/static/app.js"></script>
 </body>

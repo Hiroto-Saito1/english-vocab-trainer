@@ -1,12 +1,12 @@
 import importlib.resources
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXPECTED_COLUMNS = {
     "schema_metadata": {"singleton", "version"},
-    "words": {"id", "term", "level", "transcript", "audio_key", "tier"},
+    "words": {"id", "term", "level", "definition", "audio_key", "tier"},
     "word_state": {"word_id", "due_at"},
-    "review_events": {"id", "word_id", "rating", "reviewed_at", "voided_at"},
+    "review_events": {"id", "word_id", "rating", "reviewed_at"},
     "login_attempts": {"attempted_at"},
 }
 

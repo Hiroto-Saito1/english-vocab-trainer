@@ -40,7 +40,7 @@ class Word:
     id: str
     term: str
     level: int | None
-    transcript: str | None
+    definition: str | None
     audio_key: str
     tier: Tier
 
@@ -57,17 +57,13 @@ class ReviewEvent:
     word_id: str
     rating: Rating
     reviewed_at: datetime
-    voided_at: datetime | None = None
 
 
 def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
-    """Rebuild state from genesis. Ordering is stable even for offline arrivals."""
-    active = sorted(
-        (event for event in events if event.voided_at is None),
-        key=lambda event: (event.reviewed_at, event.id.int),
-    )
+    """Rebuild state from genesis in stable event order."""
+    ordered = sorted(events, key=lambda event: (event.reviewed_at, event.id.int))
     # Py-FSRS creates a time-based card id by default; seed it from word_id so
-    # offline replays produce the same due date from the same event history.
+    # rebuilding the same server history produces the same due date.
     seed = int.from_bytes(word_id.encode("utf-8"), "big") % 2_000_000_000
     card = Card(card_id=seed)
     scheduler = Scheduler(
@@ -75,15 +71,15 @@ def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
         learning_steps=(LEARNING_STEP,),
         relearning_steps=(LEARNING_STEP,),
         maximum_interval=365,
-        # States are rebuilt for offline arrival and undo.  Random interval
-        # fuzz would make the same event history produce a different card.
+        # Random interval fuzz would make the same event history produce a
+        # different card when a historical answer is corrected.
         enable_fuzzing=False,
     )
-    for event in active:
+    for event in ordered:
         now = event.reviewed_at.astimezone(UTC)
         rating = {
             Rating.AGAIN: FsrsRating.Again,
             Rating.GOOD: FsrsRating.Good,
         }[event.rating]
         card, _ = scheduler.review_card(card, rating, now)
-    return WordState(word_id, card.due if active else datetime.min.replace(tzinfo=UTC))
+    return WordState(word_id, card.due if ordered else datetime.min.replace(tzinfo=UTC))

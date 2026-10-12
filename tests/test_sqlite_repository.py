@@ -20,178 +20,151 @@ from english_vocab_trainer.domain.models import (
 from english_vocab_trainer.ports.errors import EventConflictError, MissingError
 
 
-def words(repository: SQLiteVocabularyRepository) -> None:
+def seed(repository: SQLiteVocabularyRepository) -> None:
     repository.bulk_upsert_words(
         [
-            Word("nine", "nine", 9, None, "nine.mp3", Tier.UPPER),
-            Word("ten", "ten", 10, None, "ten.mp3", Tier.ULTRA),
-            Word("extra", "extra", None, None, "extra.mp3", Tier.UPPER),
+            Word("one", "one", 1, "definition one", "one.mp3", Tier.UPPER),
+            Word("two", "two", 2, "definition two", "two.mp3", Tier.ULTRA),
+            Word("unknown", "unknown", None, None, "unknown.mp3", Tier.UPPER),
         ]
     )
 
 
-def event(word: str, when: datetime) -> ReviewEvent:
-    return ReviewEvent(uuid4(), word, Rating.GOOD, when)
+def review(word_id: str, when: datetime, *, event_id: UUID | None = None) -> ReviewEvent:
+    return ReviewEvent(event_id or uuid4(), word_id, Rating.GOOD, when)
 
 
-def test_reopen_persists_words_state_and_events(tmp_path: Path) -> None:
+def test_reopen_persists_word_state_and_event(tmp_path: Path) -> None:
     path = tmp_path / "v.db"
     now = datetime.now(UTC)
+    stored = review("one", now)
     with SQLiteVocabularyRepository(path) as repository:
-        words(repository)
-        repository.append_event(event("nine", now))
+        seed(repository)
+        repository.save_event(stored)
     with SQLiteVocabularyRepository(path) as repository:
-        stored = repository.get_word("nine")
-        assert stored is not None and stored.tier is Tier.UPPER
-        assert repository.state("nine").due_at > now
-
-
-def test_list_excludes_active_review_and_void_reincludes_word(tmp_path: Path) -> None:
-    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
-        words(repository)
-        review = event("nine", datetime.now(UTC))
-        repository.append_event(review)
-        assert "nine" not in [word.id for word in repository.new_words_by_level()]
-        repository.void_event(review.id)
-        assert "nine" in [word.id for word in repository.new_words_by_level()]
-
-
-def test_due_returns_past_cards_only(tmp_path: Path) -> None:
-    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
-        words(repository)
-        now = datetime.now(UTC)
-        repository.append_event(event("nine", now))
-        assert not repository.due_words(now, 10)
-        repository.db.execute(
-            "UPDATE word_state SET due_at=? WHERE word_id=?",
-            ((now - timedelta(minutes=1)).isoformat(), "nine"),
+        assert repository.get_word("one") == Word(
+            "one", "one", 1, "definition one", "one.mp3", Tier.UPPER
         )
-        assert [word.id for word in repository.due_words(now, 10)] == ["nine"]
+        assert repository.get_event(stored.id) == stored
+        assert repository.state("one").due_at > now
+
+
+def test_next_word_prefers_due_then_lowest_level_unseen(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        seed(repository)
+        assert repository.next_word(now).id == "one"  # type: ignore[union-attr]
+        repository.save_event(review("one", now))
+        assert repository.next_word(now).id == "two"  # type: ignore[union-attr]
+        repository.save_event(review("two", now))
+        assert repository.next_word(now).id == "unknown"  # type: ignore[union-attr]
+        repository.save_event(review("unknown", now))
+        assert repository.next_word(now) is None
+        status, next_due = repository.empty_card_status(now)
+        assert status == "next_due" and next_due is not None
+        repository.db.execute(
+            "UPDATE word_state SET due_at=? WHERE word_id='two'",
+            ((now - timedelta(seconds=1)).isoformat(),),
+        )
+        assert repository.next_word(now).id == "two"  # type: ignore[union-attr]
+
+
+def test_empty_catalog_status(tmp_path: Path) -> None:
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        assert repository.empty_card_status(datetime.now(UTC)) == ("catalog_empty", None)
 
 
 def test_schema_rejects_invalid_tier_rating_and_missing_word(tmp_path: Path) -> None:
     with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
         with pytest.raises(sqlite3.IntegrityError):
             repository.db.execute(
-                "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+                "INSERT INTO words(id,term,level,definition,audio_key,tier) "
                 "VALUES('x','x',NULL,NULL,'x','unknown')"
             )
         with pytest.raises(sqlite3.IntegrityError):
             repository.db.execute(
-                "INSERT INTO review_events(id,word_id,rating,reviewed_at,voided_at) "
-                "VALUES('x','none','bad','now',NULL)"
+                "INSERT INTO review_events(id,word_id,rating,reviewed_at) "
+                "VALUES('x','none','bad','now')"
             )
 
 
-def test_submit_review_is_idempotent_for_known_and_unknown(tmp_path: Path) -> None:
+def test_save_is_idempotent_and_updates_rating_for_same_identity(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    event_id = uuid4()
     with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
-        words(repository)
-        now = datetime.now(UTC)
-        known_id = uuid4()
-        first = submit_review(repository, known_id, "nine", ReviewAction.KNOWN, now)
-        second = submit_review(repository, known_id, "nine", ReviewAction.KNOWN, now)
-        unknown_id = uuid4()
-        unknown = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
-        unknown_retry = submit_review(repository, unknown_id, "ten", ReviewAction.UNKNOWN, now)
-        assert first.rating is second.rating is Rating.GOOD
-        assert first.state.due_at == second.state.due_at
-        assert unknown.rating is unknown_retry.rating is Rating.AGAIN
-        assert unknown_retry.status == "idempotent"
-
-
-def test_missing_word_leaves_no_partial_event(tmp_path: Path) -> None:
-    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
-        with pytest.raises(MissingError):
-            repository.append_event(event("missing", datetime.now(UTC)))
-        words(repository)
-        stored = event("nine", datetime.now(UTC))
-        repository.append_event(stored)
-        assert repository.get_event(stored.id) is not None
-
-
-def test_uuid_idempotency_compares_structured_event_fields(tmp_path: Path) -> None:
-    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
-        words(repository)
-        review = event("nine", datetime.now(UTC))
-        first = repository.append_event(review)
-        same_instant = ReviewEvent(
-            review.id,
-            review.word_id,
-            review.rating,
-            review.reviewed_at.astimezone(timezone(timedelta(hours=9))),
+        seed(repository)
+        applied = submit_review(repository, event_id, "one", ReviewAction.KNOWN, now)
+        retry = submit_review(repository, event_id, "one", ReviewAction.KNOWN, now)
+        corrected = submit_review(repository, event_id, "one", ReviewAction.UNKNOWN, now)
+        assert applied.status == "applied"
+        assert retry.status == "idempotent"
+        assert corrected.status == "updated" and corrected.rating is Rating.AGAIN
+        assert repository.get_event(event_id) == ReviewEvent(event_id, "one", Rating.AGAIN, now)
+        assert corrected.state == replay_word_state(
+            "one", [ReviewEvent(event_id, "one", Rating.AGAIN, now)]
         )
-        second = repository.append_event(same_instant)
-        assert first.due_at == second.due_at
+
+
+def test_event_identity_conflict_and_missing_word_are_atomic(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    event_id = uuid4()
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        seed(repository)
+        repository.save_event(review("one", now, event_id=event_id))
+        same_instant = ReviewEvent(
+            event_id,
+            "one",
+            Rating.GOOD,
+            now.astimezone(timezone(timedelta(hours=9))),
+        )
+        assert repository.save_event(same_instant)[1] == "idempotent"
         for changed in (
-            ReviewEvent(review.id, "ten", review.rating, review.reviewed_at),
-            ReviewEvent(review.id, review.word_id, Rating.AGAIN, review.reviewed_at),
-            ReviewEvent(
-                review.id, review.word_id, review.rating, review.reviewed_at + timedelta(1)
-            ),
+            review("two", now, event_id=event_id),
+            review("one", now + timedelta(seconds=1), event_id=event_id),
         ):
             with pytest.raises(EventConflictError):
-                repository.append_event(changed)
+                repository.save_event(changed)
+        with pytest.raises(MissingError):
+            repository.save_event(review("missing", now))
 
 
-def test_out_of_order_replay_and_double_void_are_deterministic(tmp_path: Path) -> None:
-    now = datetime.now(UTC)
-    first = event("nine", now)
-    second = ReviewEvent(uuid4(), "nine", Rating.AGAIN, now + timedelta(days=1))
-    with SQLiteVocabularyRepository(tmp_path / "one.db") as repository:
-        words(repository)
-        repository.append_event(second)
-        actual = repository.append_event(first)
-        voided = repository.void_event(second.id)
-        repeated = repository.void_event(second.id)
-    with SQLiteVocabularyRepository(tmp_path / "two.db") as repository:
-        words(repository)
-        repository.append_event(first)
-        expected = repository.append_event(second)
-    assert actual.due_at == expected.due_at
-    assert voided.due_at == repeated.due_at
+def test_history_pages_are_stable_when_timestamps_match(tmp_path: Path) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    with SQLiteVocabularyRepository(tmp_path / "v.db") as repository:
+        seed(repository)
+        events = [
+            review("one", now, event_id=UUID(int=1)),
+            review("two", now, event_id=UUID(int=2)),
+            review("unknown", now, event_id=UUID(int=3)),
+        ]
+        for event in events:
+            repository.save_event(event)
+        first = repository.history_page(None, 2)
+        cursor = (first[-1][0].reviewed_at, first[-1][0].id)
+        second = repository.history_page(cursor, 2)
+    assert [event.id for event, _ in first] == [UUID(int=3), UUID(int=2)]
+    assert [event.id for event, _ in second] == [UUID(int=1)]
 
 
 def test_concurrent_distinct_events_are_serialized_and_both_persist(tmp_path: Path) -> None:
     path = tmp_path / "v.db"
     with SQLiteVocabularyRepository(path) as repository:
-        words(repository)
+        seed(repository)
     start = Barrier(2, timeout=10)
-    first = ReviewEvent(UUID(int=1), "nine", Rating.GOOD, datetime(2026, 1, 1, tzinfo=UTC))
-    second = ReviewEvent(UUID(int=2), "nine", Rating.AGAIN, datetime(2026, 1, 2, tzinfo=UTC))
+    first = ReviewEvent(UUID(int=1), "one", Rating.GOOD, datetime(2026, 1, 1, tzinfo=UTC))
+    second = ReviewEvent(UUID(int=2), "one", Rating.AGAIN, datetime(2026, 1, 2, tzinfo=UTC))
 
-    def append(review: ReviewEvent) -> None:
+    def save(event: ReviewEvent) -> None:
         with SQLiteVocabularyRepository(path) as repository:
             start.wait()
-            repository.append_event(review)
+            repository.save_event(event)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(append, review) for review in (first, second)]
+        futures = [executor.submit(save, event) for event in (first, second)]
         for future in futures:
             future.result(timeout=15)
 
     with SQLiteVocabularyRepository(path) as repository:
         assert repository.get_event(first.id) == first
         assert repository.get_event(second.id) == second
-        assert repository.state("nine").due_at == replay_word_state("nine", [first, second]).due_at
-
-
-def test_offline_unknown_then_known_has_same_state_when_synced_in_reverse(tmp_path: Path) -> None:
-    reviewed_at = datetime(2026, 1, 1, tzinfo=UTC)
-    unknown = (UUID(int=21), ReviewAction.UNKNOWN, reviewed_at)
-    known = (UUID(int=22), ReviewAction.KNOWN, reviewed_at + timedelta(minutes=1))
-    due_dates = []
-    for path, order in (
-        (tmp_path / "forward.db", (unknown, known)),
-        (tmp_path / "reverse.db", (known, unknown)),
-    ):
-        with SQLiteVocabularyRepository(path) as repository:
-            words(repository)
-            for event_id, action, when in order:
-                submit_review(repository, event_id, "nine", action, when)
-            due_dates.append(repository.state("nine").due_at)
-            stored = [repository.get_event(event_id) for event_id, _, _ in order]
-            assert {event.rating for event in stored if event is not None} == {
-                Rating.AGAIN,
-                Rating.GOOD,
-            }
-    assert due_dates[0] == due_dates[1]
+        assert repository.state("one") == replay_word_state("one", [first, second])

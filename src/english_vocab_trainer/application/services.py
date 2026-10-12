@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from random import Random
 from typing import Literal
 from uuid import UUID
 
@@ -14,24 +13,19 @@ from english_vocab_trainer.domain.models import (
     WordState,
     rating_for_action,
 )
-from english_vocab_trainer.ports.errors import EventConflictError
 from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 
-def select_set_words(repo: VocabularyRepository, now: datetime, rng: Random) -> list[Word]:
-    """Admit due cards first, then the lowest-level unseen words, up to 30."""
-    target = 30
-    due = repo.due_words(now, target)
-    selected = due + repo.new_words_by_level(limit=target - len(due))
-    # Admission is deterministic by due time and difficulty; presentation is not.
-    return rng.sample(selected, k=len(selected))
+def select_next_word(repo: VocabularyRepository, now: datetime) -> Word | None:
+    """Return one due word, or the lowest-level word not reviewed before."""
+    return repo.next_word(now)
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewResult:
     rating: Rating
     state: WordState
-    status: Literal["applied", "idempotent", "voided"]
+    status: Literal["applied", "idempotent", "updated"]
 
 
 def submit_review(
@@ -41,23 +35,11 @@ def submit_review(
     action: ReviewAction,
     reviewed_at: datetime,
 ) -> ReviewResult:
-    existing = repo.get_event(event_id)
-    if existing is not None:
-        if (
-            existing.word_id != word_id
-            or existing.reviewed_at != reviewed_at
-            or existing.rating != rating_for_action(action)
-        ):
-            raise EventConflictError("review event conflict")
-        return ReviewResult(
-            rating=existing.rating,
-            state=repo.state(word_id),
-            status="voided" if existing.voided_at is not None else "idempotent",
-        )
     rating = rating_for_action(action)
     event = ReviewEvent(event_id, word_id, rating, reviewed_at)
+    state, status = repo.save_event(event)
     return ReviewResult(
         rating=rating,
-        state=repo.append_event(event),
-        status="applied",
+        state=state,
+        status=status,
     )

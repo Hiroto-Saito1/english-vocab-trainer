@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import os
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as Base64Error
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from random import Random
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -18,10 +19,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.database import SchemaMismatchError
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import select_set_words, submit_review
+from english_vocab_trainer.application.services import select_next_word, submit_review
 from english_vocab_trainer.domain.models import (
     ReviewAction,
-    Tier,
     Word,
 )
 from english_vocab_trainer.ports.audio import (
@@ -69,37 +69,58 @@ class EventIn(BaseModel):
 class WordOut(BaseModel):
     id: str
     term: str
-    level: int | None
-    transcript: str | None
+    definition: str | None
     audio_url: str
-    tier: Tier
 
 
-class SetOut(BaseModel):
-    items: list[WordOut]
+class CardOut(BaseModel):
+    item: WordOut | None
     status: Literal["ready", "next_due", "catalog_empty"]
     next_due: datetime | None = None
 
 
 class EventResultOut(BaseModel):
     id: UUID
-    status: Literal["applied", "idempotent", "voided", "conflict", "missing"]
-    due_at: datetime | None = None
+    status: Literal["applied", "idempotent", "updated"]
+    due_at: datetime
 
 
-class BatchOut(BaseModel):
-    results: list[EventResultOut]
+class HistoryItemOut(BaseModel):
+    id: UUID
+    word_id: str
+    action: ReviewAction
+    reviewed_at: datetime
+    term: str
+    definition: str | None
+    audio_url: str
+
+
+class HistoryOut(BaseModel):
+    items: list[HistoryItemOut]
+    next_cursor: str | None
 
 
 def word_out(word: Word) -> WordOut:
     return WordOut(
         id=word.id,
         term=word.term,
-        level=word.level,
-        transcript=word.transcript,
+        definition=word.definition,
         audio_url=f"/api/v1/audio/{word.id}",
-        tier=word.tier,
     )
+
+
+def _history_cursor(reviewed_at: datetime, event_id: UUID) -> str:
+    value = f"{reviewed_at.astimezone(UTC).isoformat()}|{event_id}"
+    return urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
+
+
+def _parse_history_cursor(value: str) -> tuple[datetime, UUID]:
+    try:
+        decoded = urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
+        reviewed_at, event_id = decoded.rsplit("|", 1)
+        return datetime.fromisoformat(reviewed_at), UUID(event_id)
+    except (Base64Error, ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(422, "invalid history cursor") from exc
 
 
 def _audio_metadata(store: AudioStore, key: str) -> AudioMetadata:
@@ -120,7 +141,14 @@ def home(request: Request) -> Response:
             container.auth.validate_session(request.cookies.get(container.auth.session_cookie_name))
         except AuthenticationError:
             return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request, "index.html", {"title": "English Vocab Trainer"})
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "title": "English Vocab Trainer",
+            "show_logout": container.environment == "production",
+        },
+    )
 
 
 @router.get("/healthz", include_in_schema=False)
@@ -209,62 +237,54 @@ def logout(request: Request, _: Csrf) -> Response:
     return response
 
 
-@router.get("/sw.js", include_in_schema=False)
-def service_worker() -> FileResponse:
-    """Serve the worker at the application root so it controls offline navigations."""
-    return FileResponse(
-        ROOT / "static" / "sw.js",
-        media_type="application/javascript",
-        headers={"Service-Worker-Allowed": "/"},
-    )
-
-
-@router.get("/api/v1/sets", response_model=SetOut)
-def study_set(repository: Repository) -> SetOut:
+@router.get("/api/v1/card", response_model=CardOut)
+def next_card(repository: Repository) -> CardOut:
     now = datetime.now(UTC)
-    words = select_set_words(repository, now, Random())
-    status: Literal["ready", "next_due", "catalog_empty"] = "ready"
-    next_due = None
-    if not words:
-        status, next_due = repository.empty_set_status(now)
-    return SetOut(
-        items=[word_out(word) for word in words],
-        status=status,
-        next_due=next_due,
-    )
+    word = select_next_word(repository, now)
+    if word is not None:
+        return CardOut(item=word_out(word), status="ready")
+    status, next_due = repository.empty_card_status(now)
+    return CardOut(item=None, status=status, next_due=next_due)
 
 
-@router.post("/api/v1/review-events/batch", response_model=BatchOut)
-def review_batch(events: list[EventIn], repository: Repository, _: Csrf) -> BatchOut:
-    if len(events) > 100:
-        raise HTTPException(422, "at most 100 events")
-    results: list[EventResultOut] = []
-    for event in events:
-        try:
-            result = submit_review(
-                repository, event.id, event.word_id, event.action, event.reviewed_at
-            )
-            results.append(
-                EventResultOut(
-                    id=event.id,
-                    status=result.status,
-                    due_at=result.state.due_at,
-                )
-            )
-        except EventConflictError:
-            results.append(EventResultOut(id=event.id, status="conflict"))
-        except MissingError:
-            results.append(EventResultOut(id=event.id, status="missing"))
-    return BatchOut(results=results)
-
-
-@router.post("/api/v1/review-events/{event_id}/void", status_code=204)
-def void_event(event_id: UUID, repository: Repository, _: Csrf) -> Response:
+@router.post("/api/v1/review-events", response_model=EventResultOut)
+def review(event: EventIn, repository: Repository, _: Csrf) -> EventResultOut:
     try:
-        repository.void_event(event_id)
+        result = submit_review(repository, event.id, event.word_id, event.action, event.reviewed_at)
+    except EventConflictError as exc:
+        raise HTTPException(409, "review event conflict") from exc
     except MissingError as exc:
-        raise HTTPException(404, "event not found") from exc
-    return Response(status_code=204)
+        raise HTTPException(404, "word not found") from exc
+    return EventResultOut(id=event.id, status=result.status, due_at=result.state.due_at)
+
+
+@router.get("/api/v1/history", response_model=HistoryOut)
+def history(
+    repository: Repository,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> HistoryOut:
+    parsed = _parse_history_cursor(cursor) if cursor else None
+    rows = repository.history_page(parsed, limit + 1)
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
+        HistoryItemOut(
+            id=event.id,
+            word_id=event.word_id,
+            action=(ReviewAction.UNKNOWN if event.rating.value == "again" else ReviewAction.KNOWN),
+            reviewed_at=event.reviewed_at,
+            term=word.term,
+            definition=word.definition,
+            audio_url=f"/api/v1/audio/{word.id}",
+        )
+        for event, word in rows
+    ]
+    next_cursor = None
+    if has_more and rows:
+        event = rows[-1][0]
+        next_cursor = _history_cursor(event.reviewed_at, event.id)
+    return HistoryOut(items=items, next_cursor=next_cursor)
 
 
 @router.get("/api/v1/audio/{word_id}")
