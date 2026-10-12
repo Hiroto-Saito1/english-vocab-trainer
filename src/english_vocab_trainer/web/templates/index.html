@@ -1,1 +1,56 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#102a43"><link rel="manifest" href="/static/manifest.json"><title>{{ title }}</title></head><body><main><h1>English Vocab Trainer</h1><p id="card" aria-live="polite">Loading your daily study…</p><audio id="audio" controls></audio><p><button id="known">Known</button> <button id="unknown">Unknown</button></p><p id="transcript" hidden></p></main><script src="/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <link rel="manifest" href="/static/manifest.json">
+  <title>{{ title }}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f7fafc; color: #102a43; font: 18px system-ui; }
+    main { max-width: 34rem; margin: auto; padding: 1.25rem; }
+    h1 { font-size: clamp(1.5rem, 7vw, 2rem); margin: .5rem 0 1rem; }
+    button { min-height: 3rem; font: inherit; font-weight: 650; padding: .7rem 1rem; border: 0; border-radius: .5rem; background: #102a43; color: white; }
+    button[hidden], section[hidden], p[hidden], h2[hidden] { display: none; }
+    button:disabled { opacity: .45; cursor: not-allowed; filter: grayscale(70%); }
+    #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
+    #unknown { background: #7b341e; }
+    #previous, #next { background: #744210; }
+    #navigation-actions, #answer-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+    #term, #definition { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
+    #saved-answer, #status { color: #486581; font-size: .9rem; }
+    #status { margin: .3rem 0; }
+    #retry { width: 100%; margin: 1rem 0; }
+    audio { width: 100%; margin: .5rem 0; }
+    @media (max-width: 390px) {
+      main { padding: .9rem; }
+      #navigation-actions, #answer-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      button { width: 100%; }
+      #logout { width: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  {% if show_logout %}<button id="logout">Logout</button>{% endif %}
+  <h1>English Vocab Trainer</h1>
+  <p id="status" hidden aria-live="assertive"></p>
+  <p id="card">Loading a card…</p>
+  <h2 id="term" hidden></h2>
+  <audio id="audio" hidden controls preload="metadata"></audio>
+  <p id="definition" hidden></p>
+  <p id="saved-answer" hidden></p>
+  <div id="navigation-actions">
+    <button id="previous" disabled>Previous</button>
+    <button id="next" disabled>Next</button>
+  </div>
+  <div id="answer-actions">
+    <button id="unknown" disabled>Unknown</button>
+    <button id="known" disabled>Known</button>
+  </div>
+  <button id="retry" hidden>Try again</button>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

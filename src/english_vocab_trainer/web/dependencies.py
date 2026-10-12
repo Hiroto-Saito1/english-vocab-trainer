@@ -1,79 +1,62 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+import hmac
+import sqlite3
+from collections.abc import Iterator
 from typing import Annotated, cast
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Header, HTTPException, Request
 
-from english_vocab_trainer.adapters.cloudflare.provider import D1RepositoryProvider
-from english_vocab_trainer.application.async_utils import as_async_repository
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.ports.audio import AudioStore
-from english_vocab_trainer.ports.repositories import AsyncVocabularyRepository, VocabularyRepository
-from english_vocab_trainer.web.container import AppContainer, ConfigurationError
+from english_vocab_trainer.web.auth import AuthenticationError
+from english_vocab_trainer.web.container import AppContainer
 
 
-def identity(
+def csrf(
     request: Request,
-    assertion: Annotated[str | None, Header(alias="Cf-Access-Jwt-Assertion")] = None,
-) -> str:
+    token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+) -> None:
     container = get_container(request)
     if container.environment in {"local", "test"}:
-        if container.local_user_id is None:
-            raise HTTPException(500, "local identity is not configured")
-        return container.local_user_id
-    if assertion is None:
-        raise HTTPException(403, "Cloudflare Access authentication required")
-    raise HTTPException(403, "Access verification is not configured")
+        return
+    if container.auth is None:
+        raise HTTPException(503, "authentication is unavailable")
+    cookie = request.cookies.get(container.auth.csrf_cookie_name)
+    if token is None or cookie is None:
+        raise HTTPException(403, "csrf validation failed")
+    try:
+        container.auth.validate_session(
+            request.cookies.get(container.auth.session_cookie_name), token, require_csrf=True
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(403, "csrf validation failed") from exc
+    if not hmac.compare_digest(token.encode("utf-8"), cookie.encode("utf-8")):
+        raise HTTPException(403, "csrf validation failed")
 
 
 def get_container(request: Request) -> AppContainer:
     return cast(AppContainer, request.app.state.container)
 
 
-def _binding(request: Request, name: str) -> object | None:
-    environment = request.scope.get("env")
-    if isinstance(environment, dict):
-        return environment.get(name)
-    return getattr(environment, name, None)
-
-
-def repository_for_user(request: Request, user_id: str) -> Iterator[VocabularyRepository]:
+def repository(request: Request) -> Iterator[SQLiteVocabularyRepository]:
+    container = get_container(request)
+    if container.environment not in {"local", "test"}:
+        if container.auth is None:
+            raise HTTPException(503, "authentication is unavailable")
+        try:
+            container.auth.validate_session(request.cookies.get(container.auth.session_cookie_name))
+        except AuthenticationError as exc:
+            raise HTTPException(401, "authentication required") from exc
     try:
-        repository = cast(
-            VocabularyRepository, get_container(request).repositories.for_user(user_id)
-        )
-    except ConfigurationError as exc:
+        user_repository = SQLiteVocabularyRepository(container.database)
+    except (OSError, sqlite3.Error) as exc:
         raise HTTPException(503, "repository is unavailable") from exc
     try:
-        yield repository
+        yield user_repository
     finally:
-        repository.close()
-
-
-def repository(
-    request: Request, user_id: Annotated[str, Depends(identity)]
-) -> Iterator[VocabularyRepository]:
-    yield from repository_for_user(request, user_id)
-
-
-async def async_repository(
-    request: Request, user_id: Annotated[str, Depends(identity)]
-) -> AsyncIterator[AsyncVocabularyRepository]:
-    database = _binding(request, "DB")
-    provider = (
-        D1RepositoryProvider(database)
-        if database is not None
-        else get_container(request).repositories
-    )
-    repository = as_async_repository(provider.for_user(user_id))
-    try:
-        yield repository
-    finally:
-        await repository.close()
+        user_repository.close()
 
 
 def audio_store(request: Request) -> AudioStore:
-    try:
-        return get_container(request).audio
-    except ConfigurationError as exc:
-        raise HTTPException(503, "audio store is unavailable") from exc
+    return get_container(request).audio

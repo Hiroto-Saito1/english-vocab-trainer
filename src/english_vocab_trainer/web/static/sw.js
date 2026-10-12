@@ -1,1 +1,0 @@
-self.addEventListener("install",e=>e.waitUntil(caches.open("v1").then(c=>c.addAll(["/","/static/app.js"]))));self.addEventListener("fetch",e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(x=>{if(e.request.url.includes("/audio/"))caches.open("v1").then(c=>c.put(e.request,x.clone()));return x;}))));
