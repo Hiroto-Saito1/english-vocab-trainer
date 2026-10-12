@@ -17,20 +17,19 @@
     #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
     #unknown { background: #7b341e; }
     #previous, #next { background: #744210; }
-    #actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
-    #actions > :only-child { grid-column: 1 / -1; }
+    #navigation-actions, #rating-actions, #set-actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+    #set-actions, #secondary-actions { grid-template-columns: 1fr; }
     #term, #transcript { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
-    #progress, #network-status, #sync-status, #cache-status, #notice { color: #486581; font-size: .9rem; }
-    #network-status, #sync-status, #cache-status, #notice { margin: .3rem 0; }
+    #progress, #status { color: #486581; font-size: .9rem; }
+    #status { margin: .3rem 0; }
     #sync-issues { background: #fff5f5; border: 1px solid #feb2b2; border-radius: .5rem; padding: 1rem; }
     #sync-issues ul { padding-left: 1.2rem; }
     #sync-issues li { margin: .75rem 0; }
     #sync-issues button { min-height: 2.5rem; margin: .25rem .25rem 0 0; }
-    #readonly-status { background: #fffaf0; border-radius: .5rem; padding: .75rem; }
     audio { width: 100%; margin: .5rem 0; }
     @media (max-width: 390px) {
       main { padding: .9rem; }
-      #actions, #secondary-actions { grid-template-columns: 1fr; }
+      #navigation-actions, #rating-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       button { width: 100%; }
       #logout { width: auto; }
     }
@@ -41,21 +40,21 @@
   <button id="logout">Logout</button>
   <h1>English Vocab Trainer</h1>
   <p id="progress" aria-live="polite">Loading…</p>
-  <p id="network-status" aria-live="polite"></p>
-  <p id="sync-status" aria-live="polite"></p>
-  <p id="cache-status" aria-live="polite"></p>
-  <p id="readonly-status" hidden aria-live="assertive">Another tab is controlling this study set. This tab is read-only.</p>
-  <p id="notice" aria-live="assertive"></p>
+  <p id="status" hidden aria-live="assertive"></p>
   <p id="card" aria-live="polite">Loading your study set…</p>
   <h2 id="term" hidden></h2>
   <audio id="audio" controls preload="auto"></audio>
   <p id="tier" hidden aria-live="polite"></p>
   <p id="transcript" hidden aria-live="polite"></p>
-  <div id="actions">
+  <div id="navigation-actions">
     <button id="previous" hidden>Previous</button>
     <button id="next" hidden>Next</button>
+  </div>
+  <div id="rating-actions">
     <button id="unknown" hidden>Unknown</button>
     <button id="known" hidden>Known</button>
+  </div>
+  <div id="set-actions">
     <button id="next-set" hidden>Next set</button>
   </div>
   <div id="secondary-actions">

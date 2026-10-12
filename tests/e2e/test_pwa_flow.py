@@ -6,9 +6,11 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from json import dumps
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 import uvicorn
@@ -19,7 +21,7 @@ from playwright.sync_api import Page, Route, expect
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.domain.models import Tier, Word
+from english_vocab_trainer.domain.models import Rating, ReviewEvent, Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import AppContainer
@@ -129,34 +131,6 @@ def wait_for_voided_event(database: Path, event_id: str) -> None:
     raise AssertionError(f"event {event_id} was not voided: {event_rows(database)}")
 
 
-def wait_for_audio_cache(page: Page) -> list[str]:
-    assert (
-        page.evaluate(
-            """async () => Promise.race([
-          navigator.serviceWorker.ready.then(() => true),
-          new Promise((resolve) => setTimeout(() => resolve(false), 10_000)),
-        ])"""
-        )
-        is True
-    )
-    page.wait_for_function(
-        """() => {
-          if (!navigator.serviceWorker.controller || !window.__pwa) return false;
-          const cache = window.__pwa.getAudioCacheState();
-          return cache.ready && cache.cached === cache.expected && cache.failed === 0;
-        }""",
-        timeout=10_000,
-    )
-    return cast(
-        list[str],
-        page.evaluate(
-            """async () => caches.open("pwa-private-audio-v6")
-              .then((cache) => cache.keys())
-              .then((keys) => keys.map((key) => key.url).sort())"""
-        ),
-    )
-
-
 def wait_for_store_ids(page: Page, store: str, expected: list[str]) -> None:
     matched = page.evaluate(
         """async ({store, expected}) => {
@@ -164,7 +138,7 @@ def wait_for_store_ids(page: Page, store: str, expected: list[str]) -> None:
           const deadline = Date.now() + 10_000;
           while (Date.now() < deadline) {
             const ids = await new Promise((resolve, reject) => {
-              const request = indexedDB.open("english-vocab-trainer", 4);
+              const request = indexedDB.open("english-vocab-trainer", 5);
               request.onerror = () => reject(request.error);
               request.onsuccess = () => {
                 const db = request.result;
@@ -187,7 +161,7 @@ def put_outbox_events(page: Page, events: list[dict[str, str]]) -> None:
     page.evaluate(
         """async (events) => {
           const db = await new Promise((resolve, reject) => {
-            const request = indexedDB.open("english-vocab-trainer", 4);
+            const request = indexedDB.open("english-vocab-trainer", 5);
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
           });
@@ -205,39 +179,71 @@ def put_outbox_events(page: Page, events: list[dict[str, str]]) -> None:
     )
 
 
-def private_storage_state(page: Page) -> tuple[list[str], list[list[object]]]:
+def stored_state(page: Page) -> dict[str, object]:
     return cast(
-        tuple[list[str], list[list[object]]],
+        dict[str, object],
         page.evaluate(
             """async () => {
-              const privateKeys = (await caches.keys()).filter(
-                (key) => key === "pwa-private-audio-v6"
-              );
               const db = await new Promise((resolve, reject) => {
-                const request = indexedDB.open("english-vocab-trainer", 4);
+                const request = indexedDB.open("english-vocab-trainer", 5);
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(request.error);
               });
               try {
-                const values = await Promise.all(["events", "failedEvents", "state"].map(
-                  (name) => new Promise((resolve, reject) => {
-                    const request = db.transaction(name).objectStore(name).getAll();
-                    request.onsuccess = () => resolve(request.result);
-                    request.onerror = () => reject(request.error);
-                  })
-                ));
-                return [privateKeys, values];
+                return await new Promise((resolve, reject) => {
+                  const request = db.transaction("state").objectStore("state").get("active-set");
+                  request.onsuccess = () => resolve(request.result.value);
+                  request.onerror = () => reject(request.error);
+                });
               } finally { db.close(); }
             }"""
         ),
     )
 
 
+def private_storage_state(page: Page) -> list[list[object]]:
+    return cast(
+        list[list[object]],
+        page.evaluate(
+            """async () => {
+              const db = await new Promise((resolve, reject) => {
+                const request = indexedDB.open("english-vocab-trainer", 5);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+              });
+              try {
+                return await Promise.all(["events", "failedEvents", "state"].map(
+                  (name) => new Promise((resolve, reject) => {
+                    const request = db.transaction(name).objectStore(name).getAll();
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                  })
+                ));
+              } finally { db.close(); }
+            }"""
+        ),
+    )
+
+
+def wait_for_shell(page: Page) -> list[str]:
+    page.wait_for_function(
+        """async () => {
+          await navigator.serviceWorker.ready;
+          if (!navigator.serviceWorker.controller) return false;
+          return (await caches.keys()).includes("pwa-shell-v7");
+        }""",
+        timeout=10_000,
+    )
+    return cast(list[str], page.evaluate("async () => caches.keys()"))
+
+
 def answer(page: Page, value: str) -> None:
-    before = page.evaluate("window.__pwa.getState().history.length")
+    before = page.locator("#term").text_content()
     page.get_by_role("button", name=value, exact=True).click()
     page.wait_for_function(
-        "(length) => window.__pwa.getState().history.length === length + 1", arg=before
+        """(term) => document.querySelector('#term').hidden ||
+          document.querySelector('#term').textContent !== term""",
+        arg=before,
     )
 
 
@@ -262,7 +268,7 @@ def install_batch_response_loss(page: Page, *, repeat: bool = False) -> None:
 
 
 @pytest.mark.e2e
-def test_single_card_history_navigation_and_same_answer_are_read_only(
+def test_single_card_history_navigation_and_controls(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
     base_url, database = pwa_server
@@ -271,9 +277,14 @@ def test_single_card_history_navigation_and_same_answer_are_read_only(
     expect(page.locator("#card")).to_have_text("Choose Known or Unknown.")
     expect(page.locator("#term")).to_be_visible()
     expect(page.locator("#transcript")).to_contain_text("English definition")
+    expect(page.locator("#status")).to_be_hidden()
     assert page.locator("#audio").get_attribute("controls") == ""
-    for removed in ("Show answer", "Replay", "Finish for now", "Word management"):
-        expect(page.get_by_text(removed, exact=True)).to_have_count(0)
+    assert page.locator("#unknown").evaluate("element => element.parentElement.id") == (
+        "rating-actions"
+    )
+    assert page.locator("#previous").evaluate("element => element.parentElement.id") == (
+        "navigation-actions"
+    )
     first_word = page.locator("#term").text_content()
 
     answer(page, "Known")
@@ -281,28 +292,25 @@ def test_single_card_history_navigation_and_same_answer_are_read_only(
     wait_for_rows(database, 2)
     wait_for_store_ids(page, "events", [])
     current_word = page.locator("#term").text_content()
-    expect(page.get_by_role("button", name="Previous", exact=True)).to_be_enabled()
 
     page.get_by_role("button", name="Previous", exact=True).click()
     expect(page.locator("#card")).to_contain_text("Earlier answer: Unknown")
+    expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     second_word = page.locator("#term").text_content()
     page.get_by_role("button", name="Previous", exact=True).click()
     expect(page.locator("#term")).to_have_text(first_word or "")
-    expect(page.get_by_role("button", name="Previous", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Known", exact=True)).to_be_disabled()
     page.reload()
     expect(page.locator("#term")).to_have_text(first_word or "")
 
     rows_before = [tuple(row) for row in event_rows(database)]
     page.get_by_role("button", name="Next", exact=True).click()
     expect(page.locator("#term")).to_have_text(second_word or "")
-    page.get_by_role("button", name="Previous", exact=True).click()
-    page.get_by_role("button", name="Known", exact=True).click()
-    expect(page.locator("#term")).to_have_text(second_word or "")
-    wait_for_store_ids(page, "events", [])
-    assert [tuple(row) for row in event_rows(database)] == rows_before
-
     page.get_by_role("button", name="Next", exact=True).click()
     expect(page.locator("#term")).to_have_text(current_word or "")
+    wait_for_store_ids(page, "events", [])
+    assert [tuple(row) for row in event_rows(database)] == rows_before
 
 
 @pytest.mark.e2e
@@ -313,29 +321,27 @@ def test_historical_correction_converges_offline_after_response_loss(
     install_batch_response_loss(page, repeat=True)
     page.goto(base_url)
     expect(page.locator("#card")).to_have_text("Choose Known or Unknown.")
-    wait_for_audio_cache(page)
+    wait_for_shell(page)
     original_word = page.locator("#term").text_content()
     answer(page, "Known")
     old = wait_for_rows(database, 1)[0]
-    expect(page.locator("#sync-status")).to_contain_text("network error")
+    expect(page.locator("#status")).to_contain_text("Network error")
 
     page.context.set_offline(True)
     page.get_by_role("button", name="Previous", exact=True).click()
     expect(page.locator("#term")).to_have_text(original_word or "")
-    original_entry = page.evaluate("window.__pwa.getState().history[0]")
+    original_entry = cast(list[dict[str, object]], stored_state(page)["history"])[0]
+    expect(page.get_by_role("button", name="Known", exact=True)).to_be_disabled()
     page.get_by_role("button", name="Unknown", exact=True).click()
-    page.wait_for_function(
-        "(id) => window.__pwa.getState().history[0].eventId !== id",
-        arg=original_entry["eventId"],
-    )
-    corrected = page.evaluate("window.__pwa.getState().history[0]")
+    corrected = cast(list[dict[str, object]], stored_state(page)["history"])[0]
     assert corrected["eventId"] != original_entry["eventId"]
     assert corrected["reviewed_at"] == original_entry["reviewed_at"]
-    wait_for_store_ids(page, "events", [old["id"], corrected["eventId"]])
+    wait_for_store_ids(page, "events", [old["id"], cast(str, corrected["eventId"])])
 
     page.reload(wait_until="domcontentloaded")
     page.get_by_role("button", name="Previous", exact=True).click()
     expect(page.locator("#card")).to_contain_text("Earlier answer: Unknown")
+    expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_disabled()
     page.get_by_role("button", name="Next", exact=True).click()
     page.evaluate("window.__loseBatchResponses = false")
     page.context.set_offline(False)
@@ -355,7 +361,7 @@ def test_answer_state_and_outbox_commit_atomically(
     base_url, database = pwa_server
     page.goto(base_url)
     expect(page.locator("#card")).to_have_text("Choose Known or Unknown.")
-    before = page.evaluate("window.__pwa.getState()")
+    before = stored_state(page)
     page.evaluate(
         """() => {
           const nativePut = IDBObjectStore.prototype.put;
@@ -366,8 +372,8 @@ def test_answer_state_and_outbox_commit_atomically(
         }"""
     )
     page.get_by_role("button", name="Known", exact=True).click()
-    expect(page.locator("#notice")).to_contain_text("could not be saved locally")
-    assert page.evaluate("window.__pwa.getState()") == before
+    expect(page.locator("#status")).to_contain_text("could not be saved locally")
+    assert stored_state(page) == before
     wait_for_store_ids(page, "events", [])
     assert event_rows(database) == []
 
@@ -388,7 +394,7 @@ def test_sync_drains_event_added_during_active_flight(
             if (url.includes("/api/v1/review-events/batch") && !inserted) {
               inserted = true;
               const db = await new Promise((resolve, reject) => {
-                const request = indexedDB.open("english-vocab-trainer", 4);
+                const request = indexedDB.open("english-vocab-trainer", 5);
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = () => reject(request.error);
               });
@@ -417,83 +423,31 @@ def test_sync_drains_event_added_during_active_flight(
 
 
 @pytest.mark.e2e
-def test_only_lock_owner_can_study_and_waiting_tab_takes_over(
-    page: Page, pwa_server: tuple[str, Path]
-) -> None:
-    base_url, _ = pwa_server
-    page.goto(base_url)
-    follower = page.context.new_page()
-    follower.add_init_script(
-        """(() => {
-          window.__playCalls = 0;
-          HTMLMediaElement.prototype.play = function() {
-            window.__playCalls += 1;
-            return Promise.resolve();
-          };
-        })()"""
-    )
-    follower.goto(base_url)
-    expect(follower.locator("#readonly-status")).to_be_visible()
-    expect(follower.get_by_role("button", name="Known", exact=True)).to_be_disabled()
-    answer(page, "Known")
-    follower.wait_for_function(
-        "(id) => window.__pwa.getState().active.word.id === id",
-        arg=page.evaluate("window.__pwa.getState().active.word.id"),
-    )
-    assert follower.evaluate("window.__playCalls") == 0
-    page.close()
-    follower.wait_for_function("() => !window.__pwa.isReadOnly()")
-    expect(follower.locator("#readonly-status")).to_be_hidden()
-    expect(follower.get_by_role("button", name="Known", exact=True)).to_be_enabled()
-    follower.close()
-
-
-@pytest.mark.e2e
-def test_waiting_persists_without_finish_and_resumes_when_due(
+def test_unknown_completes_set_and_next_set_is_staged(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
     base_url, database = pwa_server
     page.goto(base_url)
-    expect(page.locator("#card")).to_have_text("Choose Known or Unknown.")
-    first_word = page.locator("#term").text_content()
     answer(page, "Unknown")
     answer(page, "Known")
     answer(page, "Known")
     wait_for_rows(database, 3)
-    expect(page.locator("#card")).to_contain_text("Waiting for relearning")
-    expect(page.get_by_role("button", name="Previous", exact=True)).to_be_visible()
-    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_hidden()
-    expect(page.get_by_role("button", name="Known", exact=True)).to_be_hidden()
-    expect(page.get_by_text("Finish for now", exact=True)).to_have_count(0)
-
-    page.reload()
-    expect(page.locator("#card")).to_contain_text("Waiting for relearning")
-    due = page.evaluate("window.__pwa.getState().history[0].due_at")
-    page.add_init_script(
-        "window.__pwaTestClock = {now: () => __DUE__};".replace("__DUE__", str(due))
-    )
-    page.reload()
-    expect(page.locator("#term")).to_have_text(first_word or "")
-    answer(page, "Known")
-    wait_for_rows(database, 4)
-    expect(page.locator("#card")).to_have_text("Set complete.")
-
-
-@pytest.mark.e2e
-def test_set_completion_and_staged_next_set_survive_failures(
-    page: Page, pwa_server: tuple[str, Path]
-) -> None:
-    base_url, database = pwa_server
-    page.goto(base_url)
-    for count in range(1, 4):
-        answer(page, "Known")
-        wait_for_rows(database, count)
+    wait_for_store_ids(page, "events", [])
     expect(page.locator("#card")).to_have_text("Set complete.")
     expect(page.get_by_role("button", name="Previous", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="Next set", exact=True)).to_be_visible()
+    expect(page.locator("#audio")).to_be_hidden()
+    assert page.locator("#audio").get_attribute("src") is None
+
+    page.get_by_role("button", name="Previous", exact=True).click()
+    expect(page.locator("#card")).to_contain_text("Earlier answer")
+    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_hidden()
+    page.get_by_role("button", name="Next", exact=True).click()
+    expect(page.locator("#card")).to_have_text("Set complete.")
+    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_visible()
     page.reload()
     expect(page.locator("#card")).to_have_text("Set complete.")
-    before = page.evaluate("window.__pwa.getState()")
+    before = stored_state(page)
 
     page.evaluate(
         """() => {
@@ -505,31 +459,37 @@ def test_set_completion_and_staged_next_set_survive_failures(
         }"""
     )
     page.get_by_role("button", name="Next set", exact=True).click()
-    expect(page.locator("#notice")).to_contain_text("current set was kept")
-    assert page.evaluate("window.__pwa.getState()") == before
+    expect(page.locator("#status")).to_contain_text("current set was kept")
+    assert stored_state(page) == before
 
-    page.evaluate(
-        """() => {
-          IDBObjectStore.prototype.put = window.__nativeIdbPut;
-          const nativeOpen = caches.open.bind(caches);
-          caches.open = (name) => name === "pwa-private-audio-v6"
-            ? Promise.reject(new Error("simulated cache failure"))
-            : nativeOpen(name);
-        }"""
-    )
+    page.evaluate("() => { IDBObjectStore.prototype.put = window.__nativeIdbPut; }")
     page.get_by_role("button", name="Next set", exact=True).click()
     expect(page.locator("#card")).to_contain_text("The next review is due")
-    expect(page.locator("#cache-status")).to_contain_text("Audio cache setup failed")
-    expect(page.locator("#notice")).not_to_contain_text("could not be loaded")
+    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_hidden()
+    expect(page.locator("#status")).to_be_hidden()
 
 
 @pytest.mark.e2e
-def test_catalog_empty_is_explained(page: Page, pwa_server: tuple[str, Path]) -> None:
+def test_catalog_empty_has_no_next_set(page: Page, pwa_server: tuple[str, Path]) -> None:
     base_url, database = pwa_server
     with SQLiteVocabularyRepository(database) as repository:
         repository.db.execute("DELETE FROM words")
     page.goto(base_url)
     expect(page.locator("#card")).to_contain_text("The catalog is empty.")
+    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_hidden()
+
+
+@pytest.mark.e2e
+def test_initial_next_due_has_no_next_set(page: Page, pwa_server: tuple[str, Path]) -> None:
+    base_url, database = pwa_server
+    with SQLiteVocabularyRepository(database) as repository:
+        for index in range(3):
+            repository.append_event(
+                ReviewEvent(UUID(int=index + 1), f"word-{index}", Rating.GOOD, datetime.now(UTC))
+            )
+    page.goto(base_url)
+    expect(page.locator("#card")).to_contain_text("The next review is due")
+    expect(page.get_by_role("button", name="Next set", exact=True)).to_be_hidden()
 
 
 @pytest.mark.e2e
@@ -539,7 +499,6 @@ def test_terminal_sync_result_is_inspectable_and_blocks_next_set(
     base_url, database = pwa_server
     acknowledged = "00000000-0000-0000-0000-000000000101"
     conflicted = "00000000-0000-0000-0000-000000000102"
-
     page.goto(base_url)
     for count in range(1, 4):
         answer(page, "Known")
@@ -568,12 +527,14 @@ def test_terminal_sync_result_is_inspectable_and_blocks_next_set(
                 "word_id": "word-0",
                 "action": "known",
                 "reviewed_at": "2026-01-01T00:00:00Z",
+                "intent": "review",
             },
             {
                 "id": conflicted,
                 "word_id": "word-1",
                 "action": "unknown",
                 "reviewed_at": "2026-01-01T00:00:01Z",
+                "intent": "review",
             },
         ],
     )
@@ -622,6 +583,7 @@ def test_reconnect_chunks_more_than_two_hundred_reviews(
                 "word_id": "word-0",
                 "action": "known",
                 "reviewed_at": "2026-01-01T00:00:00Z",
+                "intent": "review",
             }
             for index in range(1, 206)
         ],
@@ -633,15 +595,15 @@ def test_reconnect_chunks_more_than_two_hundred_reviews(
 
 
 @pytest.mark.e2e
-def test_native_audio_offline_range_outbox_and_private_reset(
+def test_shell_and_study_state_work_offline_but_audio_is_online_only(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
     base_url, database = pwa_server
     page.goto(base_url)
-    cached_urls = wait_for_audio_cache(page)
-    assert len(cached_urls) == 3
+    cache_names = wait_for_shell(page)
+    assert cache_names == ["pwa-shell-v7"]
     shell_paths = page.evaluate(
-        """async () => caches.open("pwa-shell-v6").then((cache) => cache.keys()).then(
+        """async () => caches.open("pwa-shell-v7").then((cache) => cache.keys()).then(
           (keys) => keys.map((key) => new URL(key.url).pathname)
         )"""
     )
@@ -656,106 +618,52 @@ def test_native_audio_offline_range_outbox_and_private_reset(
             configurable: true,
             get: () => window.__onlineForTest,
           });
+          window.dispatchEvent(new Event("offline"));
         }"""
     )
     expect(page.locator("#term")).to_be_visible()
+    expect(page.locator("#status")).to_contain_text("Offline")
     assert page.locator("#audio").get_attribute("controls") == ""
-    whole, sliced = page.evaluate(
-        """async (url) => {
-          const whole = await fetch(url);
-          const range = await fetch(url, {headers: {Range: "bytes=1-3"}});
-          return [
-            {status: whole.status, bytes: [...new Uint8Array(await whole.arrayBuffer())]},
-            {
-              status: range.status,
-              range: range.headers.get("Content-Range"),
-              bytes: [...new Uint8Array(await range.arrayBuffer())]
-            }
-          ];
-        }""",
-        cached_urls[0],
+    assert (
+        page.evaluate("fetch(document.querySelector('#audio').src).then(() => true, () => false)")
+        is False
     )
-    assert whole["status"] == 200
-    assert sliced == {
-        "status": 206,
-        "range": f"bytes 1-3/{len(whole['bytes'])}",
-        "bytes": whole["bytes"][1:4],
-    }
 
     answer(page, "Unknown")
     answer(page, "Known")
     assert event_rows(database) == []
-    expect(page.locator("#sync-status")).to_contain_text("offline · 2 waiting")
+    expect(page.locator("#status")).to_contain_text("Offline · 2 reviews waiting")
     page.context.set_offline(False)
     page.evaluate("window.__onlineForTest = true")
     page.evaluate("window.dispatchEvent(new Event('online'))")
     assert [row["rating"] for row in wait_for_rows(database, 2)] == ["again", "good"]
     wait_for_store_ids(page, "events", [])
-
-    page.context.set_offline(True)
-    put_outbox_events(
-        page,
-        [
-            {
-                "id": "00000000-0000-0000-0000-000000000201",
-                "word_id": "word-2",
-                "action": "known",
-                "reviewed_at": "2026-01-01T00:00:00Z",
-            }
-        ],
-    )
-    page.evaluate("window.clearPrivateCaches()")
-    private_keys, db_state = private_storage_state(page)
-    assert private_keys == []
-    assert db_state == [[], [], []]
+    expect(page.locator("#status")).to_be_hidden()
 
 
 @pytest.mark.e2e
-def test_production_logout_aborts_preload_and_preserves_unsynced_data_until_confirmed(
+def test_production_logout_preserves_unsynced_data_until_confirmed(
     page: Page, production_auth_server: tuple[str, Path]
 ) -> None:
     base_url, _ = production_auth_server
-    aborts: list[bool] = []
-    page.expose_function("recordPreloadAbort", lambda: aborts.append(True))
-    page.add_init_script(
-        """(() => {
-          const nativeFetch = window.fetch.bind(window);
-          window.fetch = (input, init = {}) => {
-            const url = typeof input === "string" ? input : input.url;
-            if (!url.includes("/api/v1/audio/")) return nativeFetch(input, init);
-            return new Promise((resolve, reject) => {
-              init.signal?.addEventListener("abort", () => {
-                window.recordPreloadAbort();
-                reject(new DOMException("Aborted", "AbortError"));
-              }, {once: true});
-            });
-          };
-        })()"""
-    )
     page.goto(base_url)
     page.locator("#password").fill("browser-password")
     page.get_by_role("button", name="Sign in").click()
     expect(page).to_have_url(f"{base_url}/")
-    page.wait_for_function(
-        """() => window.__pwa.getAudioCacheState().expected > 0 &&
-          !window.__pwa.getAudioCacheState().ready"""
-    )
+    expect(page.locator("#card")).to_have_text("Choose Known or Unknown.")
 
     pending_id = "00000000-0000-0000-0000-000000000202"
+    event = {
+        "id": pending_id,
+        "word_id": "protected-0",
+        "action": "known",
+        "reviewed_at": "2026-01-01T00:00:00Z",
+        "intent": "review",
+    }
     page.context.set_offline(True)
-    put_outbox_events(
-        page,
-        [
-            {
-                "id": pending_id,
-                "word_id": "protected-0",
-                "action": "known",
-                "reviewed_at": "2026-01-01T00:00:00Z",
-            }
-        ],
-    )
+    put_outbox_events(page, [event])
     page.get_by_role("button", name="Logout", exact=True).click()
-    expect(page.locator("#notice")).to_have_text(
+    expect(page.locator("#status")).to_have_text(
         "You are offline. Sign-out was not sent and local study data was kept."
     )
     wait_for_store_ids(page, "events", [pending_id])
@@ -763,29 +671,16 @@ def test_production_logout_aborts_preload_and_preserves_unsynced_data_until_conf
     page.route("**/api/v1/review-events/batch", lambda route: route.abort())
     page.context.set_offline(False)
     page.evaluate("window.dispatchEvent(new Event('online'))")
-    put_outbox_events(
-        page,
-        [
-            {
-                "id": pending_id,
-                "word_id": "protected-0",
-                "action": "known",
-                "reviewed_at": "2026-01-01T00:00:00Z",
-            }
-        ],
-    )
+    put_outbox_events(page, [event])
     page.once("dialog", lambda dialog: dialog.dismiss())
     page.get_by_role("button", name="Logout", exact=True).click()
-    expect(page.locator("#notice")).to_contain_text("Sign-out was cancelled")
+    expect(page.locator("#status")).to_contain_text("Sign-out was cancelled")
     wait_for_store_ids(page, "events", [pending_id])
 
     page.once("dialog", lambda dialog: dialog.accept())
     page.get_by_role("button", name="Logout", exact=True).click()
     expect(page).to_have_url(f"{base_url}/login")
-    assert aborts
     cookie_names = [cookie["name"] for cookie in page.context.cookies()]
     assert "vocab-session" not in cookie_names and "vocab-csrf" not in cookie_names
-    private_keys, db_values = private_storage_state(page)
-    assert private_keys == []
-    assert db_values == [[], [], []]
+    assert private_storage_state(page) == [[], [], []]
     assert page.evaluate("fetch('/api/v1/sets').then((response) => response.status)") == 401

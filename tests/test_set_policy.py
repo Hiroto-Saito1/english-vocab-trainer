@@ -25,10 +25,11 @@ def words(count: int) -> list[Word]:
 
 class SetRepository:
     def __init__(self, candidates: list[Word], due: list[Word]) -> None:
-        self.candidates = candidates
+        due_ids = {word.id for word in due}
+        self.candidates = [word for word in candidates if word.id not in due_ids]
         self.due = due
 
-    def list_words(self, *, limit: int = 100) -> list[Word]:
+    def new_words_by_level(self, *, limit: int = 100) -> list[Word]:
         return self.candidates[:limit]
 
     def due_words(self, now: datetime, limit: int) -> list[Word]:
@@ -75,18 +76,16 @@ def test_new_admission_uses_lowest_non_null_levels_and_null_last() -> None:
         Word(str(index), f"term {index}", level, None, f"{index}.mp3", Tier.UPPER)
         for index, level in enumerate([None, 8, 2, 5, None, 1] * 10)
     ]
-    selected = select(SetRepository(list(reversed(candidates)), []), seed=11)
+    ordered = sorted(
+        candidates,
+        key=lambda word: (
+            word.level is None,
+            word.level if word.level is not None else 0,
+            word.id,
+        ),
+    )
+    selected = select(SetRepository(ordered, []), seed=11)
     admitted = {word.id for word in selected}
-    expected = {
-        word.id
-        for word in sorted(
-            candidates,
-            key=lambda word: (
-                word.level is None,
-                word.level if word.level is not None else 0,
-                word.id,
-            ),
-        )[:30]
-    }
+    expected = {word.id for word in ordered[:30]}
     assert admitted == expected
     assert all(word.level is not None for word in selected)

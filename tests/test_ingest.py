@@ -203,7 +203,7 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
     publish_records(database, records, root=tmp_path)
     repository = SQLiteVocabularyRepository(database)
     try:
-        words = repository.list_words(limit=30)
+        words = repository.new_words_by_level(limit=30)
         assert len(words) == 20 and words[0].transcript is not None
     finally:
         repository.close()
@@ -215,7 +215,7 @@ def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_pa
     publish_records(database, records, audio_backend="r2", root=tmp_path)
     repository = SQLiteVocabularyRepository(database)
     try:
-        words = repository.list_words(limit=30)
+        words = repository.new_words_by_level(limit=30)
         assert len(words) == 20
         assert {word.audio_key for word in words} == {
             r2_audio_key(record.checksum) for record in records

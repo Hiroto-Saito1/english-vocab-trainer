@@ -20,15 +20,9 @@ from english_vocab_trainer.ports.repositories import VocabularyRepository
 
 def select_set_words(repo: VocabularyRepository, now: datetime, rng: Random) -> list[Word]:
     """Admit due cards first, then the lowest-level unseen words, up to 30."""
-    unseen = sorted(
-        repo.list_words(limit=10_000),
-        key=lambda word: (word.level is None, word.level if word.level is not None else 0, word.id),
-    )
     target = 30
     due = repo.due_words(now, target)
-    due_ids = {word.id for word in due}
-    quota = max(0, target - len(due))
-    selected = due + [word for word in unseen if word.id not in due_ids][:quota]
+    selected = due + repo.new_words_by_level(limit=target - len(due))
     # Admission is deterministic by due time and difficulty; presentation is not.
     return rng.sample(selected, k=len(selected))
 

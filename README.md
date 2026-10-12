@@ -95,23 +95,15 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 ## 学習とオフライン動作
 
-カードは最初から term、tier、英語の transcript / definition を表示します。音声操作は browser 標準の audio controls だけで、自動再生や別の Play / Replay ボタンはありません。未回答カードでは **Previous / Unknown / Known**、履歴中では **Previous / Next / Unknown / Known**、再学習待ちでは **Previous**、set 完了後では **Previous / Next set** だけを表示します。Known / Unknown は回答確定と未回答カードへの自動移動を兼ねます。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
+カードは最初から term、tier、英語の transcript / definition を表示します。音声操作は browser 標準の audio controls だけで、自動再生や別の Play / Replay ボタンはありません。移動用の **Previous / Next** と回答用の **Unknown / Known** は別の固定行に表示します。未回答カードでは Previous（履歴があるとき）と Unknown / Known、履歴中では Previous / Next と Unknown / Known、非空 set 完了後では Previous / Next set を使います。`catalog_empty` と `next_due` では Next set を表示しません。Known は常に FSRS の Good、Unknown は常に Again です。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
 
-**Previous / Next** は現在の set 内の回答履歴と未回答境界を往復するだけで、review event を変更しません。履歴カードで同じ回答を選ぶと書き込まず次へ進み、異なる回答を選ぶと元 event の void intent と新しい UUID の review を同じ IndexedDB transaction で保存します。訂正では元の `reviewed_at` を維持し、通信結果が不明な event も消さずに冪等再送で適用を確定してから void します。新しい回答の outbox 追加と履歴進行、履歴訂正の void / review と進行更新はそれぞれ atomic です。
+**Previous / Next** は現在の set 内の回答履歴と未回答境界を往復するだけで、review event を変更しません。履歴カードでは保存済みの回答ボタンを選択済みの disabled 状態にし、変更しない場合は Next で進みます。反対の回答を選ぶと、元 event の void intent と新しい UUID の review を同じ IndexedDB transaction で保存して次へ進みます。訂正では元の `reviewed_at` を維持し、通信結果が不明な event も消さずに冪等再送で適用を確定してから void します。
 
-server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、残りは level の低い新規語を優先して、level 不明を最後にします。採用後の提示順だけを shuffle します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。**Next set** を押したときだけ server から再取得します。新 set は IndexedDB への保存が完了してから画面に反映し、audio cache の失敗とは別に扱います。pending または隔離 review が 1 件でもあれば次 set は開始できません。
+server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、不足分だけ level の低い新規語を取得し、level 不明を最後にします。採用後の提示順だけを shuffle します。Unknown はそのまま次カードへ進み、client 内で 10 分後の再出題はしません。FSRS の Again と期限は server に保存し、期限到来後の将来の set で再選出します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。新 set は IndexedDB への保存完了後に画面へ反映し、pending または隔離 review が 1 件でもあれば開始できません。
 
-Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。再学習対象は履歴の各語の最新回答から導出し、別 queue は保存しません。進捗は初回カードと再学習を分けて表示します。待機中は Previous で履歴を見返せますが、Next set は開始できません。次の set は現在の set と再学習が完了した後に明示的に開始します。
+同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、必要なときだけ UUID・語・回答・理由を表示します。通常時は network / sync / cache の技術 status を表示せず、offline、pending、terminal error、network / server error を 1 つの status 領域に簡潔に表示します。アプリは単一 tab での利用を前提とします。
 
-同期表示は network、server HTTP error、再試行不能な conflict/missing、audio cache を別々に扱います。同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、UUID・語・回答・理由を表示します。利用者は 1 件ずつ再試行または確認付きで破棄できます。通常の同期成功時は過去の一時的な network/server error 表示を解消します。
-
-同じ browser profile では Web Locks により学習を変更できる tab を 1 つに限定します。他の tab は BroadcastChannel で保存済み state を追従する読み取り専用画面となります。active tab を閉じると待機中の tab が lock を取得して学習を継続できます。空状態は `next_due`、catalog 未投入の `catalog_empty`、local の同期阻害を区別し、期限がある場合は次回時刻を表示します。表示状態が変わるたびに主要操作へ focus を移し、非表示要素には focus を残しません。
-
-オンラインで学習対象を取得すると、PWA は全ての full `200` audio response を private Cache Storage へ preload します。失敗しても online 再生は継続できます。新しい学習対象では古い audio cache を先に削除し、中断した保存済み学習を開き直す場合は対応する audio を保持します。preload の世代は process-local な epoch だけで管理し、古い世代の応答が現在の cache に混入するのを防ぎます。
-
-offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。現在の IndexedDB state format は 3（DB version 4）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。
-
-`window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。進行中の audio preload を `AbortController` で止めて audio cache を削除し、IndexedDB の学習状態、通常 outbox、隔離 event を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
+offline reload でも Service Worker の static shell と IndexedDB に保存した set / 履歴 / outbox を再開できます。Service Worker は API や audio を傾受・cacheせず、audio は online のときだけ native controls から再生できます。現在の IndexedDB state format は 4（DB version 5）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。Logout は server 側の session 失効後に IndexedDB の学習状態、通常 outbox、隔離 event を 1 transaction で空にします。
 
 ## 認証とセキュリティ
 
@@ -122,9 +114,9 @@ uv run python -c 'from argon2 import PasswordHasher; import getpass; print(Passw
 uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-本番 session cookie は `__Host-`、Secure、HttpOnly、SameSite=Strict で、有効期間は 30 日です。別の CSRF cookie は PWA が一致する header を送るためだけに non-HttpOnly とします。どちらも IndexedDB や Cache Storage に保存しません。login/auth と audio 以外の API response は `no-store` です。private full audio だけを PWA の明示的な現行 cache に保存できます。
+本番 session cookie は `__Host-`、Secure、HttpOnly、SameSite=Strict で、有効期間は 30 日です。別の CSRF cookie は PWA が一致する header を送るためだけに non-HttpOnly とします。どちらも IndexedDB や Cache Storage に保存しません。login/auth と audio 以外の API response は `no-store` です。private audio は Cache Storage に保存しません。
 
-パスワード検証は永続化した global limiter で、15 分の rolling window 内に最大 5 回までです。login 成功時に window をクリアします。spoof できる client IP header を信頼せず、local DoS の可能性を受け入れる 1 アカウント用のトレードオフです。Logout は進行中の audio preload を直ちに中断し、未同期または隔離 event があれば確認を求めます。online では server logout が成功して cookie が失効した後だけ端末内 private data を消去します。offline では logout も local 消去も行わず、data を保持したことを明示します。
+パスワード検証は永続化した global limiter で、15 分の rolling window 内に最大 5 回までです。login 成功時に window をクリアします。spoof できる client IP header を信頼せず、local DoS の可能性を受け入れる 1 アカウント用のトレードオフです。Logout は未同期または隔離 event があれば確認を求めます。online では server logout が成功して cookie が失効した後だけ端末内 private data を消去します。offline では logout も local 消去も行わず、data を保持したことを明示します。
 
 本番では Host header を `ALLOWED_HOSTS` または安全に導出した `FLY_APP_NAME.fly.dev` と照合し、HSTS、CSP、`nosniff`、referrer policy、permissions policy を付与します。Uvicorn は Fly の trusted proxy header を有効にし、HTTPS same-origin 検証が元の scheme を参照できるようにします。
 

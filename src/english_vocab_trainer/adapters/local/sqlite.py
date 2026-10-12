@@ -93,7 +93,7 @@ class SQLiteVocabularyRepository:
             Tier(row["tier"]),
         )
 
-    def list_words(self, *, limit: int = 100) -> list[Word]:
+    def new_words_by_level(self, *, limit: int = 100) -> list[Word]:
         query = (
             "SELECT w.* FROM words w WHERE NOT EXISTS("
             "SELECT 1 FROM review_events e "

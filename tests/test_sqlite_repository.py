@@ -51,9 +51,9 @@ def test_list_excludes_active_review_and_void_reincludes_word(tmp_path: Path) ->
         words(repository)
         review = event("nine", datetime.now(UTC))
         repository.append_event(review)
-        assert "nine" not in [word.id for word in repository.list_words()]
+        assert "nine" not in [word.id for word in repository.new_words_by_level()]
         repository.void_event(review.id)
-        assert "nine" in [word.id for word in repository.list_words()]
+        assert "nine" in [word.id for word in repository.new_words_by_level()]
 
 
 def test_due_returns_past_cards_only(tmp_path: Path) -> None:

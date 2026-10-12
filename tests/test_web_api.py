@@ -27,7 +27,8 @@ def test_service_worker_is_root_scoped(tmp_path: Path) -> None:
     assert (
         response.status_code == 200
         and response.headers["service-worker-allowed"] == "/"
-        and "cachedAudioRange" in response.text
+        and "pwa-shell-v7" in response.text
+        and "/api/v1/audio/" not in response.text
     )
 
 

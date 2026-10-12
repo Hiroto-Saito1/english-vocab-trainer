@@ -37,7 +37,7 @@ def test_set_admits_thirty_lowest_level_words_without_persisting_selection(
     assert len({item["id"] for item in selected}) == 30
     assert {item["id"] for item in selected} == {str(index) for index in range(10, 40)}
     assert "id" not in payload and "mode" not in payload and "created_at" not in payload
-    assert payload["learning_step_seconds"] == 600
+    assert "learning_step_seconds" not in payload
     assert payload["status"] == "ready" and payload["next_due"] is None
 
 
@@ -49,7 +49,6 @@ def test_empty_set_is_returned(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "items": [],
-        "learning_step_seconds": 600,
         "status": "catalog_empty",
         "next_due": None,
     }

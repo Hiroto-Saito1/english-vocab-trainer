@@ -20,7 +20,6 @@ from english_vocab_trainer.adapters.local.database import SchemaMismatchError
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.application.services import select_set_words, submit_review
 from english_vocab_trainer.domain.models import (
-    LEARNING_STEP,
     ReviewAction,
     Tier,
     Word,
@@ -78,7 +77,6 @@ class WordOut(BaseModel):
 
 class SetOut(BaseModel):
     items: list[WordOut]
-    learning_step_seconds: int
     status: Literal["ready", "next_due", "catalog_empty"]
     next_due: datetime | None = None
 
@@ -231,7 +229,6 @@ def study_set(repository: Repository) -> SetOut:
         status, next_due = repository.empty_set_status(now)
     return SetOut(
         items=[word_out(word) for word in words],
-        learning_step_seconds=int(LEARNING_STEP.total_seconds()),
         status=status,
         next_due=next_due,
     )
