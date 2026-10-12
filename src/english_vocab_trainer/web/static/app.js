@@ -1,10 +1,11 @@
 const DB_NAME = "english-vocab-trainer";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STATE_KEY = "active-set";
-const STATE_FORMAT = 1;
-const AUDIO_CACHE = "pwa-private-audio-v4";
+const STATE_FORMAT = 2;
+const AUDIO_CACHE = "pwa-private-audio-v5";
 const AUDIO_PRELOAD_CONCURRENCY = 4;
 const SYNC_BATCH_SIZE = 100;
+const STUDY_LOCK = "english-vocab-trainer-active-study";
 
 const emptyState = () => ({
   format: STATE_FORMAT,
@@ -12,46 +13,62 @@ const emptyState = () => ({
   current: 0,
   active: null,
   phase: "unavailable",
-  event: null,
+  previous: null,
   learningQueue: [],
   learningStepSeconds: 600,
   finished: false,
+  emptyReason: null,
+  nextDue: null,
 });
 
 let state = emptyState();
 let busy = false;
+let readOnly = true;
+let releaseStudyLock = null;
+let queuedStudyLock = null;
+let booted = false;
 let syncFlight = null;
+let syncRequested = false;
 let syncProblem = null;
+let syncSummary = { pending: [], failed: [] };
 let learningTimer = null;
 let audioCacheState = { expected: 0, cached: 0, ready: false, failed: 0 };
+let audioCacheProblem = null;
 let audioCacheEpoch = 0;
 let preloadController = null;
 let preloadFlight = null;
 let audioPresentation = null;
+let lastView = null;
 
+const stateChannel = "BroadcastChannel" in window
+  ? new BroadcastChannel("english-vocab-trainer-state-v2")
+  : null;
 const $ = (selector) => document.querySelector(selector);
 const card = $("#card");
 const term = $("#term");
 const tier = $("#tier");
 const transcript = $("#transcript");
 const audio = $("#audio");
+const previousButton = $("#previous");
 const replayButton = $("#replay");
 const showAnswerButton = $("#show-answer");
 const knownButton = $("#known");
 const unknownButton = $("#unknown");
 const nextSetButton = $("#next-set");
 const finishButton = $("#finish");
+const retrySyncButton = $("#retry-sync");
 const excludeButton = $("#exclude");
-const undoButton = $("#undo");
-const discardFailedButton = $("#discard-failed");
 const manageExclusionsButton = $("#manage-exclusions");
-const exclusions = $("#exclusions");
+const wordManagement = $("#word-management");
 const exclusionsList = $("#exclusions-list");
 const exclusionsEmpty = $("#exclusions-empty");
+const syncIssues = $("#sync-issues");
+const syncIssuesList = $("#sync-issues-list");
 const progress = $("#progress");
 const networkStatus = $("#network-status");
 const syncStatus = $("#sync-status");
 const cacheStatus = $("#cache-status");
+const readOnlyStatus = $("#readonly-status");
 const notice = $("#notice");
 const logoutButton = $("#logout");
 
@@ -83,15 +100,17 @@ async function apiFetch(url, options = {}) {
 function openDb() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains("events")) {
-        request.result.createObjectStore("events", { keyPath: "id" });
+    request.onupgradeneeded = (event) => {
+      const db = request.result;
+      for (const name of ["events", "failedEvents", "state"]) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name, { keyPath: name === "state" ? "key" : "id" });
+        }
       }
-      if (!request.result.objectStoreNames.contains("failedEvents")) {
-        request.result.createObjectStore("failedEvents", { keyPath: "id" });
-      }
-      if (!request.result.objectStoreNames.contains("state")) {
-        request.result.createObjectStore("state", { keyPath: "key" });
+      if (event.oldVersion > 0) {
+        for (const name of ["events", "failedEvents", "state"]) {
+          request.transaction.objectStore(name).clear();
+        }
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -117,7 +136,12 @@ async function transaction(storeNames, mode, action) {
       db.close();
       reject(tx.error);
     };
-    value = action(tx);
+    try {
+      value = action(tx);
+    } catch (error) {
+      tx.abort();
+      reject(error);
+    }
   });
 }
 
@@ -128,51 +152,65 @@ function requestValue(request) {
   });
 }
 
-const getState = () => transaction("state", "readonly", (tx) => requestValue(tx.objectStore("state").get(STATE_KEY)).then((record) => record?.value));
-const saveState = () => transaction("state", "readwrite", (tx) => tx.objectStore("state").put({ key: STATE_KEY, value: state }));
-const addEvent = (event) => transaction("events", "readwrite", (tx) => tx.objectStore("events").put(event));
-const removeEvent = (id) => transaction("events", "readwrite", (tx) => tx.objectStore("events").delete(id));
-const allEvents = () => transaction("events", "readonly", (tx) => requestValue(tx.objectStore("events").getAll()));
-const allFailedEvents = () => transaction("failedEvents", "readonly", (tx) => requestValue(tx.objectStore("failedEvents").getAll()));
-const removeFailedEvent = (id) => transaction("failedEvents", "readwrite", (tx) => tx.objectStore("failedEvents").delete(id));
-
-function quarantineEvent(event, terminalStatus) {
-  return transaction(["events", "failedEvents"], "readwrite", (tx) => {
-    tx.objectStore("failedEvents").put({ ...event, terminalStatus });
-    tx.objectStore("events").delete(event.id);
-  });
-}
-
-function nowMs() {
-  return window.__pwaTestClock?.now?.() ?? Date.now();
-}
+const getState = () => transaction(
+  "state",
+  "readonly",
+  (tx) => requestValue(tx.objectStore("state").get(STATE_KEY)).then((record) => record?.value),
+);
+const writeState = (next) => transaction(
+  "state",
+  "readwrite",
+  (tx) => tx.objectStore("state").put({ key: STATE_KEY, value: next }),
+);
+const allEvents = () => transaction(
+  "events", "readonly", (tx) => requestValue(tx.objectStore("events").getAll()),
+);
+const allFailedEvents = () => transaction(
+  "failedEvents", "readonly", (tx) => requestValue(tx.objectStore("failedEvents").getAll()),
+);
 
 function validState(saved) {
-  return saved?.format === STATE_FORMAT && Array.isArray(saved.cards) && Array.isArray(saved.learningQueue);
+  return saved?.format === STATE_FORMAT
+    && Array.isArray(saved.cards)
+    && Array.isArray(saved.learningQueue);
 }
 
 function clone(value) {
   return structuredClone(value);
 }
 
-function dueLearning() {
-  return state.learningQueue
+function broadcastState() {
+  stateChannel?.postMessage({ type: "state-changed" });
+}
+
+async function commitState(next) {
+  await writeState(next);
+  state = next;
+  broadcastState();
+}
+
+function dueLearning(target) {
+  return target.learningQueue
     .filter((item) => item.due_at <= nowMs())
     .sort((left, right) => left.due_at - right.due_at)[0] || null;
 }
 
-function chooseNextCard() {
-  if (state.finished || state.active) return;
-  const learning = dueLearning();
+function chooseNextCard(target) {
+  if (target.finished || target.active) return;
+  const learning = dueLearning(target);
   if (learning) {
-    state.active = { kind: "learning", word: learning.word };
-    state.phase = "listening";
+    target.active = { kind: "learning", word: learning.word };
+    target.phase = "listening";
     return;
   }
-  if (state.current < state.cards.length) {
-    state.active = { kind: "initial", word: state.cards[state.current] };
-    state.phase = "listening";
+  if (target.current < target.cards.length) {
+    target.active = { kind: "initial", word: target.cards[target.current] };
+    target.phase = "listening";
   }
+}
+
+function nowMs() {
+  return window.__pwaTestClock?.now?.() ?? Date.now();
 }
 
 function remainingInitial() {
@@ -189,7 +227,9 @@ function updateNetworkStatus() {
 }
 
 function updateCacheStatus() {
-  if (!audioCacheState.expected) {
+  if (audioCacheProblem) {
+    cacheStatus.textContent = audioCacheProblem;
+  } else if (!audioCacheState.expected) {
     cacheStatus.textContent = "Audio cache: no cards";
   } else if (!audioCacheState.ready) {
     cacheStatus.textContent = `Audio cache: ${audioCacheState.cached}/${audioCacheState.expected}`;
@@ -200,11 +240,38 @@ function updateCacheStatus() {
   }
 }
 
+function normalizedEvent(event) {
+  return { ...event, intent: event.intent || "review" };
+}
+
+function renderSyncIssues(failed) {
+  syncIssuesList.replaceChildren();
+  syncIssues.hidden = failed.length === 0;
+  for (const record of failed) {
+    const event = normalizedEvent(record);
+    const item = document.createElement("li");
+    const detail = document.createElement("p");
+    detail.textContent = `${event.word_id}: ${event.action} · ${event.terminalStatus} · ${event.id}`;
+    const retry = document.createElement("button");
+    retry.textContent = "Retry this review";
+    retry.disabled = readOnly;
+    retry.addEventListener("click", () => retryFailedEvent(event.id));
+    const dismiss = document.createElement("button");
+    dismiss.textContent = "Dismiss this review";
+    dismiss.disabled = readOnly;
+    dismiss.addEventListener("click", () => dismissFailedEvent(event.id));
+    item.append(detail, retry, dismiss);
+    syncIssuesList.append(item);
+  }
+}
+
 async function refreshSyncStatus() {
   const [pending, failed] = await Promise.all([allEvents(), allFailedEvents()]);
-  discardFailedButton.hidden = failed.length === 0;
+  syncSummary = { pending, failed };
+  retrySyncButton.hidden = pending.length + failed.length === 0 || readOnly;
+  renderSyncIssues(failed);
   if (failed.length) {
-    syncStatus.textContent = `Sync: ${failed.length} review${failed.length === 1 ? "" : "s"} need attention and will not be retried.`;
+    syncStatus.textContent = `Sync: ${failed.length} review${failed.length === 1 ? "" : "s"} need attention.`;
   } else if (!navigator.onLine && pending.length) {
     syncStatus.textContent = `Sync: offline · ${pending.length} waiting.`;
   } else if (syncProblem) {
@@ -214,7 +281,7 @@ async function refreshSyncStatus() {
   } else {
     syncStatus.textContent = "Sync: all reviews saved.";
   }
-  return { pending, failed };
+  return syncSummary;
 }
 
 function playAudio(showFailure = true) {
@@ -235,7 +302,7 @@ function presentAudio() {
   audioPresentation = identity;
   audio.src = state.active.word.audio_url;
   audio.currentTime = 0;
-  playAudio(false);
+  if (!readOnly) playAudio(false);
 }
 
 function clearLearningTimer() {
@@ -245,71 +312,117 @@ function clearLearningTimer() {
 
 function armLearningTimer() {
   clearLearningTimer();
-  if (state.finished || state.active || !state.learningQueue.length) return;
+  if (readOnly || state.finished || state.active || !state.learningQueue.length) return;
   const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
-  const delay = Math.max(0, earliest - nowMs());
-  learningTimer = setTimeout(wakeForLearning, delay);
+  learningTimer = setTimeout(wakeForLearning, Math.max(0, earliest - nowMs()));
 }
 
 async function wakeForLearning() {
-  chooseNextCard();
-  await saveState();
+  if (readOnly) return;
+  const next = clone(state);
+  chooseNextCard(next);
+  if (next.active) await commitState(next);
   render();
 }
 
-function setVisible(button, visible) {
+function setVisible(button, visible, enabled = true) {
   button.hidden = !visible;
-  button.disabled = busy;
+  button.disabled = busy || readOnly || !enabled;
+}
+
+function currentView() {
+  if (readOnly) return "readonly";
+  if (state.active) return state.phase;
+  if (!state.finished && state.learningQueue.length) return "waiting";
+  return "complete";
+}
+
+function focusPrimary(view) {
+  const target = {
+    listening: showAnswerButton,
+    answer: unknownButton,
+    waiting: finishButton,
+    complete: nextSetButton,
+  }[view];
+  if (target && !target.hidden && !target.disabled) target.focus();
+}
+
+function emptyMessage(syncBlocked) {
+  if (syncBlocked) return "Sync is blocked. Review the saved errors or retry before starting the next set.";
+  if (state.finished) return "Set complete. Start the next set when you are ready.";
+  if (state.emptyReason === "next_due") {
+    const next = state.nextDue ? new Date(state.nextDue).toLocaleString() : "later";
+    return `All caught up. The next review is due ${next}.`;
+  }
+  if (state.emptyReason === "all_suspended") {
+    return "All words are suspended. Restore a word to study again.";
+  }
+  if (state.emptyReason === "catalog_empty") {
+    return "The catalog is empty. Publish a catalog before studying.";
+  }
+  return state.cards.length ? "Set complete." : "All caught up. Nothing is due.";
 }
 
 function render() {
   clearLearningTimer();
   updateNetworkStatus();
   updateCacheStatus();
-  notice.textContent = notice.textContent || "";
   const active = state.active;
   const listening = Boolean(active) && state.phase === "listening";
   const answering = Boolean(active) && state.phase === "answer";
+  const waiting = !active && !state.finished && state.learningQueue.length > 0;
+  const complete = !active && !waiting;
+  const syncBlocked = complete && syncSummary.pending.length + syncSummary.failed.length > 0;
+  const view = currentView();
+
+  readOnlyStatus.hidden = !readOnly;
+  logoutButton.disabled = busy || readOnly;
+  wordManagement.hidden = readOnly;
   progress.textContent = `Initial: ${remainingInitial()} remaining · Relearning: ${state.learningQueue.length}`;
-  setVisible(replayButton, Boolean(active));
+  setVisible(previousButton, Boolean(active) || waiting || complete, Boolean(state.previous));
+  setVisible(replayButton, listening);
   setVisible(showAnswerButton, listening);
   setVisible(knownButton, answering);
   setVisible(unknownButton, answering);
+  setVisible(finishButton, waiting);
+  setVisible(nextSetButton, complete, navigator.onLine && !syncBlocked);
   setVisible(excludeButton, Boolean(active));
-  setVisible(undoButton, Boolean(state.event));
-  setVisible(finishButton, !active && !state.finished && state.learningQueue.length > 0);
-  setVisible(nextSetButton, !active && (state.finished || state.learningQueue.length === 0));
 
   term.hidden = !answering;
   tier.hidden = !answering;
   transcript.hidden = !answering;
   if (active) {
-    card.textContent = listening ? "Listen to the word, then show the answer." : "Review the answer, then choose Known or Unknown.";
+    card.textContent = listening
+      ? "Listen to the word, then show the answer."
+      : "Review the answer, then choose Known or Unknown.";
     term.textContent = active.word.term;
     tier.textContent = formatTier(active.word);
     transcript.textContent = active.word.transcript || "Transcript is unavailable.";
     presentAudio();
-    return;
+  } else {
+    presentAudio();
+    if (state.phase === "unavailable") {
+      card.textContent = readOnly
+        ? "Waiting for the active study tab to load a set."
+        : "Reconnect to start a study set.";
+      progress.textContent = "No set loaded";
+      nextSetButton.hidden = true;
+    } else if (waiting) {
+      const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
+      const seconds = Math.max(0, Math.ceil((earliest - nowMs()) / 1000));
+      card.textContent = `Waiting for relearning: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
+      armLearningTimer();
+    } else {
+      card.textContent = emptyMessage(syncBlocked);
+    }
   }
-  presentAudio();
-  if (state.phase === "unavailable") {
-    card.textContent = "Reconnect to start a study set.";
-    progress.textContent = "No set loaded";
-    nextSetButton.hidden = true;
-    return;
+
+  const focused = document.activeElement;
+  if (focused?.hidden || focused?.closest("[hidden]")) focused.blur();
+  if (view !== lastView) {
+    lastView = view;
+    requestAnimationFrame(() => focusPrimary(view));
   }
-  if (state.finished) {
-    card.textContent = "Finished for now. Start a new set when you are ready.";
-    return;
-  }
-  if (state.learningQueue.length) {
-    const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
-    const seconds = Math.max(0, Math.ceil((earliest - nowMs()) / 1000));
-    card.textContent = `Waiting for relearning: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
-    armLearningTimer();
-    return;
-  }
-  card.textContent = state.cards.length ? "Set complete." : "All caught up. Nothing is due.";
 }
 
 function sendWorkerMessage(data) {
@@ -337,10 +450,10 @@ function sendWorkerMessage(data) {
   });
 }
 
-function audioUrls() {
+function audioUrls(target = state) {
   return [...new Set([
-    ...state.cards.map((word) => word.audio_url),
-    ...state.learningQueue.map((item) => item.word.audio_url),
+    ...target.cards.slice(target.current).map((word) => word.audio_url),
+    ...target.learningQueue.map((item) => item.word.audio_url),
   ])];
 }
 
@@ -368,6 +481,7 @@ async function configureAudioCache(rotate) {
 async function preload(signal, epoch) {
   const urls = audioUrls();
   audioCacheState = { expected: urls.length, cached: 0, ready: false, failed: 0 };
+  audioCacheProblem = null;
   updateCacheStatus();
   const cache = await caches.open(AUDIO_CACHE);
   let next = 0;
@@ -401,90 +515,157 @@ function startPreload() {
   const epoch = audioCacheEpoch;
   const flight = preload(controller.signal, epoch);
   preloadFlight = flight;
-  flight.finally(() => {
+  flight.catch(() => {
+    if (!controller.signal.aborted) {
+      audioCacheProblem = "Audio cache is unavailable; listening still works online.";
+      updateCacheStatus();
+    }
+  }).finally(() => {
     if (preloadFlight === flight) preloadFlight = null;
     if (preloadController === controller) preloadController = null;
   });
   return flight;
 }
 
+async function quarantineEvent(snapshot, terminalStatus) {
+  await transaction(["events", "failedEvents"], "readwrite", async (tx) => {
+    const events = tx.objectStore("events");
+    const current = await requestValue(events.get(snapshot.id));
+    if (!current) return;
+    tx.objectStore("failedEvents").put({ ...current, terminalStatus });
+    events.delete(snapshot.id);
+  });
+}
+
+async function removeSyncedEvent(snapshot) {
+  await transaction("events", "readwrite", async (tx) => {
+    const store = tx.objectStore("events");
+    const current = await requestValue(store.get(snapshot.id));
+    if ((current?.intent || "review") === snapshot.intent) store.delete(snapshot.id);
+  });
+}
+
+async function acknowledgeReview(snapshot, result) {
+  let updatedState = null;
+  await transaction(["events", "state"], "readwrite", async (tx) => {
+    const events = tx.objectStore("events");
+    const current = await requestValue(events.get(snapshot.id));
+    if ((current?.intent || "review") !== snapshot.intent) return;
+    if (snapshot.action === "unknown" && result.due_at) {
+      const states = tx.objectStore("state");
+      const record = await requestValue(states.get(STATE_KEY));
+      if (validState(record?.value)) {
+        const next = clone(record.value);
+        const queued = next.learningQueue.find((item) => item.eventId === snapshot.id);
+        const dueAt = Date.parse(result.due_at);
+        if (queued && Number.isFinite(dueAt)) {
+          queued.due_at = dueAt;
+          states.put({ key: STATE_KEY, value: next });
+          updatedState = next;
+        }
+      }
+    }
+    events.delete(snapshot.id);
+  });
+  if (updatedState) {
+    state = updatedState;
+    broadcastState();
+  }
+}
+
+async function syncChunk(chunk) {
+  const response = await apiFetch("/api/v1/review-events/batch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(chunk.map((event) => ({
+      id: event.id,
+      word_id: event.word_id,
+      action: event.action,
+      reviewed_at: event.reviewed_at,
+    }))),
+  });
+  if (!response.ok) {
+    syncProblem = `server error (HTTP ${response.status}); reviews kept for retry.`;
+    return false;
+  }
+  const payload = await response.json();
+  const resultById = new Map(payload.results.map((result) => [result.id, result]));
+  for (const snapshot of chunk) {
+    const result = resultById.get(snapshot.id);
+    if (!result) {
+      syncProblem = "server response omitted a review; it was kept for retry.";
+      return false;
+    }
+    if (["conflict", "missing"].includes(result.status)) {
+      await quarantineEvent(snapshot, result.status);
+      continue;
+    }
+    if (snapshot.intent === "void" && result.status !== "voided") {
+      const voided = await apiFetch(`/api/v1/review-events/${snapshot.id}/void`, { method: "POST" });
+      if (voided.status === 404) {
+        await quarantineEvent(snapshot, "missing");
+      } else if (voided.status === 204) {
+        await removeSyncedEvent(snapshot);
+      } else {
+        syncProblem = `server error (HTTP ${voided.status}); undo kept for retry.`;
+        return false;
+      }
+    } else if (snapshot.intent === "void") {
+      await removeSyncedEvent(snapshot);
+    } else {
+      await acknowledgeReview(snapshot, result);
+    }
+  }
+  return true;
+}
+
 async function sync() {
+  if (readOnly) return;
+  syncRequested = true;
   if (syncFlight) return syncFlight;
   syncFlight = (async () => {
-    const events = await allEvents();
-    if (!events.length) {
-      syncProblem = null;
-      await refreshSyncStatus();
-      return;
-    }
-    if (!navigator.onLine) {
-      await refreshSyncStatus();
-      return;
-    }
-    try {
+    while (navigator.onLine) {
+      syncRequested = false;
+      const events = (await allEvents()).map(normalizedEvent);
+      if (!events.length) break;
+      let completed = true;
       for (let offset = 0; offset < events.length; offset += SYNC_BATCH_SIZE) {
-        const chunk = events.slice(offset, offset + SYNC_BATCH_SIZE);
-        const response = await apiFetch("/api/v1/review-events/batch", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(chunk.map((event) => ({
-            id: event.id,
-            word_id: event.word_id,
-            action: event.action,
-            reviewed_at: event.reviewed_at,
-          }))),
-        });
-        if (!response.ok) {
-          syncProblem = `server error (HTTP ${response.status}); reviews kept for retry.`;
-          await refreshSyncStatus();
-          return;
+        if (!await syncChunk(events.slice(offset, offset + SYNC_BATCH_SIZE))) {
+          completed = false;
+          break;
         }
-        const payload = await response.json();
-        const eventById = new Map(chunk.map((event) => [event.id, event]));
-        for (const result of payload.results) {
-          const event = eventById.get(result.id);
-          if (!event) continue;
-          if (["conflict", "missing"].includes(result.status)) {
-            await quarantineEvent(event, result.status);
-            continue;
-          }
-          if (["applied", "idempotent", "voided"].includes(result.status)) {
-            if (event.action === "unknown" && result.due_at) {
-              const dueAt = Date.parse(result.due_at);
-              const queued = state.learningQueue.find((item) => item.eventId === event.id);
-              if (queued && Number.isFinite(dueAt)) queued.due_at = dueAt;
-            }
-            await removeEvent(event.id);
-          }
-        }
-        await saveState();
       }
-      syncProblem = null;
-      render();
-      await refreshSyncStatus();
-    } catch (_) {
-      syncProblem = navigator.onLine
-        ? "network error; reviews kept for retry."
-        : null;
-      await refreshSyncStatus();
+      if (!completed) break;
     }
-  })();
+    if (!navigator.onLine && (await allEvents()).length) syncProblem = null;
+    else if (!(await allEvents()).length) syncProblem = null;
+    await refreshSyncStatus();
+    render();
+    stateChannel?.postMessage({ type: "outbox-changed" });
+  })().catch(async () => {
+    syncProblem = navigator.onLine ? "network error; reviews kept for retry." : null;
+    await refreshSyncStatus();
+    render();
+    stateChannel?.postMessage({ type: "outbox-changed" });
+  });
   try {
     await syncFlight;
   } finally {
     syncFlight = null;
+    if (syncRequested && navigator.onLine) void sync();
   }
 }
 
 async function showAnswer() {
-  if (busy || !state.active || state.phase !== "listening") return;
-  state.phase = "answer";
-  await saveState();
+  if (busy || readOnly || !state.active || state.phase !== "listening") return;
+  const next = clone(state);
+  next.phase = "answer";
+  await commitState(next);
   render();
 }
 
 async function answer(action) {
-  if (busy || !state.active || state.phase !== "answer") return;
+  if (busy || readOnly || !state.active || state.phase !== "answer") return;
   busy = true;
   render();
   audio.pause();
@@ -494,89 +675,161 @@ async function answer(action) {
     word_id: active.word.id,
     action,
     reviewed_at: new Date(nowMs()).toISOString(),
+    intent: "review",
     previousCurrent: state.current,
     previousActive: active,
     previousLearningQueue: clone(state.learningQueue),
   };
-  await addEvent(event);
-  if (active.kind === "initial") state.current += 1;
-  state.learningQueue = state.learningQueue.filter((item) => item.word.id !== active.word.id);
+  const next = clone(state);
+  if (active.kind === "initial") next.current += 1;
+  next.learningQueue = next.learningQueue.filter((item) => item.word.id !== active.word.id);
   if (action === "unknown") {
-    state.learningQueue.push({
+    next.learningQueue.push({
       eventId: event.id,
       word: active.word,
-      due_at: nowMs() + state.learningStepSeconds * 1000,
+      due_at: nowMs() + next.learningStepSeconds * 1000,
     });
   }
-  state.event = event;
-  state.active = null;
-  state.phase = "waiting";
-  chooseNextCard();
-  await saveState();
-  busy = false;
-  render();
-  await refreshSyncStatus();
-  void sync();
+  next.previous = event;
+  next.active = null;
+  next.phase = "waiting";
+  chooseNextCard(next);
+  try {
+    await transaction(["events", "state"], "readwrite", (tx) => {
+      tx.objectStore("events").put(event);
+      tx.objectStore("state").put({ key: STATE_KEY, value: next });
+    });
+    state = next;
+    broadcastState();
+    syncRequested = true;
+  } catch (_) {
+    notice.textContent = "The answer could not be saved locally. Please try again.";
+  } finally {
+    try {
+      await refreshSyncStatus();
+    } finally {
+      busy = false;
+      render();
+      void sync();
+    }
+  }
 }
 
-async function undoLast() {
-  if (busy || !state.event) return;
+async function previous() {
+  if (busy || readOnly || !state.previous) return;
   busy = true;
   render();
-  const event = state.event;
-  await sync();
-  const [pending, failed] = await Promise.all([allEvents(), allFailedEvents()]);
+  audio.pause();
+  const event = clone(state.previous);
+  const queued = { ...event, intent: "void" };
+  const next = clone(state);
+  next.current = event.previousCurrent;
+  next.active = event.previousActive;
+  next.learningQueue = event.previousLearningQueue;
+  next.phase = "listening";
+  next.finished = false;
+  next.previous = null;
   try {
-    if (pending.some((item) => item.id === event.id)) {
-      await removeEvent(event.id);
-    } else if (failed.some((item) => item.id === event.id)) {
-      await removeFailedEvent(event.id);
-    } else {
-      const response = await apiFetch(`/api/v1/review-events/${event.id}/void`, { method: "POST" });
-      if (!response.ok) throw new Error("void failed");
-    }
-    state.current = event.previousCurrent;
-    state.active = event.previousActive;
-    state.learningQueue = event.previousLearningQueue;
-    state.phase = "answer";
-    state.finished = false;
-    state.event = null;
-    await saveState();
-    notice.textContent = "The last answer was undone.";
+    await transaction(["events", "failedEvents", "state"], "readwrite", (tx) => {
+      tx.objectStore("events").put(queued);
+      tx.objectStore("failedEvents").delete(event.id);
+      tx.objectStore("state").put({ key: STATE_KEY, value: next });
+    });
+    state = next;
+    lastView = null;
+    broadcastState();
+    notice.textContent = "The previous answer is being undone. Answer the word again when ready.";
+    syncRequested = true;
   } catch (_) {
-    notice.textContent = "Undo could not be completed. Please try again.";
+    notice.textContent = "Previous could not be saved locally. Please try again.";
   } finally {
     busy = false;
     render();
     await refreshSyncStatus();
+    void sync();
   }
 }
 
+async function retryFailedEvent(id) {
+  if (busy || readOnly) return;
+  await transaction(["events", "failedEvents"], "readwrite", async (tx) => {
+    const failed = tx.objectStore("failedEvents");
+    const event = await requestValue(failed.get(id));
+    if (!event) return;
+    const { terminalStatus: _, ...retry } = event;
+    tx.objectStore("events").put(retry);
+    failed.delete(id);
+  });
+  syncProblem = null;
+  await refreshSyncStatus();
+  render();
+  void sync();
+}
+
+async function retryAllFailed() {
+  if (busy || readOnly) return;
+  const failed = await allFailedEvents();
+  await Promise.all(failed.map((event) => retryFailedEvent(event.id)));
+  void sync();
+}
+
+async function dismissFailedEvent(id) {
+  if (busy || readOnly) return;
+  if (!window.confirm("Dismiss this review from this device? The server history will not be changed.")) return;
+  const next = clone(state);
+  if (next.previous?.id === id) next.previous = null;
+  await transaction(["failedEvents", "state"], "readwrite", (tx) => {
+    tx.objectStore("failedEvents").delete(id);
+    tx.objectStore("state").put({ key: STATE_KEY, value: next });
+  });
+  state = next;
+  broadcastState();
+  await refreshSyncStatus();
+  render();
+}
+
 async function loadSet() {
-  if (busy || !navigator.onLine) {
-    notice.textContent = "Reconnect to load a new set.";
+  if (busy || readOnly || !navigator.onLine) {
+    notice.textContent = readOnly
+      ? "Use the active study tab to start a set."
+      : "Reconnect to load a new set.";
     return;
   }
   busy = true;
   render();
   try {
     await sync();
+    const outstanding = await refreshSyncStatus();
+    if (outstanding.pending.length || outstanding.failed.length) {
+      notice.textContent = "Resolve or retry saved reviews before starting the next set.";
+      return;
+    }
     const response = await apiFetch("/api/v1/sets");
     if (!response.ok) throw new Error("set unavailable");
     const payload = await response.json();
-    state = {
+    const staged = {
       ...emptyState(),
       cards: payload.items,
       phase: "waiting",
       learningStepSeconds: payload.learning_step_seconds,
+      emptyReason: payload.items.length ? null : payload.status,
+      nextDue: payload.next_due,
     };
-    chooseNextCard();
-    await configureAudioCache(true);
-    await saveState();
+    chooseNextCard(staged);
+    await writeState(staged);
+    state = staged;
+    broadcastState();
     notice.textContent = "";
-    startPreload().catch(() => undefined);
+    render();
+    try {
+      await configureAudioCache(true);
+      void startPreload();
+    } catch (_) {
+      audioCacheProblem = "Audio cache setup failed; the saved set is still available online.";
+      updateCacheStatus();
+    }
   } catch (_) {
-    notice.textContent = "A new set could not be loaded. Please try again.";
+    notice.textContent = "A new set could not be loaded. Your current set was kept.";
   } finally {
     busy = false;
     render();
@@ -584,37 +837,62 @@ async function loadSet() {
 }
 
 async function finishForNow() {
-  if (busy || state.active) return;
-  state.finished = true;
-  await saveState();
+  if (busy || readOnly || state.active) return;
+  const next = clone(state);
+  next.finished = true;
+  await commitState(next);
   render();
 }
 
 async function excludeActiveWord() {
-  if (busy || !state.active) return;
+  if (busy || readOnly || !state.active) return;
   if (!navigator.onLine) {
     notice.textContent = "Reconnect before suspending a word.";
     return;
   }
   busy = true;
+  audio.pause();
+  await cancelPreload();
   render();
-  const active = state.active;
+  const active = clone(state.active);
   try {
     const response = await apiFetch(`/api/v1/exclusions/${encodeURIComponent(active.word.id)}`, { method: "POST" });
     if (!response.ok) throw new Error("suspend failed");
-    if (active.kind === "initial") state.cards.splice(state.current, 1);
-    state.learningQueue = state.learningQueue.filter((item) => item.word.id !== active.word.id);
-    state.active = null;
-    state.phase = "waiting";
-    chooseNextCard();
-    await saveState();
+    const next = clone(state);
+    const removedIndex = next.cards.findIndex((word) => word.id === active.word.id);
+    if (removedIndex >= 0) {
+      next.cards.splice(removedIndex, 1);
+      if (removedIndex < next.current) next.current -= 1;
+      if (next.previous && removedIndex < next.previous.previousCurrent) {
+        next.previous.previousCurrent -= 1;
+      }
+    }
+    next.learningQueue = next.learningQueue.filter((item) => item.word.id !== active.word.id);
+    if (next.previous?.word_id === active.word.id) {
+      next.previous = null;
+    } else if (next.previous) {
+      next.previous.previousLearningQueue = next.previous.previousLearningQueue.filter(
+        (item) => item.word.id !== active.word.id,
+      );
+    }
+    next.active = null;
+    next.phase = "waiting";
+    chooseNextCard(next);
+    // Pending review delivery is deliberately left in the outbox. A request may
+    // already have reached the server, so only UUID-idempotent sync can settle it.
+    await writeState(next);
+    state = next;
+    broadcastState();
     await configureAudioCache(false);
+    void startPreload();
     notice.textContent = `${active.word.term} was suspended.`;
-    if (!exclusions.hidden) await loadExclusions();
+    if (wordManagement.open) await loadExclusions();
   } catch (_) {
     notice.textContent = "The word could not be suspended. Please try again.";
+    void startPreload();
   } finally {
     busy = false;
+    await refreshSyncStatus();
     render();
   }
 }
@@ -632,6 +910,7 @@ async function loadExclusions() {
     label.textContent = `${word.term} (${word.level == null ? "level unknown" : `SVL ${word.level}`})`;
     const restore = document.createElement("button");
     restore.textContent = "Restore";
+    restore.disabled = readOnly;
     restore.addEventListener("click", async () => {
       restore.disabled = true;
       try {
@@ -649,31 +928,6 @@ async function loadExclusions() {
   }
 }
 
-async function toggleExclusions() {
-  exclusions.hidden = !exclusions.hidden;
-  manageExclusionsButton.textContent = exclusions.hidden ? "Manage suspended words" : "Close suspended words";
-  if (!exclusions.hidden) {
-    try {
-      await loadExclusions();
-    } catch (_) {
-      exclusionsEmpty.textContent = "Suspended words could not be loaded.";
-    }
-  }
-}
-
-async function discardFailed() {
-  const failed = await allFailedEvents();
-  await Promise.all(failed.map((event) => removeFailedEvent(event.id)));
-  if (state.event && failed.some((event) => event.id === state.event.id)) {
-    state.event = null;
-    await saveState();
-    render();
-  }
-  syncProblem = null;
-  notice.textContent = "Failed review records were discarded.";
-  await refreshSyncStatus();
-}
-
 async function clearPrivateCaches() {
   await cancelPreload();
   const workerCleared = await sendWorkerMessage({ type: "clear-private-caches" });
@@ -688,20 +942,23 @@ async function clearPrivateCaches() {
   });
   state = emptyState();
   audioCacheState = { expected: 0, cached: 0, ready: false, failed: 0 };
+  audioCacheProblem = null;
   syncProblem = null;
   clearLearningTimer();
+  broadcastState();
   render();
   await refreshSyncStatus();
 }
 
 async function logout() {
-  if (busy) return;
+  if (busy || readOnly) return;
   if (!navigator.onLine) {
     notice.textContent = "You are offline. Sign-out was not sent and local study data was kept.";
     return;
   }
   const { pending, failed } = await refreshSyncStatus();
-  if (pending.length + failed.length > 0 && !window.confirm("Some reviews are not synced. Sign out and remove them from this device?")) {
+  if (pending.length + failed.length > 0
+      && !window.confirm("Some reviews are not synced. Sign out and remove them from this device?")) {
     notice.textContent = "Sign-out was cancelled; local study data was kept.";
     return;
   }
@@ -729,7 +986,67 @@ async function logout() {
   }
 }
 
+async function acquireStudyLock() {
+  if (!navigator.locks) {
+    readOnly = false;
+    return;
+  }
+  readOnly = !await new Promise((resolve) => {
+    navigator.locks.request(STUDY_LOCK, { ifAvailable: true }, (lock) => {
+      if (!lock) {
+        resolve(false);
+        return undefined;
+      }
+      resolve(true);
+      return new Promise((release) => { releaseStudyLock = release; });
+    }).catch(() => resolve(false));
+  });
+  if (readOnly) waitForStudyLock();
+}
+
+function waitForStudyLock() {
+  if (!navigator.locks || queuedStudyLock) return;
+  queuedStudyLock = navigator.locks.request(STUDY_LOCK, async () => {
+    readOnly = false;
+    releaseStudyLock = null;
+    const hold = new Promise((release) => { releaseStudyLock = release; });
+    if (booted) await becomeActiveTab();
+    await hold;
+  }).finally(() => { queuedStudyLock = null; });
+}
+
+async function becomeActiveTab() {
+  const saved = await getState();
+  if (validState(saved)) {
+    state = saved;
+    if (!state.active && !state.finished) {
+      const next = clone(state);
+      chooseNextCard(next);
+      if (next.active) await commitState(next);
+    }
+  }
+  audioPresentation = null;
+  await refreshSyncStatus();
+  render();
+  try {
+    await configureAudioCache(false);
+    void startPreload();
+  } catch (_) {
+    audioCacheProblem = "Audio cache is unavailable; listening still works online.";
+  }
+  void sync();
+}
+
+async function reloadReadOnlyState() {
+  if (!readOnly) return;
+  const saved = await getState();
+  if (validState(saved)) state = saved;
+  await refreshSyncStatus();
+  render();
+}
+
 async function boot() {
+  await acquireStudyLock();
   let saved = null;
   try {
     saved = await getState();
@@ -738,43 +1055,63 @@ async function boot() {
   }
   if (validState(saved)) {
     state = saved;
-    if (!state.active && !state.finished) chooseNextCard();
-    await saveState();
+    if (!readOnly && !state.active && !state.finished) {
+      const next = clone(state);
+      chooseNextCard(next);
+      if (next.active) await commitState(next);
+    }
     try {
       await configureAudioCache(false);
+      if (!readOnly) void startPreload();
     } catch (_) {
-      cacheStatus.textContent = "Audio cache is unavailable; listening still works online.";
+      audioCacheProblem = "Audio cache is unavailable; listening still works online.";
     }
+    await refreshSyncStatus();
     render();
-    startPreload().catch(() => undefined);
-  } else if (navigator.onLine) {
+  } else if (!readOnly && navigator.onLine) {
+    await refreshSyncStatus();
     await loadSet();
   } else {
     state = emptyState();
+    await refreshSyncStatus();
     render();
-    notice.textContent = "Reconnect to start a study set.";
+    if (!readOnly) notice.textContent = "Reconnect to start a study set.";
   }
-  await refreshSyncStatus();
+  booted = true;
   void sync();
 }
+
+stateChannel?.addEventListener("message", (event) => {
+  if (["state-changed", "outbox-changed"].includes(event.data?.type)) {
+    void reloadReadOnlyState();
+  }
+});
+addEventListener("pagehide", () => releaseStudyLock?.());
 
 window.clearPrivateCaches = clearPrivateCaches;
 window.__pwa = {
   getAudioCacheState: () => ({ ...audioCacheState }),
   getState: () => clone(state),
+  isReadOnly: () => readOnly,
   render,
+  sync,
 };
 
+previousButton.addEventListener("click", previous);
 replayButton.addEventListener("click", playAudio);
 showAnswerButton.addEventListener("click", showAnswer);
 knownButton.addEventListener("click", () => answer("known"));
 unknownButton.addEventListener("click", () => answer("unknown"));
 nextSetButton.addEventListener("click", loadSet);
 finishButton.addEventListener("click", finishForNow);
+retrySyncButton.addEventListener("click", retryAllFailed);
 excludeButton.addEventListener("click", excludeActiveWord);
-undoButton.addEventListener("click", undoLast);
-discardFailedButton.addEventListener("click", discardFailed);
-manageExclusionsButton.addEventListener("click", toggleExclusions);
+manageExclusionsButton.addEventListener("click", () => loadExclusions().catch(() => {
+  exclusionsEmpty.textContent = "Suspended words could not be loaded.";
+}));
+wordManagement.addEventListener("toggle", () => {
+  if (wordManagement.open) manageExclusionsButton.click();
+});
 logoutButton.addEventListener("click", logout);
 addEventListener("online", () => {
   updateNetworkStatus();
@@ -782,10 +1119,11 @@ addEventListener("online", () => {
 });
 addEventListener("offline", () => {
   updateNetworkStatus();
-  void refreshSyncStatus();
+  void refreshSyncStatus().then(render);
 });
 if ("serviceWorker" in navigator) {
-  window.__pwa.serviceWorkerRegistration = navigator.serviceWorker.register("/sw.js").then(() => "ready", (error) => String(error));
+  window.__pwa.serviceWorkerRegistration = navigator.serviceWorker.register("/sw.js")
+    .then(() => "ready", (error) => String(error));
 }
 boot().catch(() => {
   state = emptyState();

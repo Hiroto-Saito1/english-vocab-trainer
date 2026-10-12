@@ -1,10 +1,12 @@
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.domain.models import Tier, Word
+from english_vocab_trainer.domain.models import Rating, ReviewEvent, Tier, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.container import AppContainer
 
@@ -36,6 +38,7 @@ def test_set_admits_thirty_lowest_level_words_without_persisting_selection(
     assert {item["id"] for item in selected} == {str(index) for index in range(10, 40)}
     assert "id" not in payload and "mode" not in payload and "created_at" not in payload
     assert payload["learning_step_seconds"] == 600
+    assert payload["status"] == "ready" and payload["next_due"] is None
 
 
 def test_empty_set_is_returned(tmp_path: Path) -> None:
@@ -43,4 +46,35 @@ def test_empty_set_is_returned(tmp_path: Path) -> None:
     app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
     with TestClient(app) as client:
         response = client.get("/api/v1/sets")
-    assert response.status_code == 200 and response.json()["items"] == []
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "learning_step_seconds": 600,
+        "status": "catalog_empty",
+        "next_due": None,
+    }
+
+
+def test_empty_set_distinguishes_suspended_words_and_future_reviews(tmp_path: Path) -> None:
+    database = tmp_path / "v.db"
+    word = Word("word", "word", 1, "definition", "word.mp3", Tier.UPPER)
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.bulk_upsert_words([word])
+        repository.set_excluded(word.id, True)
+    app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
+    with TestClient(app) as client:
+        suspended = client.get("/api/v1/sets").json()
+        client.delete(f"/api/v1/exclusions/{word.id}")
+        with SQLiteVocabularyRepository(database) as repository:
+            repository.append_event(
+                ReviewEvent(
+                    UUID("00000000-0000-0000-0000-000000000001"),
+                    word.id,
+                    Rating.GOOD,
+                    datetime.now(UTC),
+                )
+            )
+        future = client.get("/api/v1/sets").json()
+    assert suspended["status"] == "all_suspended" and suspended["next_due"] is None
+    assert future["status"] == "next_due"
+    assert future["items"] == [] and future["next_due"] is not None

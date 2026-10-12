@@ -95,17 +95,21 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 ## 学習とオフライン動作
 
-学習画面は audio-first です。まず音声だけを聴き、**Show answer** で term と transcript を確認してからだけ **Known** または **Unknown** を選べます。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。Undo は未 sync event を端末から削除し、sync 済みなら server で void して、void されていない event から FSRS の due を決定的に再生します。
+学習画面は audio-first です。聴取中に表示する操作は **Previous / Replay / Show answer**、答えを表示した後は **Previous / Unknown / Known**、set 完了後は **Previous / Next set** だけです。Known / Unknown が回答確定と次カードへの移動を兼ね、カード単位の Continue / Next はありません。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
 
-server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、残りは level の低い新規語を優先して、level 不明を最後にします。採用後の提示順だけを shuffle します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。**Start next set** を押したときだけ server から再取得します。
+**Previous** は直前の回答を取り消し、直前の語を答え非表示の聴取状態へ戻します。その時点で見ていた次のカードは queue に残ります。通信結果が不明でも event を端末から削除せず、同じ UUID の review を再送して server 適用を確定してから void します。回答 event の outbox 追加と学習進行 state、Previous の void intent と復元 state は、それぞれ 1 回の IndexedDB transaction で同時に保存します。したがって local 保存失敗で回答だけ、または進行位置だけが残ることはありません。
 
-Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。進捗は初回カードと再学習を分けて表示し、待機中は **Finish for now** で終了できます。次回の明示的な set 取得では、server 側で期限に達した語を通常どおり再取得します。語を **Suspend word** すると DB に永続化して新規・期限到来の両方から除外し、一覧の **Restore** で復帰できます。
+server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、残りは level の低い新規語を優先して、level 不明を最後にします。採用後の提示順だけを shuffle します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。**Next set** を押したときだけ server から再取得します。新 set は IndexedDB への保存が完了してから画面に反映し、audio cache の失敗とは別に扱います。pending または隔離 review が 1 件でもあれば次 set は開始できません。
 
-同期表示は network、server HTTP error、再試行不能な conflict/missing、audio cache を別々に扱います。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、件数を表示し、利用者が明示的に破棄できます。通常の同期成功時は過去の一時的な network/server error 表示を解消します。
+Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。進捗は初回カードと再学習を分けて表示し、待機中は **Finish for now** で終了できます。次回の明示的な set 取得では、server 側で期限に達した語を通常どおり再取得します。語を word management の **Suspend current word** で停止すると、DB の新規・期限到来候補、再生、preload、cache、local 学習 queue、同語の Previous snapshot から除外します。曖昧な通信結果を持つ review outbox は消さず、冪等同期で確定します。一覧の **Restore** で次回以降の set に復帰できます。
+
+同期表示は network、server HTTP error、再試行不能な conflict/missing、audio cache を別々に扱います。同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、UUID・語・回答・理由を表示します。利用者は 1 件ずつ再試行または確認付きで破棄できます。通常の同期成功時は過去の一時的な network/server error 表示を解消します。
+
+同じ browser profile では Web Locks により学習を変更できる tab を 1 つに限定します。他の tab は BroadcastChannel で保存済み state を追従する読み取り専用画面となり、自動音声再生もしません。active tab を閉じると待機中の tab が lock を取得して学習を継続できます。空の set は `next_due`、全語停止、catalog 未投入、同期阻害を区別し、期限がある場合は次回時刻を表示します。画面フェーズが変わるたびに主要操作へ focus を移し、非表示要素には focus を残しません。
 
 オンラインで学習対象を取得すると、PWA は全ての full `200` audio response を private Cache Storage へ preload します。失敗しても online 再生は継続できます。新しい学習対象では古い audio cache を先に削除し、中断した保存済み学習を開き直す場合は対応する audio を保持します。preload の世代は process-local な epoch だけで管理し、古い世代の応答が現在の cache に混入するのを防ぎます。
 
-offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。
+offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。現在の IndexedDB state format は 2（DB version 3）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。
 
 `window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。進行中の audio preload を `AbortController` で止めて audio cache を削除し、IndexedDB の学習状態、通常 outbox、隔離 event を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
 

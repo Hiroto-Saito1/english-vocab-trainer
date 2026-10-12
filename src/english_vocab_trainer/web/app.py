@@ -79,6 +79,8 @@ class WordOut(BaseModel):
 class SetOut(BaseModel):
     items: list[WordOut]
     learning_step_seconds: int
+    status: Literal["ready", "next_due", "all_suspended", "catalog_empty"]
+    next_due: datetime | None = None
 
 
 class ExcludedWordOut(BaseModel):
@@ -232,10 +234,17 @@ def service_worker() -> FileResponse:
 
 @router.get("/api/v1/sets", response_model=SetOut)
 def study_set(repository: Repository) -> SetOut:
-    words = select_set_words(repository, datetime.now(UTC), Random())
+    now = datetime.now(UTC)
+    words = select_set_words(repository, now, Random())
+    status: Literal["ready", "next_due", "all_suspended", "catalog_empty"] = "ready"
+    next_due = None
+    if not words:
+        status, next_due = repository.empty_set_status(now)
     return SetOut(
         items=[word_out(word) for word in words],
         learning_step_seconds=int(LEARNING_STEP.total_seconds()),
+        status=status,
+        next_due=next_due,
     )
 
 

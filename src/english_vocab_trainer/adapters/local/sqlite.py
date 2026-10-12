@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from english_vocab_trainer.adapters.local.database import initialize_database
@@ -107,6 +108,25 @@ class SQLiteVocabularyRepository:
             "WHERE w.excluded=0 AND s.due_at<=? ORDER BY s.due_at LIMIT ?"
         )
         return [self._word(row) for row in self.db.execute(query, (_iso(now), limit))]
+
+    def empty_set_status(
+        self, now: datetime
+    ) -> tuple[Literal["next_due", "all_suspended", "catalog_empty"], datetime | None]:
+        totals = self.db.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN excluded=0 THEN 1 ELSE 0 END) FROM words"
+        ).fetchone()
+        if totals[0] == 0:
+            return "catalog_empty", None
+        if totals[1] == 0:
+            return "all_suspended", None
+        row = self.db.execute(
+            "SELECT MIN(s.due_at) FROM word_state s "
+            "JOIN words w ON w.id=s.word_id WHERE w.excluded=0 AND s.due_at>?",
+            (_iso(now),),
+        ).fetchone()
+        if row[0] is None:
+            raise RuntimeError("an empty set with available words must have a future due date")
+        return "next_due", datetime.fromisoformat(row[0])
 
     def _events(self, word_id: str) -> list[ReviewEvent]:
         return [
