@@ -37,6 +37,13 @@ def _audio_metadata(store: AudioStore, key: str) -> AudioMetadata:
         raise HTTPException(502, "audio storage is unavailable") from exc
 
 
+def _range_not_satisfiable(size: int) -> Response:
+    return Response(
+        status_code=416,
+        headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"},
+    )
+
+
 @router.get("/api/v1/audio/{word_id}")
 def audio(
     word_id: str,
@@ -58,13 +65,7 @@ def audio(
             try:
                 parse_single_range(range_header, metadata.size)
             except InvalidRangeError:
-                return Response(
-                    status_code=416,
-                    headers={
-                        "Accept-Ranges": "bytes",
-                        "Content-Range": f"bytes */{metadata.size}",
-                    },
-                )
+                return _range_not_satisfiable(metadata.size)
     try:
         result = store.get(word.audio_key, range_header)
     except FileNotFoundError as exc:
@@ -72,10 +73,7 @@ def audio(
     except InvalidRangeError:
         # An upstream may reject a range after local validation (for example, a race).
         metadata = _audio_metadata(store, word.audio_key)
-        return Response(
-            status_code=416,
-            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
-        )
+        return _range_not_satisfiable(metadata.size)
     except AudioStorageError as exc:
         raise HTTPException(502, "audio storage is unavailable") from exc
     return build_audio_response(result, if_none_match)
@@ -96,7 +94,4 @@ def audio_head(
     try:
         return build_audio_head_response(metadata, range_header, if_none_match)
     except InvalidRangeError:
-        return Response(
-            status_code=416,
-            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{metadata.size}"},
-        )
+        return _range_not_satisfiable(metadata.size)

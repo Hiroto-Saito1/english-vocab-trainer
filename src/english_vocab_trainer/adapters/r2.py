@@ -67,6 +67,35 @@ def r2_client_from_env(
     return client, environ["R2_BUCKET"]
 
 
+def _error_code(exc: Exception) -> str | None:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, Mapping):
+        return None
+    error = response.get("Error")
+    if isinstance(error, Mapping):
+        code = error.get("Code")
+        if isinstance(code, str):
+            return code
+    metadata = response.get("ResponseMetadata")
+    if isinstance(metadata, Mapping) and isinstance(metadata.get("HTTPStatusCode"), int):
+        return str(metadata["HTTPStatusCode"])
+    return None
+
+
+def _metadata(response: Mapping[str, Any]) -> AudioMetadata:
+    raw_metadata = response.get("Metadata", {})
+    checksum = raw_metadata.get("sha256", "") if isinstance(raw_metadata, Mapping) else ""
+    length = response.get("ContentLength")
+    if (
+        not isinstance(checksum, str)
+        or _SHA256.fullmatch(checksum) is None
+        or not isinstance(length, int)
+        or length < 0
+    ):
+        raise AudioStorageError("private audio storage is unavailable")
+    return AudioMetadata(length, checksum)
+
+
 class Boto3R2AudioStore:
     """Injected S3-compatible private R2 adapter; no global client or public URLs."""
 
@@ -79,47 +108,18 @@ class Boto3R2AudioStore:
         return key
 
     @staticmethod
-    def _error_code(exc: Exception) -> str | None:
-        response = getattr(exc, "response", None)
-        if not isinstance(response, Mapping):
-            return None
-        error = response.get("Error")
-        if isinstance(error, Mapping):
-            code = error.get("Code")
-            if isinstance(code, str):
-                return code
-        metadata = response.get("ResponseMetadata")
-        if isinstance(metadata, Mapping) and isinstance(metadata.get("HTTPStatusCode"), int):
-            return str(metadata["HTTPStatusCode"])
-        return None
-
-    @classmethod
-    def _raise_store_error(cls, exc: Exception, key: str, *, range_request: bool) -> NoReturn:
-        code = cls._error_code(exc)
+    def _raise_store_error(exc: Exception, key: str, *, range_request: bool) -> NoReturn:
+        code = _error_code(exc)
         if code in {"NoSuchKey", "NoSuchObject", "404"}:
             raise FileNotFoundError(key) from exc
         if range_request and code in {"InvalidRange", "416"}:
             raise InvalidRangeError("invalid byte range") from exc
         raise AudioStorageError("private audio storage is unavailable") from exc
 
-    @staticmethod
-    def _metadata(response: Mapping[str, Any]) -> AudioMetadata:
-        raw_metadata = response.get("Metadata", {})
-        checksum = raw_metadata.get("sha256", "") if isinstance(raw_metadata, Mapping) else ""
-        length = response.get("ContentLength")
-        if (
-            not isinstance(checksum, str)
-            or _SHA256.fullmatch(checksum) is None
-            or not isinstance(length, int)
-            or length < 0
-        ):
-            raise AudioStorageError("private audio storage is unavailable")
-        return AudioMetadata(length, checksum)
-
     def head(self, key: str) -> AudioMetadata:
         try:
             response = self._client.head_object(Bucket=self._bucket, Key=self._key(key))
-            return self._metadata(response)
+            return _metadata(response)
         except (FileNotFoundError, AudioStorageError):
             raise
         except Exception as exc:
@@ -138,7 +138,7 @@ class Boto3R2AudioStore:
                 data = bytes(body.read())
             finally:
                 body.close()
-            response_metadata = self._metadata(response)
+            response_metadata = _metadata(response)
             if response_metadata.etag != metadata.etag:
                 raise AudioStorageError("private audio storage is unavailable")
             content_length = response.get("ContentLength")
@@ -180,7 +180,7 @@ class Boto3R2AudioUploader:
     @staticmethod
     def _metadata_matches(response: Mapping[str, Any], size: int, checksum: str) -> bool:
         try:
-            metadata = Boto3R2AudioStore._metadata(response)
+            metadata = _metadata(response)
         except AudioStorageError:
             return False
         return metadata.size == size and metadata.etag == checksum
@@ -189,7 +189,7 @@ class Boto3R2AudioUploader:
         try:
             return self._client.head_object(Bucket=self._bucket, Key=key)
         except Exception as exc:
-            code = Boto3R2AudioStore._error_code(exc)
+            code = _error_code(exc)
             if code in {"NoSuchKey", "NoSuchObject", "404"}:
                 return None
             raise AudioStorageError("private audio storage is unavailable") from exc

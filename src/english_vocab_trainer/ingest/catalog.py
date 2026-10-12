@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .models import (
@@ -33,6 +33,12 @@ from .storage import (
     write_manifest,
 )
 from .validation import checksum, parse_audio_path, validate_records, validate_transcript
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogSnapshot:
+    records: list[CatalogRecord]
+    manifest: CatalogManifest
 
 
 def _source_candidates(root: Path, source: str) -> list[AudioCandidate]:
@@ -115,6 +121,69 @@ def records_from_audio(candidates: Iterable[AudioCandidate]) -> list[CatalogReco
     ]
 
 
+def _catalog_snapshot(
+    root: Path, profile: CatalogProfile, limit_per_source: int
+) -> _CatalogSnapshot:
+    candidates = select_audio(root, limit_per_source, profile=profile)
+    records = records_from_audio(candidates)
+    expected = profile.expected_count(limit_per_source)
+    if len(records) != expected:
+        raise ValueError(
+            f"profile {profile.name} expected {expected} records, found {len(records)}"
+        )
+    return _CatalogSnapshot(
+        records,
+        CatalogManifest(
+            CATALOG_SCHEMA_VERSION,
+            profile.name,
+            expected,
+            inventory_digest(candidates),
+            TRANSCRIPTION_MODEL,
+            "en",
+        ),
+    )
+
+
+def _reconcile_existing_catalog(
+    catalog: Path,
+    base_records: list[CatalogRecord],
+    snapshot: _CatalogSnapshot,
+    *,
+    pending_journal: bool,
+) -> tuple[list[CatalogRecord], dict[str, dict[str, str]]]:
+    prior_manifest = read_manifest(catalog)
+    if prior_manifest is None:
+        raise ValueError("catalog state exists without a provenance manifest")
+    prior_records = validate_records(
+        base_records,
+        prior_manifest.expected_count,
+        require_transcript=False,
+    )
+    if inventory_digest(prior_records) != prior_manifest.inventory_digest:
+        raise ValueError("catalog inventory does not match provenance manifest")
+
+    updates: dict[str, CatalogRecord] = {}
+    if pending_journal:
+        updates = read_journal_updates(catalog, prior_manifest.fingerprint)
+        if prior_manifest.fingerprint != snapshot.manifest.fingerprint:
+            raise ValueError("catalog identity does not match transcription journal")
+
+    unresolved = read_error_report(catalog)
+    prior = {record.checksum: record for record in merge_journal_records(base_records, updates)}
+    records = [
+        replace(record, transcript=validate_transcript(old.transcript))
+        if (old := prior.get(record.checksum)) is not None and old.transcript is not None
+        else record
+        for record in snapshot.records
+    ]
+    current_missing = {record.checksum for record in records if record.transcript is None}
+    return records, {
+        checksum_value: error
+        for checksum_value, error in unresolved.items()
+        if checksum_value in current_missing
+    }
+
+
 def scan_catalog(
     root: Path,
     catalog: Path,
@@ -128,77 +197,31 @@ def scan_catalog(
         base_records = read_catalog(catalog, include_journal=False)
         pending_journal = journal_path(catalog).exists()
         pending_error_report = error_report_path(catalog).exists()
-        candidates = select_audio(root, limit_per_source, profile=profile)
-        records = records_from_audio(candidates)
-        expected = profile.expected_count(limit_per_source)
-        if len(records) != expected:
-            raise ValueError(
-                f"profile {profile.name} expected {expected} records, found {len(records)}"
-            )
-        manifest = CatalogManifest(
-            CATALOG_SCHEMA_VERSION,
-            profile.name,
-            expected,
-            inventory_digest(candidates),
-            TRANSCRIPTION_MODEL,
-            "en",
-        )
+        snapshot = _catalog_snapshot(root, profile, limit_per_source)
 
         if force:
-            write_catalog(catalog, records)
-            write_manifest(catalog, manifest)
+            write_catalog(catalog, snapshot.records)
+            write_manifest(catalog, snapshot.manifest)
             remove_durable_file(journal_path(catalog))
             remove_durable_file(error_report_path(catalog))
-            return records, manifest
+            return snapshot.records, snapshot.manifest
 
         if not base_records and not pending_journal and not pending_error_report:
-            write_catalog(catalog, records)
-            write_manifest(catalog, manifest)
-            return records, manifest
+            write_catalog(catalog, snapshot.records)
+            write_manifest(catalog, snapshot.manifest)
+            return snapshot.records, snapshot.manifest
 
-        updates: dict[str, CatalogRecord] = {}
-        prior_manifest = read_manifest(catalog)
-        if prior_manifest is None:
-            raise ValueError("catalog state exists without a provenance manifest")
-        prior_records = validate_records(
-            base_records,
-            prior_manifest.expected_count,
-            require_transcript=False,
+        records, unresolved = _reconcile_existing_catalog(
+            catalog, base_records, snapshot, pending_journal=pending_journal
         )
-        if inventory_digest(prior_records) != prior_manifest.inventory_digest:
-            raise ValueError("catalog inventory does not match provenance manifest")
-
-        if pending_journal:
-            updates = read_journal_updates(catalog, prior_manifest.fingerprint)
-            if prior_manifest.fingerprint != manifest.fingerprint:
-                raise ValueError("catalog identity does not match transcription journal")
-
-        unresolved = read_error_report(catalog)
-
-        prior = {record.checksum: record for record in merge_journal_records(base_records, updates)}
-        reused: list[CatalogRecord] = []
-        for record in records:
-            old = prior.get(record.checksum)
-            if old is not None and old.transcript is not None:
-                transcript = validate_transcript(old.transcript)
-                reused.append(replace(record, transcript=transcript))
-            else:
-                reused.append(record)
-        records = reused
 
         write_catalog(catalog, records)
-        write_manifest(catalog, manifest)
+        write_manifest(catalog, snapshot.manifest)
         if pending_journal:
             remove_durable_file(journal_path(catalog))
 
-        current_missing = {record.checksum for record in records if record.transcript is None}
-        unresolved = {
-            checksum_value: error
-            for checksum_value, error in unresolved.items()
-            if checksum_value in current_missing
-        }
         write_error_report(catalog, unresolved)
-    return records, manifest
+    return records, snapshot.manifest
 
 
 def audit_records(
