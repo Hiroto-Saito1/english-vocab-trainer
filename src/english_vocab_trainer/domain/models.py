@@ -26,8 +26,8 @@ class Tier(StrEnum):
     ULTRA = "ultra"
 
 
-# This is both the scheduler's learning interval and the client contract.  Do
-# not duplicate the duration in a transport or UI policy.
+# This interval belongs only to the server-side FSRS scheduler.  The client
+# never schedules or repeats cards on its own.
 LEARNING_STEP = timedelta(minutes=10)
 
 

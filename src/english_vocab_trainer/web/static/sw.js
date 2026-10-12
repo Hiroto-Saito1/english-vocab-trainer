@@ -1,4 +1,4 @@
-const SHELL = "pwa-shell-v7";
+const SHELL = "pwa-shell-v8";
 const MANAGED_PREFIX = "pwa-";
 const SHELL_ASSETS = ["/", "/static/app.js", "/static/manifest.json", "/static/icon.svg"];
 

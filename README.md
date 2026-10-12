@@ -95,13 +95,13 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 ## 学習とオフライン動作
 
-カードは最初から term、tier、英語の transcript / definition を表示します。音声操作は browser 標準の audio controls だけで、自動再生や別の Play / Replay ボタンはありません。移動用の **Previous / Next** と回答用の **Unknown / Known** は別の固定行に表示します。未回答カードでは Previous（履歴があるとき）と Unknown / Known、履歴中では Previous / Next と Unknown / Known、非空 set 完了後では Previous / Next set を使います。`catalog_empty` と `next_due` では Next set を表示しません。Known は常に FSRS の Good、Unknown は常に Again です。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
+カードは最初から term、tier、英語の transcript / definition を表示します。音声操作は browser 標準の audio controls だけで、自動再生や別の Play / Replay ボタンはありません。audio は metadata だけを事前取得し、offline 中は controls と `src` を外し、online 復帰後に同じカードで戻します。移動用の **Previous / Next** と回答用の **Unknown / Known** は別の固定行に表示します。Known は常に FSRS の Good、Unknown は常に Again です。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
 
-**Previous / Next** は現在の set 内の回答履歴と未回答境界を往復するだけで、review event を変更しません。履歴カードでは保存済みの回答ボタンを選択済みの disabled 状態にし、変更しない場合は Next で進みます。反対の回答を選ぶと、元 event の void intent と新しい UUID の review を同じ IndexedDB transaction で保存して次へ進みます。訂正では元の `reviewed_at` を維持し、通信結果が不明な event も消さずに冪等再送で適用を確定してから void します。
+**Previous / Next** はこれまでの回答履歴と未回答境界を往復するだけで、review event を変更しません。履歴は server から内部的に取得する batch の境界を越えて残ります。履歴カードでは保存済み側を **Known — saved** または **Unknown — saved** として disabled にし、反対側だけを **Change to ...** と表示します。反対の回答を選ぶと、元 event の void intent と新しい UUID の review を同じ IndexedDB transaction で保存して次へ進みます。訂正では元の `reviewed_at` を維持し、通信結果が不明な event も消さずに冪等再送で適用を確定してから void します。
 
-server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、不足分だけ level の低い新規語を取得し、level 不明を最後にします。採用後の提示順だけを shuffle します。Unknown はそのまま次カードへ進み、client 内で 10 分後の再出題はしません。FSRS の Again と期限は server に保存し、期限到来後の将来の set で再選出します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。新 set は IndexedDB への保存完了後に画面へ反映し、pending または隔離 review が 1 件でもあれば開始できません。
+server は内部的に最大 30 枚をその場で選び、選出結果を永続化しません。期限到来済みの語を先に採用し、不足分だけ level の低い新規語を取得し、level 不明を最後にします。採用後の提示順だけを shuffle します。利用者には batch を意識させず、最後の回答が同期できたら次のカードを自動取得します。pending または隔離 review がある間は自動取得しません。Unknown はそのまま次カードへ進み、client 内で 10 分後の再出題はしません。FSRS の Again と期限は server に保存し、`next_due` の時刻に到達すると online 中なら自動取得します。online 復帰と tab 再表示時にも期限を再確認します。
 
-同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、必要なときだけ UUID・語・回答・理由を表示します。通常時は network / sync / cache の技術 status を表示せず、offline、pending、terminal error、network / server error を 1 つの status 領域に簡潔に表示します。アプリは単一 tab での利用を前提とします。
+同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止めます。隔離行には単語と回答を自然文で表示し、行ごとに再試行または確認付きの local 変更破棄を選びます。online の一時的な pending は表示せず、offline、実際の network / server error、隔離 review だけを status 領域に表示します。軽量な Web Lock により変更可能な tab を 1 つに限定し、2 つ目以降の tab は明示的な読み取り専用状態にします。
 
 offline reload でも Service Worker の static shell と IndexedDB に保存した set / 履歴 / outbox を再開できます。Service Worker は API や audio を傾受・cacheせず、audio は online のときだけ native controls から再生できます。現在の IndexedDB state format は 4（DB version 5）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。Logout は server 側の session 失効後に IndexedDB の学習状態、通常 outbox、隔離 event を 1 transaction で空にします。
 

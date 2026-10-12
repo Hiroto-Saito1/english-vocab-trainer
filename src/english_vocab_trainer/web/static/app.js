@@ -3,6 +3,7 @@ const DB_VERSION = 5;
 const STATE_KEY = "active-set";
 const STATE_FORMAT = 4;
 const SYNC_BATCH_SIZE = 100;
+const WRITER_LOCK = "english-vocab-trainer-writer";
 
 const emptyState = () => ({
   format: STATE_FORMAT,
@@ -16,13 +17,16 @@ const emptyState = () => ({
 
 let state = emptyState();
 let busy = false;
+let writer = false;
+let releaseWriterLock = null;
 let syncFlight = null;
 let syncRequested = false;
+let loadFlight = null;
+let nextDueTimer = null;
 let syncProblem = null;
 let userNotice = null;
 let syncSummary = { pending: [], failed: [] };
 let audioPresentation = null;
-let lastView = null;
 
 const $ = (selector) => document.querySelector(selector);
 const card = $("#card");
@@ -34,7 +38,6 @@ const previousButton = $("#previous");
 const nextButton = $("#next");
 const knownButton = $("#known");
 const unknownButton = $("#unknown");
-const nextSetButton = $("#next-set");
 const retrySyncButton = $("#retry-sync");
 const syncIssues = $("#sync-issues");
 const syncIssuesList = $("#sync-issues-list");
@@ -172,9 +175,34 @@ function displayedWord() {
   return displayedEntry()?.word || liveWord();
 }
 
+function batchConsumed() {
+  return state.cards.length > 0 && state.current === state.cards.length;
+}
+
+function nextDueReached() {
+  return state.emptyReason === "next_due"
+    && state.nextDue !== null
+    && Date.parse(state.nextDue) <= Date.now();
+}
+
+function shouldLoadBatch() {
+  return writer
+    && navigator.onLine
+    && !syncSummary.pending.length
+    && !syncSummary.failed.length
+    && (batchConsumed()
+      || (!state.cards.length && state.emptyReason === null)
+      || nextDueReached());
+}
+
 function formatTier(word) {
   const name = word.tier === "upper" ? "Upper" : "Ultra";
   return `${name} · ${word.level == null ? "level unknown" : `SVL ${word.level}`}`;
+}
+
+function wordForEvent(event) {
+  return state.history.find((entry) => entry.word.id === event.word_id)?.word
+    || state.cards.find((word) => word.id === event.word_id);
 }
 
 function renderSyncIssues(failed) {
@@ -183,31 +211,42 @@ function renderSyncIssues(failed) {
   for (const event of failed) {
     const item = document.createElement("li");
     const detail = document.createElement("p");
-    detail.textContent = `${event.word_id}: ${event.action} · ${event.terminalStatus} · ${event.id}`;
+    const word = wordForEvent(event);
+    const answer = event.action === "known" ? "Known" : "Unknown";
+    detail.textContent = `${word?.term || "This word"}: the ${answer} answer was not saved on the server.`;
     const retry = document.createElement("button");
-    retry.textContent = "Retry this review";
+    retry.textContent = "Retry answer";
+    retry.disabled = busy || !writer || !navigator.onLine;
     retry.addEventListener("click", () => retryFailedEvent(event.id));
-    const dismiss = document.createElement("button");
-    dismiss.textContent = "Dismiss this review";
-    dismiss.addEventListener("click", () => dismissFailedEvent(event.id));
-    item.append(detail, retry, dismiss);
+    const discard = document.createElement("button");
+    discard.textContent = "Discard local change";
+    discard.disabled = busy || !writer;
+    discard.addEventListener("click", () => discardFailedEvent(event.id));
+    item.append(detail, retry, discard);
     syncIssuesList.append(item);
   }
 }
 
 function renderStatus() {
-  let message = userNotice;
-  if (!message && syncSummary.failed.length) {
+  retrySyncButton.hidden = !(writer && navigator.onLine && syncProblem);
+  retrySyncButton.disabled = busy || !writer;
+  let message = null;
+  if (!writer) {
+    message = "locks" in navigator
+      ? "This app is already open in another tab. Close it, then reload this page to study here."
+      : "This browser cannot safely save study changes because Web Locks are unavailable.";
+  } else if (syncSummary.failed.length) {
     const count = syncSummary.failed.length;
-    message = `${count} review${count === 1 ? "" : "s"} need attention.`;
-  } else if (!message && !navigator.onLine && syncSummary.pending.length) {
-    message = `Offline · ${syncSummary.pending.length} review${syncSummary.pending.length === 1 ? "" : "s"} waiting.`;
-  } else if (!message && !navigator.onLine) {
+    message = `${count} ${count === 1 ? "answer needs" : "answers need"} your attention.`;
+  } else if (userNotice) {
+    message = userNotice;
+  } else if (!navigator.onLine && syncSummary.pending.length) {
+    const count = syncSummary.pending.length;
+    message = `Offline · ${count} answer${count === 1 ? "" : "s"} waiting to sync.`;
+  } else if (!navigator.onLine) {
     message = "Offline. Audio is unavailable until you reconnect.";
-  } else if (!message && syncProblem) {
+  } else if (syncProblem) {
     message = syncProblem;
-  } else if (!message && syncSummary.pending.length) {
-    message = `${syncSummary.pending.length} review${syncSummary.pending.length === 1 ? "" : "s"} waiting to sync.`;
   }
   status.textContent = message || "";
   status.hidden = !message;
@@ -216,7 +255,6 @@ function renderStatus() {
 async function refreshSyncStatus() {
   const [pending, failed] = await Promise.all([allEvents(), allFailedEvents()]);
   syncSummary = { pending, failed };
-  retrySyncButton.hidden = pending.length + failed.length === 0;
   renderSyncIssues(failed);
   renderStatus();
   return syncSummary;
@@ -224,33 +262,22 @@ async function refreshSyncStatus() {
 
 function setVisible(button, visible, enabled = true) {
   button.hidden = !visible;
-  button.disabled = busy || !enabled;
+  button.disabled = busy || !writer || !enabled;
 }
 
-function isComplete() {
-  return state.cards.length > 0
-    && state.current === state.cards.length
-    && state.cursor === state.history.length;
-}
-
-function currentView() {
-  if (state.cursor < state.history.length) return "history";
-  if (liveWord()) return "current";
-  if (isComplete()) return "complete";
-  return state.emptyReason || "unavailable";
-}
-
-function focusPrimary(view) {
-  const target = {
-    current: unknownButton,
-    history: nextButton,
-    complete: nextSetButton,
-  }[view];
-  if (target && !target.hidden && !target.disabled) target.focus();
-}
-
-function emptyMessage(syncBlocked) {
-  if (syncBlocked) return "Sync is blocked. Review the saved errors or retry before starting the next set.";
+function emptyMessage() {
+  if (syncSummary.failed.length) {
+    return "Resolve the answer that needs attention before continuing.";
+  }
+  if (syncSummary.pending.length) {
+    if (!navigator.onLine) return "Reconnect to save your answers and continue.";
+    if (syncProblem) return "Your answers could not be saved. Select Try again.";
+  }
+  if (syncProblem && !syncSummary.pending.length) {
+    return navigator.onLine
+      ? "More cards could not be loaded. Select Try again."
+      : "More cards could not be loaded. Reconnect to try again.";
+  }
   if (state.emptyReason === "next_due") {
     const next = state.nextDue ? new Date(state.nextDue).toLocaleString() : "later";
     return `All caught up. The next review is due ${next}.`;
@@ -258,17 +285,22 @@ function emptyMessage(syncBlocked) {
   if (state.emptyReason === "catalog_empty") {
     return "The catalog is empty. Publish a catalog before studying.";
   }
-  if (isComplete()) return "Set complete.";
-  return "Reconnect to start a study set.";
+  if (batchConsumed()) return "Loading more cards…";
+  if (!writer) return "Another tab is currently handling study changes.";
+  return navigator.onLine ? "Loading cards…" : "Reconnect to continue studying.";
+}
+
+function releaseAudio() {
+  audioPresentation = null;
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  audio.hidden = true;
 }
 
 function presentAudio(word) {
-  if (!word) {
-    audioPresentation = null;
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
-    audio.hidden = true;
+  if (!word || !navigator.onLine) {
+    releaseAudio();
     return;
   }
   audio.hidden = false;
@@ -276,27 +308,64 @@ function presentAudio(word) {
   if (audioPresentation === identity) return;
   audioPresentation = identity;
   audio.src = word.audio_url;
+  audio.load();
+}
+
+function scheduleNextDue() {
+  if (nextDueTimer !== null) clearTimeout(nextDueTimer);
+  nextDueTimer = null;
+  if (state.emptyReason !== "next_due" || state.nextDue === null) return;
+  const delay = Date.parse(state.nextDue) - Date.now();
+  if (delay <= 0) {
+    if (shouldLoadBatch()) queueMicrotask(() => void loadBatch());
+    return;
+  }
+  nextDueTimer = setTimeout(() => {
+    nextDueTimer = null;
+    if (nextDueReached()) {
+      if (shouldLoadBatch()) void loadBatch();
+    } else {
+      scheduleNextDue();
+    }
+  }, Math.min(delay, 2_147_483_647));
 }
 
 function render() {
   const historical = displayedEntry();
   const word = displayedWord();
-  const complete = isComplete();
-  const syncBlocked = complete && syncSummary.pending.length + syncSummary.failed.length > 0;
-  const view = currentView();
+  const loadBlocked = syncProblem && !syncSummary.pending.length;
 
-  logoutButton.disabled = busy;
-  progress.textContent = historical
-    ? `History: ${state.cursor + 1}/${state.history.length} · ${state.cards.length - state.current} cards remaining`
-    : `${Math.min(state.current + 1, state.cards.length)}/${state.cards.length} cards`;
+  logoutButton.disabled = busy || !writer;
+  if (historical) {
+    progress.textContent = `Reviewing answer ${state.cursor + 1} of ${state.history.length}`;
+  } else if (word) {
+    progress.textContent = "Ready to answer";
+  } else if (syncSummary.failed.length) {
+    progress.textContent = "Answer needs attention";
+  } else if (!navigator.onLine && syncSummary.pending.length) {
+    progress.textContent = "Waiting to reconnect";
+  } else if (syncProblem && syncSummary.pending.length) {
+    progress.textContent = "Unable to save answers";
+  } else if (loadBlocked) {
+    progress.textContent = "Unable to load cards";
+  } else if (batchConsumed()) {
+    progress.textContent = "Loading more cards";
+  } else if (state.emptyReason === "next_due") {
+    progress.textContent = "No reviews due";
+  } else {
+    progress.textContent = "No cards available";
+  }
 
   setVisible(previousButton, Boolean(state.history.length), state.cursor > 0);
   setVisible(nextButton, Boolean(historical));
   setVisible(knownButton, Boolean(word), historical?.action !== "known");
   setVisible(unknownButton, Boolean(word), historical?.action !== "unknown");
-  knownButton.setAttribute("aria-pressed", String(historical?.action === "known"));
-  unknownButton.setAttribute("aria-pressed", String(historical?.action === "unknown"));
-  setVisible(nextSetButton, complete, navigator.onLine && !syncBlocked);
+  knownButton.textContent = historical
+    ? (historical.action === "known" ? "Known — saved" : "Change to Known")
+    : "Known";
+  unknownButton.textContent = historical
+    ? (historical.action === "unknown" ? "Unknown — saved" : "Change to Unknown")
+    : "Unknown";
 
   term.hidden = !word;
   tier.hidden = !word;
@@ -306,24 +375,18 @@ function render() {
     tier.textContent = formatTier(word);
     transcript.textContent = word.transcript || "Transcript is unavailable.";
     card.textContent = historical
-      ? `Earlier answer: ${historical.action === "known" ? "Known" : "Unknown"}. Navigate or correct it.`
+      ? "Review this saved answer, move through history, or choose the other answer to correct it."
       : "Choose Known or Unknown.";
   } else {
-    card.textContent = emptyMessage(syncBlocked);
-    progress.textContent = state.cards.length ? `${state.cards.length}/${state.cards.length} cards` : "No set loaded";
+    card.textContent = emptyMessage();
   }
   presentAudio(word);
+  renderSyncIssues(syncSummary.failed);
   renderStatus();
+  scheduleNextDue();
 
   const focused = document.activeElement;
-  if (focused?.hidden || focused?.disabled || focused?.closest("[hidden]")) {
-    focused.blur();
-    requestAnimationFrame(() => focusPrimary(view));
-  }
-  if (view !== lastView) {
-    lastView = view;
-    requestAnimationFrame(() => focusPrimary(view));
-  }
+  if (focused?.hidden || focused?.disabled || focused?.closest("[hidden]")) focused.blur();
 }
 
 async function quarantineEvent(snapshot, terminalStatus) {
@@ -356,7 +419,7 @@ async function syncChunk(chunk) {
     }))),
   });
   if (!response.ok) {
-    syncProblem = `Server error (HTTP ${response.status}); reviews kept for retry.`;
+    syncProblem = `The server could not save your answers (HTTP ${response.status}).`;
     return false;
   }
   const payload = await response.json();
@@ -364,7 +427,7 @@ async function syncChunk(chunk) {
   for (const snapshot of chunk) {
     const result = resultById.get(snapshot.id);
     if (!result) {
-      syncProblem = "Server response omitted a review; it was kept for retry.";
+      syncProblem = "The server did not confirm every answer. Your changes were kept for retry.";
       return false;
     }
     if (["conflict", "missing"].includes(result.status)) {
@@ -378,7 +441,7 @@ async function syncChunk(chunk) {
       } else if (voided.status === 204) {
         await removeSyncedEvent(snapshot);
       } else {
-        syncProblem = `Server error (HTTP ${voided.status}); correction kept for retry.`;
+        syncProblem = `The server could not save your correction (HTTP ${voided.status}).`;
         return false;
       }
     } else {
@@ -389,8 +452,10 @@ async function syncChunk(chunk) {
 }
 
 async function sync() {
+  if (!writer) return;
   syncRequested = true;
   if (syncFlight) return syncFlight;
+  let loadAfterSync = false;
   syncFlight = (async () => {
     while (navigator.onLine) {
       syncRequested = false;
@@ -407,12 +472,14 @@ async function sync() {
       }
       if (!completed) break;
     }
-    if (!navigator.onLine && (await allEvents()).length) syncProblem = null;
-    else if (!(await allEvents()).length) syncProblem = null;
+    const pending = await allEvents();
+    if (!navigator.onLine && pending.length) syncProblem = null;
+    else if (!pending.length) syncProblem = null;
     await refreshSyncStatus();
+    loadAfterSync = shouldLoadBatch();
     render();
   })().catch(async () => {
-    syncProblem = navigator.onLine ? "Network error; reviews kept for retry." : null;
+    syncProblem = navigator.onLine ? "A network error stopped answer sync. Your changes were kept." : null;
     await refreshSyncStatus();
     render();
   });
@@ -421,6 +488,7 @@ async function sync() {
   } finally {
     syncFlight = null;
     if (syncRequested && navigator.onLine) void sync();
+    else if (loadAfterSync) void loadBatch();
   }
 }
 
@@ -443,7 +511,6 @@ async function rateCurrent(action) {
     tx.objectStore("state").put({ key: STATE_KEY, value: next });
   });
   state = next;
-  syncRequested = true;
 }
 
 async function rateHistorical(action) {
@@ -472,12 +539,11 @@ async function rateHistorical(action) {
     tx.objectStore("state").put({ key: STATE_KEY, value: next });
   });
   state = next;
-  syncRequested = true;
 }
 
 async function rate(action) {
-  const historical = state.cursor < state.history.length;
-  if (busy || (!historical && !liveWord())) return;
+  const historical = displayedEntry();
+  if (busy || !writer || (!historical && !liveWord()) || historical?.action === action) return;
   busy = true;
   render();
   try {
@@ -489,90 +555,129 @@ async function rate(action) {
   } finally {
     busy = false;
     render();
-    await refreshSyncStatus();
-    void sync();
+    if (navigator.onLine) void sync();
+    else void refreshSyncStatus().then(render);
   }
 }
 
 async function navigateHistory(direction) {
-  if (busy || !state.history.length) return;
+  if (busy || !writer || !state.history.length) return;
   const next = clone(state);
   const destination = next.cursor + direction;
   if (destination < 0 || destination > next.history.length) return;
   next.cursor = destination;
-  await commitState(next);
-  userNotice = null;
+  try {
+    await commitState(next);
+    userNotice = null;
+  } catch (_) {
+    userNotice = "Your place could not be saved locally.";
+  }
   render();
 }
 
 async function retryFailedEvent(id) {
-  if (busy) return;
-  await transaction(["events", "failedEvents"], "readwrite", async (tx) => {
-    const failed = tx.objectStore("failedEvents");
-    const event = await requestValue(failed.get(id));
-    if (!event) return;
-    const { terminalStatus: _, ...retry } = event;
-    tx.objectStore("events").put(retry);
-    failed.delete(id);
-  });
-  syncProblem = null;
-  userNotice = null;
-  await refreshSyncStatus();
-  render();
-  void sync();
-}
-
-async function retryAllFailed() {
-  if (busy) return;
-  const failed = await allFailedEvents();
-  await Promise.all(failed.map((event) => retryFailedEvent(event.id)));
-  void sync();
-}
-
-async function dismissFailedEvent(id) {
-  if (busy) return;
-  if (!window.confirm("Dismiss this review from this device? The server history will not be changed.")) return;
-  await transaction("failedEvents", "readwrite", (tx) => {
-    tx.objectStore("failedEvents").delete(id);
-  });
-  userNotice = null;
-  await refreshSyncStatus();
-  render();
-}
-
-async function loadSet() {
-  if (busy || !navigator.onLine) {
-    userNotice = "Reconnect to load a new set.";
-    renderStatus();
-    return;
-  }
+  if (busy || !writer || !navigator.onLine) return;
   busy = true;
   render();
+  let queued = false;
   try {
-    await sync();
-    const outstanding = await refreshSyncStatus();
-    if (outstanding.pending.length || outstanding.failed.length) {
-      userNotice = "Resolve or retry saved reviews before starting the next set.";
-      return;
-    }
-    const response = await apiFetch("/api/v1/sets");
-    if (!response.ok) throw new Error("set unavailable");
-    const payload = await response.json();
-    const staged = {
-      ...emptyState(),
-      cards: payload.items,
-      emptyReason: payload.items.length ? null : payload.status,
-      nextDue: payload.next_due,
-    };
-    await writeState(staged);
-    state = staged;
+    queued = await transaction(["events", "failedEvents"], "readwrite", async (tx) => {
+      const failed = tx.objectStore("failedEvents");
+      const event = await requestValue(failed.get(id));
+      if (!event) return false;
+      const { terminalStatus: _, ...retry } = event;
+      tx.objectStore("events").put(retry);
+      failed.delete(id);
+      return true;
+    });
+    syncProblem = null;
     userNotice = null;
+    await refreshSyncStatus();
   } catch (_) {
-    userNotice = "A new set could not be loaded. Your current set was kept.";
+    userNotice = "The answer could not be prepared for retry.";
   } finally {
     busy = false;
     render();
   }
+  if (queued) void sync();
+}
+
+async function discardFailedEvent(id) {
+  if (busy || !writer) return;
+  if (!window.confirm("Discard this local answer change? The server history will not be changed.")) return;
+  const event = syncSummary.failed.find((failed) => failed.id === id);
+  if (!event) return;
+  busy = true;
+  render();
+  const next = clone(state);
+  const historyIndex = next.history.findIndex((entry) => entry.eventId === event.id
+    && entry.action === event.action
+    && entry.reviewed_at === event.reviewed_at);
+  if (historyIndex >= 0) {
+    next.history.splice(historyIndex, 1);
+    if (next.cursor > historyIndex) next.cursor -= 1;
+  }
+  let discarded = false;
+  try {
+    await transaction(["failedEvents", "state"], "readwrite", (tx) => {
+      tx.objectStore("failedEvents").delete(id);
+      tx.objectStore("state").put({ key: STATE_KEY, value: next });
+    });
+    state = next;
+    userNotice = null;
+    discarded = true;
+    await refreshSyncStatus();
+  } catch (_) {
+    userNotice = "The local answer change could not be discarded.";
+  } finally {
+    busy = false;
+    render();
+  }
+  if (discarded && shouldLoadBatch()) void loadBatch();
+}
+
+async function loadBatch() {
+  if (!writer || !navigator.onLine || loadFlight) return loadFlight;
+  loadFlight = (async () => {
+    busy = true;
+    render();
+    try {
+      const { pending, failed } = await refreshSyncStatus();
+      if (pending.length || failed.length) return;
+      const response = await apiFetch("/api/v1/sets");
+      if (!response.ok) throw new Error("cards unavailable");
+      const payload = await response.json();
+      const staged = clone(state);
+      staged.cards = payload.items;
+      staged.current = 0;
+      staged.emptyReason = payload.items.length ? null : payload.status;
+      staged.nextDue = payload.next_due;
+      await writeState(staged);
+      state = staged;
+      syncProblem = null;
+      userNotice = null;
+    } catch (_) {
+      syncProblem = "More cards could not be loaded. Your study history was kept.";
+      userNotice = null;
+    } finally {
+      busy = false;
+      render();
+    }
+  })();
+  try {
+    await loadFlight;
+  } finally {
+    loadFlight = null;
+  }
+  return null;
+}
+
+async function retryNetworkSync() {
+  if (busy || !writer || !navigator.onLine) return;
+  syncProblem = null;
+  userNotice = null;
+  render();
+  void sync();
 }
 
 async function clearPrivateData() {
@@ -588,7 +693,7 @@ async function clearPrivateData() {
 }
 
 async function logout() {
-  if (busy) return;
+  if (busy || !writer) return;
   if (!navigator.onLine) {
     userNotice = "You are offline. Sign-out was not sent and local study data was kept.";
     renderStatus();
@@ -596,13 +701,13 @@ async function logout() {
   }
   const { pending, failed } = await refreshSyncStatus();
   if (pending.length + failed.length > 0
-      && !window.confirm("Some reviews are not synced. Sign out and remove them from this device?")) {
+      && !window.confirm("Some answers are not synced. Sign out and remove them from this device?")) {
     userNotice = "Sign-out was cancelled; local study data was kept.";
     renderStatus();
     return;
   }
   busy = true;
-  logoutButton.disabled = true;
+  render();
   try {
     const response = await apiFetch("/auth/logout", { method: "POST", redirectOn401: false });
     if (![204, 401].includes(response.status)) throw new Error("logout failed");
@@ -622,46 +727,78 @@ async function logout() {
   }
 }
 
+async function acquireWriterLock() {
+  if (!("locks" in navigator)) {
+    writer = false;
+    return;
+  }
+  writer = await new Promise((resolve) => {
+    navigator.locks.request(WRITER_LOCK, { ifAvailable: true }, (lock) => {
+      if (!lock) {
+        resolve(false);
+        return undefined;
+      }
+      resolve(true);
+      return new Promise((release) => { releaseWriterLock = release; });
+    }).catch(() => resolve(false));
+  });
+}
+
 async function boot() {
+  await acquireWriterLock();
   let saved = null;
   try {
     saved = await getState();
   } catch (_) {
     userNotice = "Local study storage is unavailable.";
   }
+  if (validState(saved)) state = saved;
+  await refreshSyncStatus();
+  render();
+  if (!writer) return;
   if (validState(saved)) {
-    state = saved;
-    await refreshSyncStatus();
-    render();
+    void sync();
   } else if (navigator.onLine) {
-    await refreshSyncStatus();
-    await loadSet();
+    void loadBatch();
   } else {
-    state = emptyState();
-    await refreshSyncStatus();
-    userNotice = "Reconnect to start a study set.";
+    userNotice = "Reconnect to start studying.";
     render();
   }
-  void sync();
+}
+
+function showStartupFailure() {
+  state = emptyState();
+  userNotice = "Reconnect to start studying.";
+  render();
 }
 
 previousButton.addEventListener("click", () => navigateHistory(-1));
 nextButton.addEventListener("click", () => navigateHistory(1));
 knownButton.addEventListener("click", () => rate("known"));
 unknownButton.addEventListener("click", () => rate("unknown"));
-nextSetButton.addEventListener("click", loadSet);
-retrySyncButton.addEventListener("click", retryAllFailed);
+retrySyncButton.addEventListener("click", retryNetworkSync);
 logoutButton.addEventListener("click", logout);
 addEventListener("online", () => {
   userNotice = null;
-  void sync();
+  render();
+  if (writer) void sync();
 });
 addEventListener("offline", () => {
+  render();
   void refreshSyncStatus().then(render);
 });
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
-boot().catch(() => {
-  state = emptyState();
-  userNotice = "Reconnect to start a study set.";
-  render();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && shouldLoadBatch()) void loadBatch();
 });
+addEventListener("pagehide", () => {
+  if (releaseWriterLock) releaseWriterLock();
+  releaseWriterLock = null;
+  writer = false;
+});
+addEventListener("pageshow", (event) => {
+  if (event.persisted && !writer) {
+    void boot().catch(showStartupFailure);
+  }
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
+boot().catch(showStartupFailure);

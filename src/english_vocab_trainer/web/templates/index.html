@@ -17,8 +17,8 @@
     #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
     #unknown { background: #7b341e; }
     #previous, #next { background: #744210; }
-    #navigation-actions, #rating-actions, #set-actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
-    #set-actions, #secondary-actions { grid-template-columns: 1fr; }
+    #navigation-actions, #rating-actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+    #secondary-actions { grid-template-columns: 1fr; }
     #term, #transcript { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
     #progress, #status { color: #486581; font-size: .9rem; }
     #status { margin: .3rem 0; }
@@ -43,7 +43,7 @@
   <p id="status" hidden aria-live="assertive"></p>
   <p id="card" aria-live="polite">Loading your study set…</p>
   <h2 id="term" hidden></h2>
-  <audio id="audio" controls preload="auto"></audio>
+  <audio id="audio" controls preload="metadata"></audio>
   <p id="tier" hidden aria-live="polite"></p>
   <p id="transcript" hidden aria-live="polite"></p>
   <div id="navigation-actions">
@@ -54,15 +54,12 @@
     <button id="unknown" hidden>Unknown</button>
     <button id="known" hidden>Known</button>
   </div>
-  <div id="set-actions">
-    <button id="next-set" hidden>Next set</button>
-  </div>
   <div id="secondary-actions">
-    <button id="retry-sync" hidden>Retry sync</button>
+    <button id="retry-sync" hidden>Try again</button>
   </div>
   <section id="sync-issues" hidden>
-    <h2>Review sync issues</h2>
-    <p>These reviews need a decision. Retry them after checking the details, or dismiss one deliberately.</p>
+    <h2>Answers not saved</h2>
+    <p>Choose whether to retry each answer or discard its local change.</p>
     <ul id="sync-issues-list"></ul>
   </section>
 </main>

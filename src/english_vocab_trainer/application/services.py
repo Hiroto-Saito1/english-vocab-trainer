@@ -43,14 +43,10 @@ def submit_review(
 ) -> ReviewResult:
     existing = repo.get_event(event_id)
     if existing is not None:
-        allowed_ratings = {
-            ReviewAction.UNKNOWN: {Rating.AGAIN},
-            ReviewAction.KNOWN: {Rating.GOOD},
-        }[action]
         if (
             existing.word_id != word_id
             or existing.reviewed_at != reviewed_at
-            or existing.rating not in allowed_ratings
+            or existing.rating != rating_for_action(action)
         ):
             raise EventConflictError("review event conflict")
         return ReviewResult(
