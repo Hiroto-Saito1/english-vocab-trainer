@@ -175,28 +175,6 @@ def test_concurrent_distinct_events_are_serialized_and_both_persist(tmp_path: Pa
         assert repository.state("nine").due_at == replay_word_state("nine", [first, second]).due_at
 
 
-def test_exclusion_persists_and_hides_new_and_due_words_until_restored(tmp_path: Path) -> None:
-    path = tmp_path / "v.db"
-    now = datetime.now(UTC)
-    with SQLiteVocabularyRepository(path) as repository:
-        words(repository)
-        repository.append_event(event("nine", now))
-        repository.db.execute(
-            "UPDATE word_state SET due_at=? WHERE word_id='nine'",
-            ((now - timedelta(minutes=1)).isoformat(),),
-        )
-        repository.set_excluded("nine", True)
-        repository.set_excluded("ten", True)
-    with SQLiteVocabularyRepository(path) as repository:
-        assert {word.id for word in repository.list_excluded_words()} == {"nine", "ten"}
-        assert "nine" not in {word.id for word in repository.due_words(now, 30)}
-        assert "ten" not in {word.id for word in repository.list_words(limit=30)}
-        repository.set_excluded("nine", False)
-        repository.set_excluded("ten", False)
-        assert "nine" in {word.id for word in repository.due_words(now, 30)}
-        assert "ten" in {word.id for word in repository.list_words(limit=30)}
-
-
 def test_offline_unknown_then_known_has_same_state_when_synced_in_reverse(tmp_path: Path) -> None:
     reviewed_at = datetime(2026, 1, 1, tzinfo=UTC)
     unknown = (UUID(int=21), ReviewAction.UNKNOWN, reviewed_at)

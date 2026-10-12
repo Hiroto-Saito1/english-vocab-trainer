@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
     version INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES(1, 1);
+INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES(1, 2);
 
 CREATE TABLE IF NOT EXISTS words (
     id TEXT PRIMARY KEY,
@@ -11,8 +11,7 @@ CREATE TABLE IF NOT EXISTS words (
     level INTEGER,
     transcript TEXT,
     audio_key TEXT NOT NULL UNIQUE,
-    tier TEXT NOT NULL CHECK(tier IN ('upper', 'ultra')),
-    excluded INTEGER NOT NULL DEFAULT 0 CHECK(excluded IN (0, 1))
+    tier TEXT NOT NULL CHECK(tier IN ('upper', 'ultra'))
 );
 
 CREATE TABLE IF NOT EXISTS word_state (

@@ -15,22 +15,19 @@
     button[hidden], section[hidden], p[hidden], h2[hidden] { display: none; }
     button:disabled { opacity: .45; cursor: not-allowed; filter: grayscale(70%); }
     #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
-    #unknown, #exclude { background: #7b341e; }
-    #previous, #finish { background: #744210; }
+    #unknown { background: #7b341e; }
+    #previous, #next { background: #744210; }
     #actions, #secondary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
     #actions > :only-child { grid-column: 1 / -1; }
-    #term, #transcript, #exclusions { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
+    #term, #transcript { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
     #progress, #network-status, #sync-status, #cache-status, #notice { color: #486581; font-size: .9rem; }
     #network-status, #sync-status, #cache-status, #notice { margin: .3rem 0; }
-    #exclusions ul { padding-left: 0; list-style: none; }
-    #exclusions li { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #d9e2ec; }
     #sync-issues { background: #fff5f5; border: 1px solid #feb2b2; border-radius: .5rem; padding: 1rem; }
     #sync-issues ul { padding-left: 1.2rem; }
     #sync-issues li { margin: .75rem 0; }
     #sync-issues button { min-height: 2.5rem; margin: .25rem .25rem 0 0; }
     #readonly-status { background: #fffaf0; border-radius: .5rem; padding: .75rem; }
-    details { margin: 1rem 0; }
-    summary { cursor: pointer; font-weight: 650; padding: .6rem 0; }
+    audio { width: 100%; margin: .5rem 0; }
     @media (max-width: 390px) {
       main { padding: .9rem; }
       #actions, #secondary-actions { grid-template-columns: 1fr; }
@@ -51,19 +48,17 @@
   <p id="notice" aria-live="assertive"></p>
   <p id="card" aria-live="polite">Loading your study set…</p>
   <h2 id="term" hidden></h2>
-  <audio id="audio" preload="auto"></audio>
+  <audio id="audio" controls preload="auto"></audio>
   <p id="tier" hidden aria-live="polite"></p>
   <p id="transcript" hidden aria-live="polite"></p>
   <div id="actions">
     <button id="previous" hidden>Previous</button>
-    <button id="replay" hidden aria-label="Replay">Replay</button>
-    <button id="show-answer" hidden>Show answer</button>
+    <button id="next" hidden>Next</button>
     <button id="unknown" hidden>Unknown</button>
     <button id="known" hidden>Known</button>
     <button id="next-set" hidden>Next set</button>
   </div>
   <div id="secondary-actions">
-    <button id="finish" hidden>Finish for now</button>
     <button id="retry-sync" hidden>Retry sync</button>
   </div>
   <section id="sync-issues" hidden>
@@ -71,16 +66,6 @@
     <p>These reviews need a decision. Retry them after checking the details, or dismiss one deliberately.</p>
     <ul id="sync-issues-list"></ul>
   </section>
-  <details id="word-management">
-    <summary>Word management</summary>
-    <button id="exclude" hidden>Suspend current word</button>
-    <button id="manage-exclusions">Refresh suspended words</button>
-    <section id="exclusions">
-      <h2>Suspended words</h2>
-      <p id="exclusions-empty"></p>
-      <ul id="exclusions-list"></ul>
-    </section>
-  </details>
 </main>
 <script src="/static/app.js"></script>
 </body>

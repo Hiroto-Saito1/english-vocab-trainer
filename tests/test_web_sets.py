@@ -55,16 +55,13 @@ def test_empty_set_is_returned(tmp_path: Path) -> None:
     }
 
 
-def test_empty_set_distinguishes_suspended_words_and_future_reviews(tmp_path: Path) -> None:
+def test_empty_set_reports_the_next_future_review(tmp_path: Path) -> None:
     database = tmp_path / "v.db"
     word = Word("word", "word", 1, "definition", "word.mp3", Tier.UPPER)
     with SQLiteVocabularyRepository(database) as repository:
         repository.bulk_upsert_words([word])
-        repository.set_excluded(word.id, True)
     app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
     with TestClient(app) as client:
-        suspended = client.get("/api/v1/sets").json()
-        client.delete(f"/api/v1/exclusions/{word.id}")
         with SQLiteVocabularyRepository(database) as repository:
             repository.append_event(
                 ReviewEvent(
@@ -75,6 +72,5 @@ def test_empty_set_distinguishes_suspended_words_and_future_reviews(tmp_path: Pa
                 )
             )
         future = client.get("/api/v1/sets").json()
-    assert suspended["status"] == "all_suspended" and suspended["next_due"] is None
     assert future["status"] == "next_due"
     assert future["items"] == [] and future["next_due"] is not None

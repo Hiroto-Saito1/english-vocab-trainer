@@ -99,17 +99,11 @@ def test_void_review_is_idempotent_and_missing_is_404(tmp_path: Path) -> None:
     assert stored is not None and stored.voided_at is not None and missing.status_code == 404
 
 
-def test_suspended_words_are_listed_restored_and_excluded_from_sets(tmp_path: Path) -> None:
-    database = tmp_path / "v.db"
+def test_exclusion_api_is_not_part_of_the_application(tmp_path: Path) -> None:
     with _client(tmp_path, (word(),)) as client:
-        suspended = client.post("/api/v1/exclusions/one")
-        study_set = client.get("/api/v1/sets").json()
-        listed = client.get("/api/v1/exclusions").json()
-        restored = client.delete("/api/v1/exclusions/one")
-        missing = client.post("/api/v1/exclusions/missing")
-    with SQLiteVocabularyRepository(database) as repository:
-        assert [item.id for item in repository.list_words()] == ["one"]
-    assert suspended.status_code == restored.status_code == 204
-    assert study_set["items"] == []
-    assert listed == {"items": [{"id": "one", "term": "one", "level": 9, "tier": "upper"}]}
-    assert missing.status_code == 404
+        responses = [
+            client.get("/api/v1/exclusions"),
+            client.post("/api/v1/exclusions/one"),
+            client.delete("/api/v1/exclusions/one"),
+        ]
+    assert all(response.status_code == 404 for response in responses)

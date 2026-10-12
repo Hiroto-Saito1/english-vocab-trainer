@@ -79,19 +79,8 @@ class WordOut(BaseModel):
 class SetOut(BaseModel):
     items: list[WordOut]
     learning_step_seconds: int
-    status: Literal["ready", "next_due", "all_suspended", "catalog_empty"]
+    status: Literal["ready", "next_due", "catalog_empty"]
     next_due: datetime | None = None
-
-
-class ExcludedWordOut(BaseModel):
-    id: str
-    term: str
-    level: int | None
-    tier: Tier
-
-
-class ExclusionsOut(BaseModel):
-    items: list[ExcludedWordOut]
 
 
 class EventResultOut(BaseModel):
@@ -236,7 +225,7 @@ def service_worker() -> FileResponse:
 def study_set(repository: Repository) -> SetOut:
     now = datetime.now(UTC)
     words = select_set_words(repository, now, Random())
-    status: Literal["ready", "next_due", "all_suspended", "catalog_empty"] = "ready"
+    status: Literal["ready", "next_due", "catalog_empty"] = "ready"
     next_due = None
     if not words:
         status, next_due = repository.empty_set_status(now)
@@ -246,34 +235,6 @@ def study_set(repository: Repository) -> SetOut:
         status=status,
         next_due=next_due,
     )
-
-
-@router.get("/api/v1/exclusions", response_model=ExclusionsOut)
-def exclusions(repository: Repository) -> ExclusionsOut:
-    return ExclusionsOut(
-        items=[
-            ExcludedWordOut(id=word.id, term=word.term, level=word.level, tier=word.tier)
-            for word in repository.list_excluded_words()
-        ]
-    )
-
-
-@router.post("/api/v1/exclusions/{word_id}", status_code=204)
-def exclude_word(word_id: str, repository: Repository, _: Csrf) -> Response:
-    try:
-        repository.set_excluded(word_id, True)
-    except MissingError as exc:
-        raise HTTPException(404, "word not found") from exc
-    return Response(status_code=204)
-
-
-@router.delete("/api/v1/exclusions/{word_id}", status_code=204)
-def restore_word(word_id: str, repository: Repository, _: Csrf) -> Response:
-    try:
-        repository.set_excluded(word_id, False)
-    except MissingError as exc:
-        raise HTTPException(404, "word not found") from exc
-    return Response(status_code=204)
 
 
 @router.post("/api/v1/review-events/batch", response_model=BatchOut)

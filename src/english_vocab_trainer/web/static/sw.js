@@ -1,5 +1,5 @@
-const SHELL = "pwa-shell-v5";
-const AUDIO = "pwa-private-audio-v5";
+const SHELL = "pwa-shell-v6";
+const AUDIO = "pwa-private-audio-v6";
 const MANAGED_PREFIX = "pwa-";
 const SHELL_ASSETS = ["/", "/static/app.js", "/static/manifest.json", "/static/icon.svg"];
 let activeAudioUrls = new Set();

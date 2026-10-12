@@ -4,7 +4,7 @@ English Vocab Trainer は、英語音声を起点にして単語を学習する�
 
 音声、カタログ、文字起こし、認証情報、生成した SQLite データベースは Git に含めません。DB は `schema_metadata` の version と全 table の正確な列集合を起動時に検査します。現行スキーマだけをサポートし、旧 DB の暗黙利用や自動 upgrade は行いません。不一致なら起動と `/readyz` が明示的に失敗します。
 
-旧 DB を破壊的に作り直すときは、DB ファイルだけを削除して再起動してはいけません。`restore-if-db-not-exists` が旧レプリカを復元するためです。まず application と Litestream を停止し、旧 volume の DB と `-wal` / `-shm` をまとめて別の安全な場所へ退避してから、volume 上の3ファイルを除去します。次に、Litestream が新しいスキーマ別 prefix `backups/sqlite/schema-v1/vocab.db` を参照することを確認し、production entrypoint を動かす前に、現行スキーマの DB を seed または初期化して監査済み catalog を publish します。旧 `backups/sqlite/vocab.db` レプリカは削除せず、rollback / archive 用に残します。旧学習履歴は新 DB へ引き継げません。退避ファイルを現行 DB path へ戻したり、稼働中に DB だけを差し替えたりしないでください。
+旧 DB を破壊的に作り直すときは、DB ファイルだけを削除して再起動してはいけません。`restore-if-db-not-exists` が旧レプリカを復元するためです。まず application と Litestream を停止し、旧 volume の DB と `-wal` / `-shm` をまとめて別の安全な場所へ退避してから、volume 上の3ファイルを除去します。次に、Litestream が現行スキーマ専用 prefix `backups/sqlite/schema-v2/vocab.db` を参照することを確認し、production entrypoint を動かす前に、現行スキーマの DB を seed または初期化して監査済み catalog を publish します。旧 `backups/sqlite/schema-v1/vocab.db` と `backups/sqlite/vocab.db` は削除せず、rollback / archive 用に残します。旧学習履歴は新 DB へ引き継げません。退避ファイルを現行 DB path へ戻したり、稼働中に DB だけを差し替えたりしないでください。
 
 ## 開発と検証
 
@@ -95,21 +95,21 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 ## 学習とオフライン動作
 
-学習画面は audio-first です。聴取中に表示する操作は **Previous / Replay / Show answer**、答えを表示した後は **Previous / Unknown / Known**、set 完了後は **Previous / Next set** だけです。Known / Unknown が回答確定と次カードへの移動を兼ね、カード単位の Continue / Next はありません。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
+カードは最初から term、tier、英語の transcript / definition を表示します。音声操作は browser 標準の audio controls だけで、自動再生や別の Play / Replay ボタンはありません。未回答カードでは **Previous / Unknown / Known**、履歴中では **Previous / Next / Unknown / Known**、再学習待ちでは **Previous**、set 完了後では **Previous / Next set** だけを表示します。Known / Unknown は回答確定と未回答カードへの自動移動を兼ねます。Known は常に FSRS の Good、Unknown は常に Again です。この決定は event の到着順や server 上の先行 review の有無に依存しません。review event は UUID で冪等であり、同じ UUID で異なる内容を送れば conflict になります。
 
-**Previous** は直前の回答を取り消し、直前の語を答え非表示の聴取状態へ戻します。その時点で見ていた次のカードは queue に残ります。通信結果が不明でも event を端末から削除せず、同じ UUID の review を再送して server 適用を確定してから void します。回答 event の outbox 追加と学習進行 state、Previous の void intent と復元 state は、それぞれ 1 回の IndexedDB transaction で同時に保存します。したがって local 保存失敗で回答だけ、または進行位置だけが残ることはありません。
+**Previous / Next** は現在の set 内の回答履歴と未回答境界を往復するだけで、review event を変更しません。履歴カードで同じ回答を選ぶと書き込まず次へ進み、異なる回答を選ぶと元 event の void intent と新しい UUID の review を同じ IndexedDB transaction で保存します。訂正では元の `reviewed_at` を維持し、通信結果が不明な event も消さずに冪等再送で適用を確定してから void します。新しい回答の outbox 追加と履歴進行、履歴訂正の void / review と進行更新はそれぞれ atomic です。
 
 server は 30 枚の set をその場で選び、選出結果自体は永続化しません。期限到来済みの語を先に採用し、残りは level の低い新規語を優先して、level 不明を最後にします。採用後の提示順だけを shuffle します。set と review outbox はブラウザの IndexedDB に保存するため、reload で完了済み set が暗黙に次の set へ切り替わることはありません。**Next set** を押したときだけ server から再取得します。新 set は IndexedDB への保存が完了してから画面に反映し、audio cache の失敗とは別に扱います。pending または隔離 review が 1 件でもあれば次 set は開始できません。
 
-Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。進捗は初回カードと再学習を分けて表示し、待機中は **Finish for now** で終了できます。次回の明示的な set 取得では、server 側で期限に達した語を通常どおり再取得します。語を word management の **Suspend current word** で停止すると、DB の新規・期限到来候補、再生、preload、cache、local 学習 queue、同語の Previous snapshot から除外します。曖昧な通信結果を持つ review outbox は消さず、冪等同期で確定します。一覧の **Restore** で次回以降の set に復帰できます。
+Unknown の 10 分後の再学習が次のカード境界で期限に達していれば、残りの初回カードより先に表示します。再学習対象は履歴の各語の最新回答から導出し、別 queue は保存しません。進捗は初回カードと再学習を分けて表示します。待機中は Previous で履歴を見返せますが、Next set は開始できません。次の set は現在の set と再学習が完了した後に明示的に開始します。
 
 同期表示は network、server HTTP error、再試行不能な conflict/missing、audio cache を別々に扱います。同期開始後に追加された event も含め、通常 outbox が空になるまで単一の同期処理が再読込します。`applied`、`idempotent`、`voided` の event だけを通常 outbox から削除します。conflict と missing は再送 outbox から隔離して無限再送を止め、UUID・語・回答・理由を表示します。利用者は 1 件ずつ再試行または確認付きで破棄できます。通常の同期成功時は過去の一時的な network/server error 表示を解消します。
 
-同じ browser profile では Web Locks により学習を変更できる tab を 1 つに限定します。他の tab は BroadcastChannel で保存済み state を追従する読み取り専用画面となり、自動音声再生もしません。active tab を閉じると待機中の tab が lock を取得して学習を継続できます。空の set は `next_due`、全語停止、catalog 未投入、同期阻害を区別し、期限がある場合は次回時刻を表示します。画面フェーズが変わるたびに主要操作へ focus を移し、非表示要素には focus を残しません。
+同じ browser profile では Web Locks により学習を変更できる tab を 1 つに限定します。他の tab は BroadcastChannel で保存済み state を追従する読み取り専用画面となります。active tab を閉じると待機中の tab が lock を取得して学習を継続できます。空状態は `next_due`、catalog 未投入の `catalog_empty`、local の同期阻害を区別し、期限がある場合は次回時刻を表示します。表示状態が変わるたびに主要操作へ focus を移し、非表示要素には focus を残しません。
 
 オンラインで学習対象を取得すると、PWA は全ての full `200` audio response を private Cache Storage へ preload します。失敗しても online 再生は継続できます。新しい学習対象では古い audio cache を先に削除し、中断した保存済み学習を開き直す場合は対応する audio を保持します。preload の世代は process-local な epoch だけで管理し、古い世代の応答が現在の cache に混入するのを防ぎます。
 
-offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。現在の IndexedDB state format は 2（DB version 3）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。
+offline reload でも保存した学習を再開できます。通常 GET は cache の full response、single byte range は正しい `206` として合成します。Service Worker は API、review、認証 JSON や upstream の `206` を cache しません。static shell は network-first、失敗時だけ cache fallback です。初回から offline の場合や、完了後に新しい学習を取得できない場合は、既存の local data を壊さず再接続を促します。現在の IndexedDB state format は 3（DB version 4）です。互換性のない旧 local set/outbox は upgrade 時に破棄しますが、server の review history は変更しません。
 
 `window.clearPrivateCaches()` は明示的な端末内 privacy boundary です。進行中の audio preload を `AbortController` で止めて audio cache を削除し、IndexedDB の学習状態、通常 outbox、隔離 event を transaction で空にします。DB 自体を delete しないのは、生きている browser connection による永続的な block を避けるためです。audio cache の rotate だけでは IndexedDB の学習状態や outbox を削除しません。
 
@@ -166,7 +166,7 @@ Fly では `FLY_APP_NAME` が platform から渡されます。追加 host が�
 fly secrets import --app "$FLY_APP" < .private/fly-production.env
 ```
 
-audio read、offline upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。現行スキーマはスキーマ別 path `backups/sqlite/schema-v1/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。schema を破壊的に変更するときは別の `schema-vN` prefix へ進め、古い prefix は rollback / archive 用に保持します。この設定は LTX chain の誤削除を避ける代わりに immutable growth を生むため、object lifecycle を変更するときは chain 全体から restore できる policy を事前検証してください。
+audio read、offline upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。現行スキーマはスキーマ別 path `backups/sqlite/schema-v2/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。schema を破壊的に変更するときは別の `schema-vN` prefix へ進め、古い prefix は rollback / archive 用に保持します。この設定は LTX chain の誤削除を避ける代わりに immutable growth を生むため、object lifecycle を変更するときは chain 全体から restore できる policy を事前検証してください。
 
 初回 deploy と schema prefix の切替前には、full catalog の audit/validate、2,000 音声の upload と metadata/size 検証、履歴のない R2-key SQLite seed の publish を完了させます。schema 切替では application / Litestream を停止し、旧 volume の DB / WAL / SHM を退避して除去した後、新 prefix を設定した image と現行 schema の seed DB を volume へ配置します。seed を事前作成しない場合は、production entrypoint とは別の停止中 maintenance 環境で現行 DB を初期化し、catalog を publish してから起動してください。acceptance 用の学習履歴入り DB は seed に使わないでください。
 

@@ -61,8 +61,8 @@ class SQLiteVocabularyRepository:
         """Atomically publish a fully validated catalog without touching review history."""
         with self._transaction():
             self.db.executemany(
-                "INSERT INTO words(id,term,level,transcript,audio_key,tier,excluded) "
-                "VALUES(?,?,?,?,?,?,0) "
+                "INSERT INTO words(id,term,level,transcript,audio_key,tier) "
+                "VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
                 "transcript=excluded.transcript,audio_key=excluded.audio_key,tier=excluded.tier",
                 [
@@ -95,7 +95,7 @@ class SQLiteVocabularyRepository:
 
     def list_words(self, *, limit: int = 100) -> list[Word]:
         query = (
-            "SELECT w.* FROM words w WHERE w.excluded=0 AND NOT EXISTS("
+            "SELECT w.* FROM words w WHERE NOT EXISTS("
             "SELECT 1 FROM review_events e "
             "WHERE e.word_id=w.id AND e.voided_at IS NULL) "
             "ORDER BY w.level IS NULL,w.level,w.id LIMIT ?"
@@ -105,23 +105,17 @@ class SQLiteVocabularyRepository:
     def due_words(self, now: datetime, limit: int) -> list[Word]:
         query = (
             "SELECT w.* FROM word_state s JOIN words w ON w.id=s.word_id "
-            "WHERE w.excluded=0 AND s.due_at<=? ORDER BY s.due_at LIMIT ?"
+            "WHERE s.due_at<=? ORDER BY s.due_at LIMIT ?"
         )
         return [self._word(row) for row in self.db.execute(query, (_iso(now), limit))]
 
     def empty_set_status(
         self, now: datetime
-    ) -> tuple[Literal["next_due", "all_suspended", "catalog_empty"], datetime | None]:
-        totals = self.db.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN excluded=0 THEN 1 ELSE 0 END) FROM words"
-        ).fetchone()
-        if totals[0] == 0:
+    ) -> tuple[Literal["next_due", "catalog_empty"], datetime | None]:
+        if self.db.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 0:
             return "catalog_empty", None
-        if totals[1] == 0:
-            return "all_suspended", None
         row = self.db.execute(
-            "SELECT MIN(s.due_at) FROM word_state s "
-            "JOIN words w ON w.id=s.word_id WHERE w.excluded=0 AND s.due_at>?",
+            "SELECT MIN(due_at) FROM word_state WHERE due_at>?",
             (_iso(now),),
         ).fetchone()
         if row[0] is None:
@@ -157,22 +151,6 @@ class SQLiteVocabularyRepository:
         if row is None:
             return WordState(word_id, datetime.min.replace(tzinfo=UTC))
         return WordState(word_id, datetime.fromisoformat(row["due_at"]))
-
-    def list_excluded_words(self) -> list[Word]:
-        return [
-            self._word(row)
-            for row in self.db.execute(
-                "SELECT * FROM words WHERE excluded=1 ORDER BY level IS NULL,level,term,id"
-            )
-        ]
-
-    def set_excluded(self, word_id: str, excluded: bool) -> None:
-        with self._transaction():
-            cursor = self.db.execute(
-                "UPDATE words SET excluded=? WHERE id=?", (int(excluded), word_id)
-            )
-            if cursor.rowcount != 1:
-                raise MissingError("word not found")
 
     def _save(self, state: WordState) -> None:
         self.db.execute(

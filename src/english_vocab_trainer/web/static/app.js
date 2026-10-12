@@ -1,8 +1,8 @@
 const DB_NAME = "english-vocab-trainer";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STATE_KEY = "active-set";
-const STATE_FORMAT = 2;
-const AUDIO_CACHE = "pwa-private-audio-v5";
+const STATE_FORMAT = 3;
+const AUDIO_CACHE = "pwa-private-audio-v6";
 const AUDIO_PRELOAD_CONCURRENCY = 4;
 const SYNC_BATCH_SIZE = 100;
 const STUDY_LOCK = "english-vocab-trainer-active-study";
@@ -10,13 +10,11 @@ const STUDY_LOCK = "english-vocab-trainer-active-study";
 const emptyState = () => ({
   format: STATE_FORMAT,
   cards: [],
-  current: 0,
+  initialIndex: 0,
   active: null,
-  phase: "unavailable",
-  previous: null,
-  learningQueue: [],
+  history: [],
+  cursor: 0,
   learningStepSeconds: 600,
-  finished: false,
   emptyReason: null,
   nextDue: null,
 });
@@ -41,7 +39,7 @@ let audioPresentation = null;
 let lastView = null;
 
 const stateChannel = "BroadcastChannel" in window
-  ? new BroadcastChannel("english-vocab-trainer-state-v2")
+  ? new BroadcastChannel("english-vocab-trainer-state-v3")
   : null;
 const $ = (selector) => document.querySelector(selector);
 const card = $("#card");
@@ -50,18 +48,11 @@ const tier = $("#tier");
 const transcript = $("#transcript");
 const audio = $("#audio");
 const previousButton = $("#previous");
-const replayButton = $("#replay");
-const showAnswerButton = $("#show-answer");
+const nextButton = $("#next");
 const knownButton = $("#known");
 const unknownButton = $("#unknown");
 const nextSetButton = $("#next-set");
-const finishButton = $("#finish");
 const retrySyncButton = $("#retry-sync");
-const excludeButton = $("#exclude");
-const manageExclusionsButton = $("#manage-exclusions");
-const wordManagement = $("#word-management");
-const exclusionsList = $("#exclusions-list");
-const exclusionsEmpty = $("#exclusions-empty");
 const syncIssues = $("#sync-issues");
 const syncIssuesList = $("#sync-issues-list");
 const progress = $("#progress");
@@ -169,14 +160,17 @@ const allFailedEvents = () => transaction(
   "failedEvents", "readonly", (tx) => requestValue(tx.objectStore("failedEvents").getAll()),
 );
 
+function clone(value) {
+  return structuredClone(value);
+}
+
 function validState(saved) {
   return saved?.format === STATE_FORMAT
     && Array.isArray(saved.cards)
-    && Array.isArray(saved.learningQueue);
-}
-
-function clone(value) {
-  return structuredClone(value);
+    && Array.isArray(saved.history)
+    && Number.isInteger(saved.cursor)
+    && saved.cursor >= 0
+    && saved.cursor <= saved.history.length;
 }
 
 function broadcastState() {
@@ -189,32 +183,40 @@ async function commitState(next) {
   broadcastState();
 }
 
-function dueLearning(target) {
-  return target.learningQueue
-    .filter((item) => item.due_at <= nowMs())
-    .sort((left, right) => left.due_at - right.due_at)[0] || null;
-}
-
-function chooseNextCard(target) {
-  if (target.finished || target.active) return;
-  const learning = dueLearning(target);
-  if (learning) {
-    target.active = { kind: "learning", word: learning.word };
-    target.phase = "listening";
-    return;
-  }
-  if (target.current < target.cards.length) {
-    target.active = { kind: "initial", word: target.cards[target.current] };
-    target.phase = "listening";
-  }
-}
-
 function nowMs() {
   return window.__pwaTestClock?.now?.() ?? Date.now();
 }
 
+function outstandingLearning(target) {
+  const latest = new Map();
+  for (const entry of target.history) latest.set(entry.word.id, entry);
+  return [...latest.values()]
+    .filter((entry) => entry.action === "unknown")
+    .sort((left, right) => left.due_at - right.due_at);
+}
+
+function chooseLiveCard(target) {
+  if (target.active) return;
+  const learning = outstandingLearning(target).find((entry) => entry.due_at <= nowMs());
+  if (learning) {
+    target.active = { kind: "learning", word: learning.word };
+    return;
+  }
+  if (target.initialIndex < target.cards.length) {
+    target.active = { kind: "initial", word: target.cards[target.initialIndex] };
+  }
+}
+
+function displayedEntry() {
+  return state.cursor < state.history.length ? state.history[state.cursor] : null;
+}
+
+function displayedWord() {
+  return displayedEntry()?.word || state.active?.word || null;
+}
+
 function remainingInitial() {
-  return Math.max(0, state.cards.length - state.current);
+  return Math.max(0, state.cards.length - state.initialIndex);
 }
 
 function formatTier(word) {
@@ -284,27 +286,6 @@ async function refreshSyncStatus() {
   return syncSummary;
 }
 
-function playAudio(showFailure = true) {
-  if (!state.active) return;
-  audio.play().catch(() => {
-    if (showFailure) notice.textContent = "Audio could not start. Try Replay audio again.";
-  });
-}
-
-function presentAudio() {
-  if (!state.active) {
-    audioPresentation = null;
-    audio.removeAttribute("src");
-    return;
-  }
-  const identity = state.active.word.id;
-  if (audioPresentation === identity) return;
-  audioPresentation = identity;
-  audio.src = state.active.word.audio_url;
-  audio.currentTime = 0;
-  if (!readOnly) playAudio(false);
-}
-
 function clearLearningTimer() {
   if (learningTimer) clearTimeout(learningTimer);
   learningTimer = null;
@@ -312,15 +293,15 @@ function clearLearningTimer() {
 
 function armLearningTimer() {
   clearLearningTimer();
-  if (readOnly || state.finished || state.active || !state.learningQueue.length) return;
-  const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
-  learningTimer = setTimeout(wakeForLearning, Math.max(0, earliest - nowMs()));
+  const learning = outstandingLearning(state);
+  if (readOnly || state.active || state.cursor < state.history.length || !learning.length) return;
+  learningTimer = setTimeout(wakeForLearning, Math.max(0, learning[0].due_at - nowMs()));
 }
 
 async function wakeForLearning() {
   if (readOnly) return;
   const next = clone(state);
-  chooseNextCard(next);
+  chooseLiveCard(next);
   if (next.active) await commitState(next);
   render();
 }
@@ -332,90 +313,100 @@ function setVisible(button, visible, enabled = true) {
 
 function currentView() {
   if (readOnly) return "readonly";
-  if (state.active) return state.phase;
-  if (!state.finished && state.learningQueue.length) return "waiting";
-  return "complete";
+  if (state.cursor < state.history.length) return "history";
+  if (state.active) return "current";
+  if (outstandingLearning(state).length) return "waiting";
+  return state.emptyReason || "complete";
 }
 
 function focusPrimary(view) {
   const target = {
-    listening: showAnswerButton,
-    answer: unknownButton,
-    waiting: finishButton,
+    current: unknownButton,
+    history: nextButton,
+    waiting: previousButton,
     complete: nextSetButton,
+    next_due: nextSetButton,
+    catalog_empty: nextSetButton,
   }[view];
   if (target && !target.hidden && !target.disabled) target.focus();
 }
 
 function emptyMessage(syncBlocked) {
   if (syncBlocked) return "Sync is blocked. Review the saved errors or retry before starting the next set.";
-  if (state.finished) return "Set complete. Start the next set when you are ready.";
   if (state.emptyReason === "next_due") {
     const next = state.nextDue ? new Date(state.nextDue).toLocaleString() : "later";
     return `All caught up. The next review is due ${next}.`;
   }
-  if (state.emptyReason === "all_suspended") {
-    return "All words are suspended. Restore a word to study again.";
-  }
   if (state.emptyReason === "catalog_empty") {
     return "The catalog is empty. Publish a catalog before studying.";
   }
-  return state.cards.length ? "Set complete." : "All caught up. Nothing is due.";
+  return "Set complete.";
+}
+
+function presentAudio(word) {
+  if (!word) {
+    audioPresentation = null;
+    audio.removeAttribute("src");
+    audio.load();
+    audio.hidden = true;
+    return;
+  }
+  audio.hidden = false;
+  const identity = `${word.id}\u0000${word.audio_url}`;
+  if (audioPresentation === identity) return;
+  audioPresentation = identity;
+  audio.src = word.audio_url;
 }
 
 function render() {
   clearLearningTimer();
   updateNetworkStatus();
   updateCacheStatus();
-  const active = state.active;
-  const listening = Boolean(active) && state.phase === "listening";
-  const answering = Boolean(active) && state.phase === "answer";
-  const waiting = !active && !state.finished && state.learningQueue.length > 0;
-  const complete = !active && !waiting;
+  const historical = displayedEntry();
+  const atBoundary = state.cursor === state.history.length;
+  const word = displayedWord();
+  const learning = outstandingLearning(state);
+  const waiting = atBoundary && !state.active && learning.length > 0;
+  const complete = atBoundary && !state.active && !waiting;
   const syncBlocked = complete && syncSummary.pending.length + syncSummary.failed.length > 0;
   const view = currentView();
 
   readOnlyStatus.hidden = !readOnly;
   logoutButton.disabled = busy || readOnly;
-  wordManagement.hidden = readOnly;
-  progress.textContent = `Initial: ${remainingInitial()} remaining · Relearning: ${state.learningQueue.length}`;
-  setVisible(previousButton, Boolean(active) || waiting || complete, Boolean(state.previous));
-  setVisible(replayButton, listening);
-  setVisible(showAnswerButton, listening);
-  setVisible(knownButton, answering);
-  setVisible(unknownButton, answering);
-  setVisible(finishButton, waiting);
-  setVisible(nextSetButton, complete, navigator.onLine && !syncBlocked);
-  setVisible(excludeButton, Boolean(active));
+  progress.textContent = historical
+    ? `History: ${state.cursor + 1}/${state.history.length} · Initial: ${remainingInitial()} remaining · Relearning: ${learning.length}`
+    : `Initial: ${remainingInitial()} remaining · Relearning: ${learning.length}`;
 
-  term.hidden = !answering;
-  tier.hidden = !answering;
-  transcript.hidden = !answering;
-  if (active) {
-    card.textContent = listening
-      ? "Listen to the word, then show the answer."
-      : "Review the answer, then choose Known or Unknown.";
-    term.textContent = active.word.term;
-    tier.textContent = formatTier(active.word);
-    transcript.textContent = active.word.transcript || "Transcript is unavailable.";
-    presentAudio();
+  setVisible(previousButton, Boolean(state.history.length), state.cursor > 0);
+  setVisible(nextButton, Boolean(historical));
+  setVisible(knownButton, Boolean(word));
+  setVisible(unknownButton, Boolean(word));
+  setVisible(nextSetButton, complete, navigator.onLine && !syncBlocked);
+
+  term.hidden = !word;
+  tier.hidden = !word;
+  transcript.hidden = !word;
+  if (word) {
+    term.textContent = word.term;
+    tier.textContent = formatTier(word);
+    transcript.textContent = word.transcript || "Transcript is unavailable.";
+    card.textContent = historical
+      ? `Earlier answer: ${historical.action === "known" ? "Known" : "Unknown"}. Navigate or correct it.`
+      : "Choose Known or Unknown.";
+  } else if (state.cards.length === 0 && state.emptyReason === null) {
+    card.textContent = readOnly
+      ? "Waiting for the active study tab to load a set."
+      : "Reconnect to start a study set.";
+    progress.textContent = "No set loaded";
+    nextSetButton.hidden = true;
+  } else if (waiting) {
+    const seconds = Math.max(0, Math.ceil((learning[0].due_at - nowMs()) / 1000));
+    card.textContent = `Waiting for relearning: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
+    armLearningTimer();
   } else {
-    presentAudio();
-    if (state.phase === "unavailable") {
-      card.textContent = readOnly
-        ? "Waiting for the active study tab to load a set."
-        : "Reconnect to start a study set.";
-      progress.textContent = "No set loaded";
-      nextSetButton.hidden = true;
-    } else if (waiting) {
-      const earliest = Math.min(...state.learningQueue.map((item) => item.due_at));
-      const seconds = Math.max(0, Math.ceil((earliest - nowMs()) / 1000));
-      card.textContent = `Waiting for relearning: ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}.`;
-      armLearningTimer();
-    } else {
-      card.textContent = emptyMessage(syncBlocked);
-    }
+    card.textContent = emptyMessage(syncBlocked);
   }
+  presentAudio(word);
 
   const focused = document.activeElement;
   if (focused?.hidden || focused?.closest("[hidden]")) focused.blur();
@@ -452,8 +443,8 @@ function sendWorkerMessage(data) {
 
 function audioUrls(target = state) {
   return [...new Set([
-    ...target.cards.slice(target.current).map((word) => word.audio_url),
-    ...target.learningQueue.map((item) => item.word.audio_url),
+    ...target.cards.map((word) => word.audio_url),
+    ...target.history.map((entry) => entry.word.audio_url),
   ])];
 }
 
@@ -551,15 +542,15 @@ async function acknowledgeReview(snapshot, result) {
     const events = tx.objectStore("events");
     const current = await requestValue(events.get(snapshot.id));
     if ((current?.intent || "review") !== snapshot.intent) return;
-    if (snapshot.action === "unknown" && result.due_at) {
+    if (result.due_at) {
       const states = tx.objectStore("state");
       const record = await requestValue(states.get(STATE_KEY));
       if (validState(record?.value)) {
         const next = clone(record.value);
-        const queued = next.learningQueue.find((item) => item.eventId === snapshot.id);
+        const entry = next.history.find((candidate) => candidate.eventId === snapshot.id);
         const dueAt = Date.parse(result.due_at);
-        if (queued && Number.isFinite(dueAt)) {
-          queued.due_at = dueAt;
+        if (entry && Number.isFinite(dueAt)) {
+          entry.due_at = dueAt;
           states.put({ key: STATE_KEY, value: next });
           updatedState = next;
         }
@@ -607,7 +598,7 @@ async function syncChunk(chunk) {
       } else if (voided.status === 204) {
         await removeSyncedEvent(snapshot);
       } else {
-        syncProblem = `server error (HTTP ${voided.status}); undo kept for retry.`;
+        syncProblem = `server error (HTTP ${voided.status}); correction kept for retry.`;
         return false;
       }
     } else if (snapshot.intent === "void") {
@@ -628,9 +619,11 @@ async function sync() {
       syncRequested = false;
       const events = (await allEvents()).map(normalizedEvent);
       if (!events.length) break;
+      const voids = events.filter((event) => event.intent === "void");
+      const work = voids.length ? voids : events;
       let completed = true;
-      for (let offset = 0; offset < events.length; offset += SYNC_BATCH_SIZE) {
-        if (!await syncChunk(events.slice(offset, offset + SYNC_BATCH_SIZE))) {
+      for (let offset = 0; offset < work.length; offset += SYNC_BATCH_SIZE) {
+        if (!await syncChunk(work.slice(offset, offset + SYNC_BATCH_SIZE))) {
           completed = false;
           break;
         }
@@ -656,98 +649,115 @@ async function sync() {
   }
 }
 
-async function showAnswer() {
-  if (busy || readOnly || !state.active || state.phase !== "listening") return;
-  const next = clone(state);
-  next.phase = "answer";
-  await commitState(next);
-  render();
+function localDue(reviewedAt, action) {
+  return action === "unknown"
+    ? Date.parse(reviewedAt) + state.learningStepSeconds * 1000
+    : null;
 }
 
-async function answer(action) {
-  if (busy || readOnly || !state.active || state.phase !== "answer") return;
-  busy = true;
-  render();
-  audio.pause();
+async function rateCurrent(action) {
   const active = clone(state.active);
+  const reviewedAt = new Date(nowMs()).toISOString();
   const event = {
     id: crypto.randomUUID(),
     word_id: active.word.id,
     action,
-    reviewed_at: new Date(nowMs()).toISOString(),
+    reviewed_at: reviewedAt,
     intent: "review",
-    previousCurrent: state.current,
-    previousActive: active,
-    previousLearningQueue: clone(state.learningQueue),
   };
   const next = clone(state);
-  if (active.kind === "initial") next.current += 1;
-  next.learningQueue = next.learningQueue.filter((item) => item.word.id !== active.word.id);
-  if (action === "unknown") {
-    next.learningQueue.push({
-      eventId: event.id,
-      word: active.word,
-      due_at: nowMs() + next.learningStepSeconds * 1000,
-    });
-  }
-  next.previous = event;
+  next.history.push({
+    eventId: event.id,
+    word: active.word,
+    action,
+    reviewed_at: reviewedAt,
+    due_at: localDue(reviewedAt, action),
+    origin: active.kind,
+  });
+  if (active.kind === "initial") next.initialIndex += 1;
   next.active = null;
-  next.phase = "waiting";
-  chooseNextCard(next);
-  try {
-    await transaction(["events", "state"], "readwrite", (tx) => {
-      tx.objectStore("events").put(event);
-      tx.objectStore("state").put({ key: STATE_KEY, value: next });
-    });
-    state = next;
-    broadcastState();
-    syncRequested = true;
-  } catch (_) {
-    notice.textContent = "The answer could not be saved locally. Please try again.";
-  } finally {
-    try {
-      await refreshSyncStatus();
-    } finally {
-      busy = false;
-      render();
-      void sync();
-    }
-  }
+  next.cursor = next.history.length;
+  chooseLiveCard(next);
+  await transaction(["events", "state"], "readwrite", (tx) => {
+    tx.objectStore("events").put(event);
+    tx.objectStore("state").put({ key: STATE_KEY, value: next });
+  });
+  state = next;
+  broadcastState();
+  syncRequested = true;
 }
 
-async function previous() {
-  if (busy || readOnly || !state.previous) return;
+async function rateHistorical(action) {
+  const oldEntry = clone(state.history[state.cursor]);
+  if (oldEntry.action === action) {
+    const next = clone(state);
+    next.cursor += 1;
+    if (next.cursor === next.history.length) chooseLiveCard(next);
+    await commitState(next);
+    return;
+  }
+  const replacement = {
+    id: crypto.randomUUID(),
+    word_id: oldEntry.word.id,
+    action,
+    reviewed_at: oldEntry.reviewed_at,
+    intent: "review",
+  };
+  const voided = {
+    id: oldEntry.eventId,
+    word_id: oldEntry.word.id,
+    action: oldEntry.action,
+    reviewed_at: oldEntry.reviewed_at,
+    intent: "void",
+  };
+  const next = clone(state);
+  next.history[next.cursor] = {
+    ...oldEntry,
+    eventId: replacement.id,
+    action,
+    due_at: localDue(oldEntry.reviewed_at, action),
+  };
+  next.cursor += 1;
+  if (next.cursor === next.history.length) chooseLiveCard(next);
+  await transaction(["events", "failedEvents", "state"], "readwrite", (tx) => {
+    tx.objectStore("events").put(voided);
+    tx.objectStore("events").put(replacement);
+    tx.objectStore("failedEvents").delete(oldEntry.eventId);
+    tx.objectStore("state").put({ key: STATE_KEY, value: next });
+  });
+  state = next;
+  broadcastState();
+  syncRequested = true;
+}
+
+async function rate(action) {
+  const historical = state.cursor < state.history.length;
+  if (busy || readOnly || (!historical && !state.active)) return;
   busy = true;
   render();
-  audio.pause();
-  const event = clone(state.previous);
-  const queued = { ...event, intent: "void" };
-  const next = clone(state);
-  next.current = event.previousCurrent;
-  next.active = event.previousActive;
-  next.learningQueue = event.previousLearningQueue;
-  next.phase = "listening";
-  next.finished = false;
-  next.previous = null;
   try {
-    await transaction(["events", "failedEvents", "state"], "readwrite", (tx) => {
-      tx.objectStore("events").put(queued);
-      tx.objectStore("failedEvents").delete(event.id);
-      tx.objectStore("state").put({ key: STATE_KEY, value: next });
-    });
-    state = next;
-    lastView = null;
-    broadcastState();
-    notice.textContent = "The previous answer is being undone. Answer the word again when ready.";
-    syncRequested = true;
+    if (historical) await rateHistorical(action);
+    else await rateCurrent(action);
+    notice.textContent = "";
   } catch (_) {
-    notice.textContent = "Previous could not be saved locally. Please try again.";
+    notice.textContent = "The answer could not be saved locally. Please try again.";
   } finally {
     busy = false;
     render();
     await refreshSyncStatus();
     void sync();
   }
+}
+
+async function navigateHistory(direction) {
+  if (busy || readOnly || !state.history.length) return;
+  const next = clone(state);
+  const destination = next.cursor + direction;
+  if (destination < 0 || destination > next.history.length) return;
+  next.cursor = destination;
+  await commitState(next);
+  notice.textContent = "";
+  render();
 }
 
 async function retryFailedEvent(id) {
@@ -761,6 +771,7 @@ async function retryFailedEvent(id) {
     failed.delete(id);
   });
   syncProblem = null;
+  notice.textContent = "";
   await refreshSyncStatus();
   render();
   void sync();
@@ -776,14 +787,10 @@ async function retryAllFailed() {
 async function dismissFailedEvent(id) {
   if (busy || readOnly) return;
   if (!window.confirm("Dismiss this review from this device? The server history will not be changed.")) return;
-  const next = clone(state);
-  if (next.previous?.id === id) next.previous = null;
-  await transaction(["failedEvents", "state"], "readwrite", (tx) => {
+  await transaction("failedEvents", "readwrite", (tx) => {
     tx.objectStore("failedEvents").delete(id);
-    tx.objectStore("state").put({ key: STATE_KEY, value: next });
   });
-  state = next;
-  broadcastState();
+  notice.textContent = "";
   await refreshSyncStatus();
   render();
 }
@@ -810,12 +817,11 @@ async function loadSet() {
     const staged = {
       ...emptyState(),
       cards: payload.items,
-      phase: "waiting",
       learningStepSeconds: payload.learning_step_seconds,
       emptyReason: payload.items.length ? null : payload.status,
       nextDue: payload.next_due,
     };
-    chooseNextCard(staged);
+    chooseLiveCard(staged);
     await writeState(staged);
     state = staged;
     broadcastState();
@@ -833,98 +839,6 @@ async function loadSet() {
   } finally {
     busy = false;
     render();
-  }
-}
-
-async function finishForNow() {
-  if (busy || readOnly || state.active) return;
-  const next = clone(state);
-  next.finished = true;
-  await commitState(next);
-  render();
-}
-
-async function excludeActiveWord() {
-  if (busy || readOnly || !state.active) return;
-  if (!navigator.onLine) {
-    notice.textContent = "Reconnect before suspending a word.";
-    return;
-  }
-  busy = true;
-  audio.pause();
-  await cancelPreload();
-  render();
-  const active = clone(state.active);
-  try {
-    const response = await apiFetch(`/api/v1/exclusions/${encodeURIComponent(active.word.id)}`, { method: "POST" });
-    if (!response.ok) throw new Error("suspend failed");
-    const next = clone(state);
-    const removedIndex = next.cards.findIndex((word) => word.id === active.word.id);
-    if (removedIndex >= 0) {
-      next.cards.splice(removedIndex, 1);
-      if (removedIndex < next.current) next.current -= 1;
-      if (next.previous && removedIndex < next.previous.previousCurrent) {
-        next.previous.previousCurrent -= 1;
-      }
-    }
-    next.learningQueue = next.learningQueue.filter((item) => item.word.id !== active.word.id);
-    if (next.previous?.word_id === active.word.id) {
-      next.previous = null;
-    } else if (next.previous) {
-      next.previous.previousLearningQueue = next.previous.previousLearningQueue.filter(
-        (item) => item.word.id !== active.word.id,
-      );
-    }
-    next.active = null;
-    next.phase = "waiting";
-    chooseNextCard(next);
-    // Pending review delivery is deliberately left in the outbox. A request may
-    // already have reached the server, so only UUID-idempotent sync can settle it.
-    await writeState(next);
-    state = next;
-    broadcastState();
-    await configureAudioCache(false);
-    void startPreload();
-    notice.textContent = `${active.word.term} was suspended.`;
-    if (wordManagement.open) await loadExclusions();
-  } catch (_) {
-    notice.textContent = "The word could not be suspended. Please try again.";
-    void startPreload();
-  } finally {
-    busy = false;
-    await refreshSyncStatus();
-    render();
-  }
-}
-
-async function loadExclusions() {
-  exclusionsList.replaceChildren();
-  exclusionsEmpty.textContent = "Loading…";
-  const response = await apiFetch("/api/v1/exclusions");
-  if (!response.ok) throw new Error("suspended words unavailable");
-  const payload = await response.json();
-  exclusionsEmpty.textContent = payload.items.length ? "" : "No suspended words.";
-  for (const word of payload.items) {
-    const item = document.createElement("li");
-    const label = document.createElement("span");
-    label.textContent = `${word.term} (${word.level == null ? "level unknown" : `SVL ${word.level}`})`;
-    const restore = document.createElement("button");
-    restore.textContent = "Restore";
-    restore.disabled = readOnly;
-    restore.addEventListener("click", async () => {
-      restore.disabled = true;
-      try {
-        const restored = await apiFetch(`/api/v1/exclusions/${encodeURIComponent(word.id)}`, { method: "DELETE" });
-        if (!restored.ok) throw new Error("restore failed");
-        notice.textContent = `${word.term} was restored.`;
-        await loadExclusions();
-      } catch (_) {
-        restore.disabled = false;
-        notice.textContent = "The word could not be restored. Please try again.";
-      }
-    });
-    item.append(label, restore);
-    exclusionsList.append(item);
   }
 }
 
@@ -1019,9 +933,9 @@ async function becomeActiveTab() {
   const saved = await getState();
   if (validState(saved)) {
     state = saved;
-    if (!state.active && !state.finished) {
+    if (state.cursor === state.history.length && !state.active) {
       const next = clone(state);
-      chooseNextCard(next);
+      chooseLiveCard(next);
       if (next.active) await commitState(next);
     }
   }
@@ -1055,9 +969,9 @@ async function boot() {
   }
   if (validState(saved)) {
     state = saved;
-    if (!readOnly && !state.active && !state.finished) {
+    if (!readOnly && state.cursor === state.history.length && !state.active) {
       const next = clone(state);
-      chooseNextCard(next);
+      chooseLiveCard(next);
       if (next.active) await commitState(next);
     }
     try {
@@ -1097,21 +1011,12 @@ window.__pwa = {
   sync,
 };
 
-previousButton.addEventListener("click", previous);
-replayButton.addEventListener("click", playAudio);
-showAnswerButton.addEventListener("click", showAnswer);
-knownButton.addEventListener("click", () => answer("known"));
-unknownButton.addEventListener("click", () => answer("unknown"));
+previousButton.addEventListener("click", () => navigateHistory(-1));
+nextButton.addEventListener("click", () => navigateHistory(1));
+knownButton.addEventListener("click", () => rate("known"));
+unknownButton.addEventListener("click", () => rate("unknown"));
 nextSetButton.addEventListener("click", loadSet);
-finishButton.addEventListener("click", finishForNow);
 retrySyncButton.addEventListener("click", retryAllFailed);
-excludeButton.addEventListener("click", excludeActiveWord);
-manageExclusionsButton.addEventListener("click", () => loadExclusions().catch(() => {
-  exclusionsEmpty.textContent = "Suspended words could not be loaded.";
-}));
-wordManagement.addEventListener("toggle", () => {
-  if (wordManagement.open) manageExclusionsButton.click();
-});
 logoutButton.addEventListener("click", logout);
 addEventListener("online", () => {
   updateNetworkStatus();

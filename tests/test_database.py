@@ -39,8 +39,8 @@ def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
         "transcript",
         "audio_key",
         "tier",
-        "excluded",
     }
+    assert SCHEMA_VERSION == 2
     assert connection.execute("SELECT version FROM schema_metadata").fetchone() == (SCHEMA_VERSION,)
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
