@@ -80,7 +80,17 @@ function scheduleNextDue() {
   );
 }
 
-function render() {
+function playDisplayedAudio() {
+  try {
+    audio.currentTime = 0;
+    const playback = audio.play();
+    if (playback !== undefined) void playback.catch(() => {});
+  } catch (_) {
+    // Native controls remain available when the browser refuses playback.
+  }
+}
+
+function render({ autoplay = false } = {}) {
   const historical = historicalEntry();
   const word = displayedWord();
   const retryLocked = busy || !writer;
@@ -97,6 +107,7 @@ function render() {
       audio.src = word.audio_url;
       audio.load();
     }
+    if (autoplay) playDisplayedAudio();
     card.textContent = "";
   } else {
     audio.pause();
@@ -140,7 +151,7 @@ function render() {
   scheduleNextDue();
 }
 
-async function loadCard() {
+async function loadCard({ autoplay = false } = {}) {
   if (busy || !writer) return;
   busy = true;
   failure = null;
@@ -156,11 +167,11 @@ async function loadCard() {
     failure = {
       message: "The next card could not be loaded.",
       label: "Retry next card",
-      run: loadCard,
+      run: () => loadCard({ autoplay: true }),
     };
   } finally {
     busy = false;
-    render();
+    render({ autoplay: failure === null && autoplay });
   }
 }
 
@@ -200,25 +211,27 @@ async function previous() {
   if (historyIndex < 0) {
     if (!history.length) return;
     historyIndex = 0;
-    render();
+    render({ autoplay: true });
     return;
   }
   if (historyIndex + 1 < history.length) {
     historyIndex += 1;
-    render();
+    render({ autoplay: true });
     return;
   }
   if (olderCursor === null) return;
+  audio.pause();
   const oldLength = history.length;
   await loadHistory();
-  if (history.length > oldLength) historyIndex += 1;
-  render();
+  if (failure !== null || history.length === oldLength) return;
+  historyIndex += 1;
+  render({ autoplay: true });
 }
 
 function next() {
   if (busy || !writer || failure !== null || historyIndex < 0) return;
   moveNext();
-  render();
+  render({ autoplay: true });
 }
 
 function reviewPayload(entry, action) {
@@ -238,6 +251,7 @@ function reviewPayload(entry, action) {
 
 async function saveAnswer(operation) {
   if (busy || !writer) return;
+  audio.pause();
   busy = true;
   failure = null;
   render();
@@ -280,8 +294,9 @@ async function saveAnswer(operation) {
     return;
   }
   busy = false;
-  render();
-  await loadCard();
+  const destinationReady = displayedWord() !== null;
+  render({ autoplay: destinationReady });
+  await loadCard({ autoplay: !destinationReady });
 }
 
 async function rate(action) {
@@ -291,7 +306,7 @@ async function rate(action) {
   if (!word) return;
   if (entry?.action === action) {
     moveNext();
-    render();
+    render({ autoplay: true });
     return;
   }
   const operation = {
@@ -304,6 +319,7 @@ async function rate(action) {
 
 async function logout() {
   if (busy || !writer || failure !== null) return;
+  audio.pause();
   busy = true;
   failure = null;
   render();

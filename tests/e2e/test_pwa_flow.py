@@ -66,6 +66,27 @@ def _seed(database: Path, audio_root: Path, prefix: str, count: int) -> list[Wor
     return words
 
 
+def spy_on_audio_playback(page: Page, *, reject: bool = False) -> None:
+    rejection = (
+        'Promise.reject(new DOMException("Autoplay blocked", "NotAllowedError"))'
+        if reject
+        else "Promise.resolve()"
+    )
+    page.add_init_script(
+        f"""
+        window.__audioPlayCalls = [];
+        HTMLMediaElement.prototype.play = function () {{
+          window.__audioPlayCalls.push({{
+            wordId: this.dataset.wordId,
+            source: this.getAttribute("src"),
+            currentTime: this.currentTime,
+          }});
+          return {rejection};
+        }};
+        """
+    )
+
+
 @pytest.fixture
 def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     database = tmp_path / "vocab.db"
@@ -87,6 +108,27 @@ def paginated_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
             repository.save_review(
                 Review(UUID(int=index), word.id, ReviewAction.KNOWN, reviewed_at)
             )
+    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
+    with _serve(app) as base_url:
+        yield base_url, database
+
+
+@pytest.fixture
+def repeated_history_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    database = tmp_path / "repeated-history.db"
+    audio_root = tmp_path / "repeated-history-audio"
+    words = _seed(database, audio_root, "repeated", 2)
+    reviewed_at = datetime.now(UTC) - timedelta(minutes=2)
+    with SQLiteVocabularyRepository(database) as repository:
+        repository.save_review(Review(UUID(int=81), words[0].id, ReviewAction.UNKNOWN, reviewed_at))
+        repository.save_review(
+            Review(
+                UUID(int=82),
+                words[0].id,
+                ReviewAction.KNOWN,
+                reviewed_at + timedelta(minutes=1),
+            )
+        )
     app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
     with _serve(app) as base_url:
         yield base_url, database
@@ -180,6 +222,89 @@ def test_initial_card_and_known_unknown_advance(page: Page, pwa_server: tuple[st
 
 
 @pytest.mark.e2e
+def test_user_card_transitions_autoplay_but_initial_load_does_not(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    spy_on_audio_playback(page)
+    page.goto(base_url)
+    expect(page.locator("#term")).to_have_text("word word 0")
+    assert page.evaluate("window.__audioPlayCalls") == []
+
+    answer(page, "Known")
+    expect(page.locator("#term")).to_have_text("word word 1")
+    page.wait_for_function("window.__audioPlayCalls.length === 1")
+    answer(page, "Unknown")
+    expect(page.locator("#term")).to_have_text("word word 2")
+    page.wait_for_function("window.__audioPlayCalls.length === 2")
+
+    for button, term_text, call_count in (
+        ("Previous", "word word 1", 3),
+        ("Previous", "word word 0", 4),
+        ("Next", "word word 1", 5),
+        ("Next", "word word 2", 6),
+    ):
+        page.get_by_role("button", name=button, exact=True).click()
+        expect(page.locator("#term")).to_have_text(term_text)
+        page.wait_for_function(f"window.__audioPlayCalls.length === {call_count}")
+
+    assert page.evaluate(
+        "window.__audioPlayCalls.map(({ wordId, source, currentTime }) => "
+        "[wordId, source, currentTime])"
+    ) == [
+        ["word-1", "/api/v1/audio/word-1", 0],
+        ["word-2", "/api/v1/audio/word-2", 0],
+        ["word-1", "/api/v1/audio/word-1", 0],
+        ["word-0", "/api/v1/audio/word-0", 0],
+        ["word-1", "/api/v1/audio/word-1", 0],
+        ["word-2", "/api/v1/audio/word-2", 0],
+    ]
+
+
+@pytest.mark.e2e
+def test_history_transition_replays_when_consecutive_entries_use_the_same_audio(
+    page: Page, repeated_history_server: tuple[str, Path]
+) -> None:
+    base_url, _ = repeated_history_server
+    spy_on_audio_playback(page)
+    page.goto(base_url)
+    expect(page.locator("#term")).to_have_text("repeated word 1")
+
+    page.get_by_role("button", name="Previous", exact=True).click()
+    expect(page.locator("#term")).to_have_text("repeated word 0")
+    page.wait_for_function("window.__audioPlayCalls.length === 1")
+    page.get_by_role("button", name="Previous", exact=True).click()
+    expect(page.locator("#saved-answer")).to_have_text("Saved answer: Unknown")
+    page.wait_for_function("window.__audioPlayCalls.length === 2")
+
+    assert page.evaluate("window.__audioPlayCalls.map((call) => call.wordId)") == [
+        "repeated-0",
+        "repeated-0",
+    ]
+
+
+@pytest.mark.e2e
+def test_autoplay_rejection_keeps_native_controls_and_study_flow_available(
+    page: Page, pwa_server: tuple[str, Path]
+) -> None:
+    base_url, _ = pwa_server
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    spy_on_audio_playback(page, reject=True)
+    page.goto(base_url)
+
+    answer(page, "Known")
+    expect(page.locator("#term")).to_have_text("word word 1")
+    page.wait_for_function("window.__audioPlayCalls.length === 1")
+    assert page.locator("#audio").get_attribute("controls") == ""
+    expect(page.locator("#audio")).to_be_visible()
+    expect(page.locator("#status")).to_be_hidden()
+    expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
+    assert page_errors == []
+
+
+@pytest.mark.e2e
 def test_history_navigation_is_unlimited_and_does_not_write(
     page: Page, paginated_server: tuple[str, Path]
 ) -> None:
@@ -255,6 +380,7 @@ def test_response_loss_retains_card_and_retries_same_uuid(
 ) -> None:
     base_url, database = pwa_server
     lost: list[str] = []
+    spy_on_audio_playback(page)
 
     def lose_response(route: Route) -> None:
         body = route.request.post_data_json
@@ -274,14 +400,17 @@ def test_response_loss_retains_card_and_retries_same_uuid(
         expect(page.get_by_role("button", name=action, exact=True)).to_be_disabled()
     rows = wait_for_rows(database, 1)
     assert rows[0]["id"] == lost[0]
+    assert page.evaluate("window.__audioPlayCalls") == []
 
     page.get_by_role("button", name="Retry answer", exact=True).click()
     expect(page.locator("#term")).not_to_have_text(initial or "")
+    page.wait_for_function("window.__audioPlayCalls.length === 1")
     expect(page.get_by_role("button", name="Previous", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     rows = wait_for_rows(database, 1)
     assert rows[0]["id"] == lost[0]
+    assert page.evaluate("window.__audioPlayCalls[0].wordId") == "word-1"
 
 
 @pytest.mark.e2e
@@ -332,15 +461,19 @@ def test_initial_card_failure_is_not_reported_as_an_empty_catalog(
     page: Page, pwa_server: tuple[str, Path]
 ) -> None:
     base_url, _ = pwa_server
+    spy_on_audio_playback(page)
     page.route("**/api/v1/card", lambda route: route.abort(), times=1)
     page.goto(base_url)
     expect(page.get_by_role("button", name="Retry next card", exact=True)).to_be_visible()
     expect(page.locator("#card")).to_have_text("Loading a card…")
     expect(page.locator("#card")).not_to_contain_text("catalog is empty")
+    assert page.evaluate("window.__audioPlayCalls") == []
 
     page.get_by_role("button", name="Retry next card", exact=True).click()
     expect(page.locator("#term")).to_have_text("word word 0")
+    page.wait_for_function("window.__audioPlayCalls.length === 1")
     assert page.locator("#audio").get_attribute("src") == "/api/v1/audio/word-0"
+    assert page.evaluate("window.__audioPlayCalls[0].wordId") == "word-0"
 
 
 @pytest.mark.e2e
