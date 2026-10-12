@@ -29,12 +29,6 @@ class Word:
 
 
 @dataclass(frozen=True, slots=True)
-class WordState:
-    word_id: str
-    due_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class Review:
     id: UUID
     word_id: str
@@ -42,8 +36,8 @@ class Review:
     reviewed_at: datetime
 
 
-def replay_word_state(word_id: str, reviews: list[Review]) -> WordState:
-    """Rebuild state from genesis in stable review order."""
+def replay_due_at(word_id: str, reviews: list[Review]) -> datetime:
+    """Rebuild the due time from genesis in stable review order."""
     ordered = sorted(reviews, key=lambda review: (review.reviewed_at, review.id.int))
     # Py-FSRS creates a time-based card id by default; seed it from word_id so
     # rebuilding the same server history produces the same due date.
@@ -62,4 +56,4 @@ def replay_word_state(word_id: str, reviews: list[Review]) -> WordState:
         now = review.reviewed_at.astimezone(UTC)
         fsrs_rating = FsrsRating.Good if review.action is ReviewAction.KNOWN else FsrsRating.Again
         card, _ = scheduler.review_card(card, fsrs_rating, now)
-    return WordState(word_id, card.due if ordered else datetime.min.replace(tzinfo=UTC))
+    return card.due if ordered else datetime.min.replace(tzinfo=UTC)

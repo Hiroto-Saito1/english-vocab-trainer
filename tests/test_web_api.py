@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.container import AppContainer
@@ -89,28 +89,29 @@ def test_review_rejects_missing_word_and_identity_conflict(tmp_path: Path) -> No
 
 def test_history_uses_stable_cursor_and_returns_word_display(tmp_path: Path) -> None:
     database = tmp_path / "v.db"
-    words = [word(str(index), index) for index in range(3)]
+    words = [word(str(index), index) for index in range(51)]
     instant = datetime(2026, 1, 1, tzinfo=UTC)
     with SQLiteVocabularyRepository(database) as repository:
         repository.bulk_upsert_words(words)
-        for index in range(3):
+        for index in range(51):
             repository.save_review(
                 Review(UUID(int=index + 1), str(index), ReviewAction.KNOWN, instant)
             )
     with client(tmp_path, words) as app:
-        first = app.get("/api/v1/history", params={"limit": 2}).json()
-        second = app.get(
-            "/api/v1/history", params={"limit": 2, "cursor": first["next_cursor"]}
-        ).json()
+        first = app.get("/api/v1/history").json()
+        second = app.get("/api/v1/history", params={"cursor": first["next_cursor"]}).json()
         invalid = app.get("/api/v1/history", params={"cursor": "*"})
+        parameters = app.get("/openapi.json").json()["paths"]["/api/v1/history"]["get"][
+            "parameters"
+        ]
     assert [item["review_id"] for item in first["items"]] == [
-        str(UUID(int=3)),
-        str(UUID(int=2)),
+        str(UUID(int=index)) for index in range(51, 1, -1)
     ]
-    assert first["items"][0]["word_id"] == "2"
-    assert first["items"][0]["definition"] == "Definition for 2."
+    assert first["items"][0]["word_id"] == "50"
+    assert first["items"][0]["definition"] == "Definition for 50."
     assert [item["review_id"] for item in second["items"]] == [str(UUID(int=1))]
     assert second["next_cursor"] is None and invalid.status_code == 422
+    assert [parameter["name"] for parameter in parameters] == ["cursor"]
 
 
 def test_due_card_is_selected_before_unseen(tmp_path: Path) -> None:

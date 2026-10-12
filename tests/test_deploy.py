@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from english_vocab_trainer.restore_drill import RestoreDrillError, restore_drill
 ROOT = Path(__file__).parents[1]
 ENTRYPOINT = ROOT / "deploy" / "docker-entrypoint.sh"
 LITESTREAM_CONFIG = ROOT / "deploy" / "litestream.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def deployment_environment(executable_directory: Path) -> dict[str, str]:
@@ -46,6 +48,27 @@ def _run_entrypoint(environment: dict[str, str]) -> subprocess.CompletedProcess[
         env=environment,
         check=False,
     )
+
+
+def test_ci_rejects_private_catalog_artifacts_without_rejecting_source_modules() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(r"git ls-files \| grep -E '([^']+)'", workflow)
+    assert match is not None
+    prohibited = re.compile(match.group(1)).search
+
+    assert prohibited("src/english_vocab_trainer/ingest/catalog.py") is None
+    assert prohibited("docs/catalog.md") is None
+    assert prohibited("config/settings.json") is None
+    for path in (
+        ".private/catalog.jsonl",
+        ".private/mvp-catalog.jsonl",
+        ".private/catalog.jsonl.manifest.json",
+        ".private/catalog.jsonl.journal.jsonl",
+        ".private/catalog.jsonl.transcription-errors.jsonl",
+        ".private/catalog.jsonl.audit.json",
+        "private/audio/word.mp3",
+    ):
+        assert prohibited(path) is not None
 
 
 def fake_litestream(directory: Path) -> None:

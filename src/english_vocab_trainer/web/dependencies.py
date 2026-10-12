@@ -7,7 +7,7 @@ from typing import Annotated, cast
 
 from fastapi import Header, HTTPException, Request
 
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.ports.audio import AudioStore
 from english_vocab_trainer.web.auth import AuthenticationError
 from english_vocab_trainer.web.container import AppContainer

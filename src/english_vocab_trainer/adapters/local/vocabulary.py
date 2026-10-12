@@ -12,14 +12,20 @@ from english_vocab_trainer.domain.models import (
     Review,
     ReviewAction,
     Word,
-    WordState,
-    replay_word_state,
+    replay_due_at,
 )
-from english_vocab_trainer.ports.errors import MissingError, ReviewConflictError
 
 
-def _iso(value: datetime | None) -> str | None:
-    return value.astimezone(UTC).isoformat() if value else None
+class MissingWordError(RuntimeError):
+    pass
+
+
+class ReviewConflictError(RuntimeError):
+    pass
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat()
 
 
 class SQLiteVocabularyRepository:
@@ -118,31 +124,14 @@ class SQLiteVocabularyRepository:
             for row in self.db.execute("SELECT * FROM reviews WHERE word_id=?", (word_id,))
         ]
 
-    def get_review(self, review_id: UUID) -> Review | None:
-        row = self.db.execute("SELECT * FROM reviews WHERE id=?", (str(review_id),)).fetchone()
-        if row is None:
-            return None
-        return Review(
-            review_id,
-            row["word_id"],
-            ReviewAction(row["action"]),
-            datetime.fromisoformat(row["reviewed_at"]),
-        )
-
-    def state(self, word_id: str) -> WordState:
-        row = self.db.execute("SELECT * FROM word_state WHERE word_id=?", (word_id,)).fetchone()
-        if row is None:
-            return WordState(word_id, datetime.min.replace(tzinfo=UTC))
-        return WordState(word_id, datetime.fromisoformat(row["due_at"]))
-
-    def _save(self, state: WordState) -> None:
+    def _save_due_at(self, word_id: str, due_at: datetime) -> None:
         self.db.execute(
             "INSERT INTO word_state VALUES(?,?) "
             "ON CONFLICT(word_id) DO UPDATE SET due_at=excluded.due_at",
-            (state.word_id, _iso(state.due_at)),
+            (word_id, _iso(due_at)),
         )
 
-    def save_review(self, review: Review) -> WordState:
+    def save_review(self, review: Review) -> None:
         with self._transaction():
             old = self.db.execute(
                 "SELECT word_id,action FROM reviews WHERE id=?",
@@ -152,14 +141,14 @@ class SQLiteVocabularyRepository:
                 if old["word_id"] != review.word_id:
                     raise ReviewConflictError("review UUID word conflict")
                 if old["action"] == review.action.value:
-                    return self.state(review.word_id)
+                    return
                 self.db.execute(
                     "UPDATE reviews SET action=? WHERE id=?",
                     (review.action.value, str(review.id)),
                 )
             else:
                 if self.get_word(review.word_id) is None:
-                    raise MissingError("word not found")
+                    raise MissingWordError("word not found")
                 self.db.execute(
                     "INSERT INTO reviews VALUES(?,?,?,?)",
                     (
@@ -169,9 +158,8 @@ class SQLiteVocabularyRepository:
                         _iso(review.reviewed_at),
                     ),
                 )
-            state = replay_word_state(review.word_id, self._reviews(review.word_id))
-            self._save(state)
-            return state
+            due_at = replay_due_at(review.word_id, self._reviews(review.word_id))
+            self._save_due_at(review.word_id, due_at)
 
     def history_page(
         self, cursor: tuple[datetime, UUID] | None, limit: int

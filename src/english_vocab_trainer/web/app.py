@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,7 +18,12 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.database import SchemaMismatchError
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.local.vocabulary import (
+    MissingWordError,
+    ReviewConflictError,
+    SQLiteVocabularyRepository,
+)
+from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.domain.models import (
     Review,
     ReviewAction,
@@ -31,7 +36,6 @@ from english_vocab_trainer.ports.audio import (
     InvalidRangeError,
     parse_single_range,
 )
-from english_vocab_trainer.ports.errors import MissingError, ReviewConflictError
 from english_vocab_trainer.web.audio import (
     build_audio_head_response,
     build_audio_response,
@@ -40,7 +44,6 @@ from english_vocab_trainer.web.audio import (
 from english_vocab_trainer.web.auth import AuthenticationError
 from english_vocab_trainer.web.container import (
     AppContainer,
-    ConfigurationError,
     audio_store_from_env,
     auth_from_env,
     trusted_hosts_from_env,
@@ -54,6 +57,7 @@ Audio = Annotated[AudioStore, Depends(audio_store)]
 RangeHeader = Annotated[str | None, Header(alias="Range")]
 IfNoneMatch = Annotated[str | None, Header(alias="If-None-Match")]
 ROOT = Path(__file__).parent
+HISTORY_PAGE_SIZE = 50
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 router = APIRouter()
 
@@ -250,7 +254,7 @@ def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
         )
     except ReviewConflictError as exc:
         raise HTTPException(409, "review conflict") from exc
-    except MissingError as exc:
+    except MissingWordError as exc:
         raise HTTPException(404, "word not found") from exc
     return Response(status_code=204)
 
@@ -259,12 +263,11 @@ def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
 def history(
     repository: Repository,
     cursor: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> HistoryOut:
     parsed = _parse_history_cursor(cursor) if cursor else None
-    rows = repository.history_page(parsed, limit + 1)
-    has_more = len(rows) > limit
-    rows = rows[:limit]
+    rows = repository.history_page(parsed, HISTORY_PAGE_SIZE + 1)
+    has_more = len(rows) > HISTORY_PAGE_SIZE
+    rows = rows[:HISTORY_PAGE_SIZE]
     items = [
         HistoryItemOut(
             review_id=review.id,

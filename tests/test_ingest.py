@@ -12,38 +12,45 @@ from typing import Any, BinaryIO
 
 import pytest
 
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.ingest import (
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
+from english_vocab_trainer.ingest.catalog import (
+    audit_catalog,
+    audit_records,
+    records_from_audio,
+    scan_catalog,
+    select_audio,
+)
+from english_vocab_trainer.ingest.cli import main
+from english_vocab_trainer.ingest.models import (
     FULL_PROFILE,
     MVP_PROFILE,
     AudioCandidate,
     CatalogRecord,
-    MlxWhisperTranscriber,
-    _failure_reason,
-    _merge_journal,
-    _read_current_error_report,
-    audit_catalog,
-    audit_records,
+)
+from english_vocab_trainer.ingest.publish import publish_records, upload_audio
+from english_vocab_trainer.ingest.storage import (
     catalog_lock,
     error_report_path,
     journal_path,
-    main,
     manifest_path,
-    parse_audio_path,
-    publish_records,
-    r2_audio_key,
+    merge_journal_records,
     read_catalog,
+    read_error_report,
     read_manifest,
-    records_from_audio,
-    scan_catalog,
-    select_audio,
+    write_audit_report,
+    write_catalog,
+)
+from english_vocab_trainer.ingest.transcription import (
+    MlxWhisperTranscriber,
     transcribe_catalog,
-    upload_audio,
+)
+from english_vocab_trainer.ingest.validation import (
+    parse_audio_path,
+    r2_audio_key,
+    transcription_failure_reason,
     validate_records,
     validate_term,
     validate_transcript,
-    write_audit_report,
-    write_catalog,
 )
 
 
@@ -364,14 +371,14 @@ def test_cli_upload_dry_run_needs_no_client_and_normal_upload_resumes(
         ],
     )
     monkeypatch.setattr(
-        "english_vocab_trainer.ingest.r2_client_from_env",
+        "english_vocab_trainer.ingest.cli.r2_client_from_env",
         lambda _: (_ for _ in ()).throw(AssertionError("dry run must not construct a client")),
     )
     main()
 
     client = _CliUploadClient()
     monkeypatch.setattr(
-        "english_vocab_trainer.ingest.r2_client_from_env", lambda _: (client, "private")
+        "english_vocab_trainer.ingest.cli.r2_client_from_env", lambda _: (client, "private")
     )
     monkeypatch.setattr(
         sys,
@@ -806,7 +813,7 @@ def test_profile_manifest_and_error_report_reject_malformed_state(tmp_path: Path
         read_manifest(catalog)
     error_report_path(catalog).write_text("not json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="error report is corrupt"):
-        _read_current_error_report(catalog)
+        read_error_report(catalog)
 
 
 @pytest.mark.parametrize(
@@ -831,7 +838,7 @@ def test_profile_manifest_and_error_report_reject_malformed_state(tmp_path: Path
     ],
 )
 def test_failure_reason_is_whitelisted(error: Exception, reason: str) -> None:
-    assert _failure_reason(error) == reason
+    assert transcription_failure_reason(error) == reason
 
 
 def test_journal_rejects_corrupt_identity_and_records(tmp_path: Path) -> None:
@@ -869,7 +876,7 @@ def test_journal_rejects_corrupt_identity_and_records(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="journal is corrupt"):
         read_catalog(catalog)
     with pytest.raises(ValueError, match="absent from catalog base"):
-        _merge_journal([], {record.checksum: record})
+        merge_journal_records([], {record.checksum: record})
 
 
 @pytest.mark.parametrize("duplicate", ["path", "checksum", "term"])
@@ -891,10 +898,11 @@ def test_full_profile_rejects_all_duplicate_identity_dimensions(
         ]
 
     monkeypatch.setattr(
-        "english_vocab_trainer.ingest._source_candidates", lambda _root, source: candidates(source)
+        "english_vocab_trainer.ingest.catalog._source_candidates",
+        lambda _root, source: candidates(source),
     )
     monkeypatch.setattr(
-        "english_vocab_trainer.ingest.checksum",
+        "english_vocab_trainer.ingest.catalog.checksum",
         lambda path: (
             "a" * 64 if duplicate == "checksum" else sha256(str(path).encode()).hexdigest()
         ),

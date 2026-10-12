@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.ingest import parse_audio_path
+from english_vocab_trainer.ingest.validation import parse_audio_path
 from english_vocab_trainer.ports.audio import parse_single_range
 
 

@@ -18,7 +18,7 @@ from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 from english_vocab_trainer.web.app import create_app
 from english_vocab_trainer.web.auth import AuthService
@@ -170,7 +170,11 @@ def test_initial_card_and_known_unknown_advance(page: Page, pwa_server: tuple[st
     rows = wait_for_rows(database, 2)
     assert [row["action"] for row in rows] == ["known", "unknown"]
     with SQLiteVocabularyRepository(database) as repository:
-        due = repository.state("word-1").due_at
+        stored = repository.db.execute(
+            "SELECT due_at FROM word_state WHERE word_id='word-1'"
+        ).fetchone()
+    assert stored is not None
+    due = datetime.fromisoformat(stored["due_at"])
     reviewed = datetime.fromisoformat(rows[1]["reviewed_at"])
     assert reviewed + timedelta(minutes=9, seconds=59) <= due
 

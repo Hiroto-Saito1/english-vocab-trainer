@@ -6,9 +6,9 @@ from argon2 import PasswordHasher
 from argon2.low_level import Type
 
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
+from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.web.app import container_from_env
 from english_vocab_trainer.web.auth import AuthenticationError, AuthService
-from english_vocab_trainer.web.container import ConfigurationError
 
 
 class Limiter:

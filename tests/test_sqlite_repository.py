@@ -7,9 +7,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.domain.models import Review, ReviewAction, Word, replay_word_state
-from english_vocab_trainer.ports.errors import MissingError, ReviewConflictError
+from english_vocab_trainer.adapters.local.vocabulary import (
+    MissingWordError,
+    ReviewConflictError,
+    SQLiteVocabularyRepository,
+)
+from english_vocab_trainer.domain.models import Review, ReviewAction, Word, replay_due_at
 
 
 def seed(repository: SQLiteVocabularyRepository) -> None:
@@ -41,8 +44,19 @@ def test_reopen_persists_word_state_and_review(tmp_path: Path) -> None:
         repository.save_review(stored)
     with SQLiteVocabularyRepository(path) as repository:
         assert repository.get_word("one") == Word("one", "one", 1, "definition one", "one.mp3")
-        assert repository.get_review(stored.id) == stored
-        assert repository.state("one").due_at > now
+        row = repository.db.execute(
+            "SELECT id,word_id,action,reviewed_at FROM reviews WHERE id=?",
+            (str(stored.id),),
+        ).fetchone()
+        due = repository.db.execute("SELECT due_at FROM word_state WHERE word_id='one'").fetchone()
+        assert row is not None and due is not None
+        assert tuple(row) == (
+            str(stored.id),
+            stored.word_id,
+            stored.action.value,
+            stored.reviewed_at.isoformat(),
+        )
+        assert datetime.fromisoformat(due["due_at"]) > now
 
 
 def test_next_word_prefers_due_then_lowest_level_unseen(tmp_path: Path) -> None:
@@ -100,8 +114,14 @@ def test_save_is_idempotent_and_correction_preserves_server_timestamp(tmp_path: 
             )
         )
         corrected = Review(review_id, "one", ReviewAction.UNKNOWN, now)
-        assert repository.get_review(review_id) == corrected
-        assert repository.state("one") == replay_word_state("one", [corrected])
+        row = repository.db.execute(
+            "SELECT word_id,action,reviewed_at FROM reviews WHERE id=?",
+            (str(review_id),),
+        ).fetchone()
+        due = repository.db.execute("SELECT due_at FROM word_state WHERE word_id='one'").fetchone()
+        assert row is not None and due is not None
+        assert tuple(row) == ("one", "unknown", now.isoformat())
+        assert datetime.fromisoformat(due["due_at"]) == replay_due_at("one", [corrected])
 
 
 def test_review_identity_conflict_and_missing_word_are_atomic(tmp_path: Path) -> None:
@@ -112,7 +132,7 @@ def test_review_identity_conflict_and_missing_word_are_atomic(tmp_path: Path) ->
         repository.save_review(review("one", now, review_id=review_id))
         with pytest.raises(ReviewConflictError):
             repository.save_review(review("two", now, review_id=review_id))
-        with pytest.raises(MissingError):
+        with pytest.raises(MissingWordError):
             repository.save_review(review("missing", now))
 
 
@@ -153,6 +173,11 @@ def test_concurrent_distinct_reviews_are_serialized_and_both_persist(tmp_path: P
             future.result(timeout=15)
 
     with SQLiteVocabularyRepository(path) as repository:
-        assert repository.get_review(first.id) == first
-        assert repository.get_review(second.id) == second
-        assert repository.state("one") == replay_word_state("one", [first, second])
+        rows = repository.db.execute(
+            "SELECT id FROM reviews WHERE id IN (?,?) ORDER BY id",
+            (str(first.id), str(second.id)),
+        ).fetchall()
+        due = repository.db.execute("SELECT due_at FROM word_state WHERE word_id='one'").fetchone()
+        assert due is not None
+        assert [row["id"] for row in rows] == [str(first.id), str(second.id)]
+        assert datetime.fromisoformat(due["due_at"]) == replay_due_at("one", [first, second])

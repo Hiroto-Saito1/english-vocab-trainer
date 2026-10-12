@@ -9,11 +9,11 @@ from fastapi.testclient import TestClient
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.database import SchemaMismatchError
+from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.web.app import create_app, create_app_from_env
 from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import (
     AppContainer,
-    ConfigurationError,
     trusted_hosts_from_env,
 )
 

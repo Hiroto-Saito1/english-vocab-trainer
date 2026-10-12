@@ -5,7 +5,7 @@ from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
-from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
+from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 
 
@@ -30,9 +30,11 @@ def test_two_thousand_word_next_card_and_review_smoke(tmp_path: Path) -> None:
         assert selected is not None
         review_id = uuid4()
         repository.save_review(Review(review_id, selected.id, ReviewAction.KNOWN, now))
-        stored = repository.get_review(review_id)
+        stored = repository.db.execute(
+            "SELECT id FROM reviews WHERE id=?", (str(review_id),)
+        ).fetchone()
     finally:
         repository.close()
     assert selected.id == "0"
-    assert stored is not None
+    assert stored["id"] == str(review_id)
     assert monotonic() - started < 8

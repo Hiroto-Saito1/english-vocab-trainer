@@ -7,12 +7,9 @@ from typing import Any, BinaryIO
 import pytest
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore
-from english_vocab_trainer.web.container import (
-    ConfigurationError,
-    audio_store_from_env,
-    r2_client_from_env,
-)
+from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, r2_client_from_env
+from english_vocab_trainer.configuration import ConfigurationError
+from english_vocab_trainer.web.container import audio_store_from_env
 
 
 class FactoryClient:

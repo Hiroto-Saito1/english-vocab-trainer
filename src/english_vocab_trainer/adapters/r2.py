@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn, Protocol, cast
 
+from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.ports.audio import (
     AudioMetadata,
     AudioResult,
@@ -34,6 +35,36 @@ class S3LikeClient(Protocol):
         ContentType: str,
         Metadata: Mapping[str, str],
     ) -> Mapping[str, Any]: ...
+
+
+S3ClientFactory = Callable[..., S3LikeClient]
+
+
+def _boto3_client_factory(**kwargs: Any) -> S3LikeClient:
+    # Import only when R2 is selected so local/test users do not need network setup.
+    import boto3  # type: ignore[import-untyped]
+
+    return cast(S3LikeClient, boto3.client("s3", **kwargs))
+
+
+def r2_client_from_env(
+    environ: Mapping[str, str], client_factory: S3ClientFactory | None = None
+) -> tuple[S3LikeClient, str]:
+    """Build the private R2 client shared by serving and ingest commands."""
+    required = ("R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+    if any(not environ.get(name) for name in required):
+        raise ConfigurationError("private R2 audio configuration is incomplete")
+    factory = client_factory or _boto3_client_factory
+    try:
+        client = factory(
+            endpoint_url=environ["R2_ENDPOINT_URL"],
+            aws_access_key_id=environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"],
+            region_name=environ.get("R2_REGION", "auto"),
+        )
+    except Exception as exc:
+        raise ConfigurationError("private R2 audio client is unavailable") from exc
+    return client, environ["R2_BUCKET"]
 
 
 class Boto3R2AudioStore:
