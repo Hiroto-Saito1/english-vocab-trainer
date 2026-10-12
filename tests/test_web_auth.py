@@ -45,7 +45,7 @@ def test_login_protects_api_and_enforces_csrf_logout(tmp_path: Path) -> None:
             unauthenticated.status_code == 401
             and unauthenticated.headers["cache-control"] == "no-store"
         )
-        assert app.post("/api/v1/review-events", json={}).status_code == 401
+        assert app.post("/api/v1/reviews", json={}).status_code == 401
         bad = app.post("/login", data={"password": "wrong"})
         assert (
             bad.status_code == 401
@@ -159,9 +159,8 @@ def test_startup_and_readiness_reject_an_incompatible_database_schema(
     database = tmp_path / "old.db"
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
-            "CREATE TABLE review_events("
-            "id TEXT PRIMARY KEY,word_id TEXT,rating TEXT,reviewed_at TEXT,voided_at TEXT,"
-            "payload TEXT,legacy_version INTEGER)"
+            "CREATE TABLE reviews("
+            "id TEXT PRIMARY KEY,word_id TEXT,action TEXT,reviewed_at TEXT,legacy TEXT)"
         )
     app = create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test"))
     with TestClient(app) as client:

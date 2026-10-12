@@ -6,7 +6,7 @@ from binascii import Error as Base64Error
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -19,8 +19,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.database import SchemaMismatchError
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import select_next_word, submit_review
 from english_vocab_trainer.domain.models import (
+    Review,
     ReviewAction,
     Word,
 )
@@ -31,8 +31,7 @@ from english_vocab_trainer.ports.audio import (
     InvalidRangeError,
     parse_single_range,
 )
-from english_vocab_trainer.ports.errors import EventConflictError, MissingError
-from english_vocab_trainer.ports.repositories import VocabularyRepository
+from english_vocab_trainer.ports.errors import MissingError, ReviewConflictError
 from english_vocab_trainer.web.audio import (
     build_audio_head_response,
     build_audio_response,
@@ -50,7 +49,7 @@ from english_vocab_trainer.web.dependencies import audio_store, csrf
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
 Csrf = Annotated[None, Depends(csrf)]
-Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
+Repository = Annotated[SQLiteVocabularyRepository, Depends(repository_dependency)]
 Audio = Annotated[AudioStore, Depends(audio_store)]
 RangeHeader = Annotated[str | None, Header(alias="Range")]
 IfNoneMatch = Annotated[str | None, Header(alias="If-None-Match")]
@@ -59,39 +58,31 @@ templates = Jinja2Templates(directory=str(ROOT / "templates"))
 router = APIRouter()
 
 
-class EventIn(BaseModel):
+class ReviewIn(BaseModel):
     id: UUID
     word_id: str
     action: ReviewAction
-    reviewed_at: datetime
 
 
 class WordOut(BaseModel):
-    id: str
+    word_id: str
     term: str
-    definition: str | None
+    definition: str
     audio_url: str
 
 
 class CardOut(BaseModel):
     item: WordOut | None
-    status: Literal["ready", "next_due", "catalog_empty"]
     next_due: datetime | None = None
 
 
-class EventResultOut(BaseModel):
-    id: UUID
-    status: Literal["applied", "idempotent", "updated"]
-    due_at: datetime
-
-
 class HistoryItemOut(BaseModel):
-    id: UUID
+    review_id: UUID
     word_id: str
     action: ReviewAction
     reviewed_at: datetime
     term: str
-    definition: str | None
+    definition: str
     audio_url: str
 
 
@@ -102,23 +93,23 @@ class HistoryOut(BaseModel):
 
 def word_out(word: Word) -> WordOut:
     return WordOut(
-        id=word.id,
+        word_id=word.id,
         term=word.term,
         definition=word.definition,
         audio_url=f"/api/v1/audio/{word.id}",
     )
 
 
-def _history_cursor(reviewed_at: datetime, event_id: UUID) -> str:
-    value = f"{reviewed_at.astimezone(UTC).isoformat()}|{event_id}"
+def _history_cursor(reviewed_at: datetime, review_id: UUID) -> str:
+    value = f"{reviewed_at.astimezone(UTC).isoformat()}|{review_id}"
     return urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
 
 
 def _parse_history_cursor(value: str) -> tuple[datetime, UUID]:
     try:
         decoded = urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
-        reviewed_at, event_id = decoded.rsplit("|", 1)
-        return datetime.fromisoformat(reviewed_at), UUID(event_id)
+        reviewed_at, review_id = decoded.rsplit("|", 1)
+        return datetime.fromisoformat(reviewed_at), UUID(review_id)
     except (Base64Error, ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(422, "invalid history cursor") from exc
 
@@ -240,22 +231,28 @@ def logout(request: Request, _: Csrf) -> Response:
 @router.get("/api/v1/card", response_model=CardOut)
 def next_card(repository: Repository) -> CardOut:
     now = datetime.now(UTC)
-    word = select_next_word(repository, now)
+    word = repository.next_word(now)
     if word is not None:
-        return CardOut(item=word_out(word), status="ready")
-    status, next_due = repository.empty_card_status(now)
-    return CardOut(item=None, status=status, next_due=next_due)
+        return CardOut(item=word_out(word))
+    return CardOut(item=None, next_due=repository.next_due(now))
 
 
-@router.post("/api/v1/review-events", response_model=EventResultOut)
-def review(event: EventIn, repository: Repository, _: Csrf) -> EventResultOut:
+@router.post("/api/v1/reviews", status_code=204)
+def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
     try:
-        result = submit_review(repository, event.id, event.word_id, event.action, event.reviewed_at)
-    except EventConflictError as exc:
-        raise HTTPException(409, "review event conflict") from exc
+        repository.save_review(
+            Review(
+                review_input.id,
+                review_input.word_id,
+                review_input.action,
+                datetime.now(UTC),
+            )
+        )
+    except ReviewConflictError as exc:
+        raise HTTPException(409, "review conflict") from exc
     except MissingError as exc:
         raise HTTPException(404, "word not found") from exc
-    return EventResultOut(id=event.id, status=result.status, due_at=result.state.due_at)
+    return Response(status_code=204)
 
 
 @router.get("/api/v1/history", response_model=HistoryOut)
@@ -270,20 +267,20 @@ def history(
     rows = rows[:limit]
     items = [
         HistoryItemOut(
-            id=event.id,
-            word_id=event.word_id,
-            action=(ReviewAction.UNKNOWN if event.rating.value == "again" else ReviewAction.KNOWN),
-            reviewed_at=event.reviewed_at,
+            review_id=review.id,
+            word_id=review.word_id,
+            action=review.action,
+            reviewed_at=review.reviewed_at,
             term=word.term,
             definition=word.definition,
             audio_url=f"/api/v1/audio/{word.id}",
         )
-        for event, word in rows
+        for review, word in rows
     ]
     next_cursor = None
     if has_more and rows:
-        event = rows[-1][0]
-        next_cursor = _history_cursor(event.reviewed_at, event.id)
+        review = rows[-1][0]
+        next_cursor = _history_cursor(review.reviewed_at, review.id)
     return HistoryOut(items=items, next_cursor=next_cursor)
 
 

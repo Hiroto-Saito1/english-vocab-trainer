@@ -204,7 +204,7 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
     repository = SQLiteVocabularyRepository(database)
     try:
         words = [word for record in records if (word := repository.get_word(record.id))]
-        assert len(words) == 20 and words[0].definition is not None
+        assert len(words) == 20 and words[0].definition.startswith("A clear English")
     finally:
         repository.close()
 

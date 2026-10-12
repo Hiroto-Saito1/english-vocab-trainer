@@ -4,7 +4,7 @@ English Vocab Trainer は、server が選ぶ 1 枚の単語カードと英語音
 
 音声、カタログ、文字起こし、認証情報、生成した SQLite データベースは Git に含めません。DB は `schema_metadata` の version と全 table の正確な列集合を起動時に検査します。現行スキーマだけをサポートし、旧 DB の暗黙利用や自動 upgrade は行いません。不一致なら起動と `/readyz` が明示的に失敗します。
 
-旧 DB を破壊的に作り直すときは、DB ファイルだけを削除して再起動してはいけません。`restore-if-db-not-exists` が旧レプリカを復元するためです。application と Litestream を停止し、旧 volume の DB と `-wal` / `-shm` を退避して除去します。次に現行 prefix `backups/sqlite/schema-v3/vocab.db` を確認し、production entrypoint を動かす前に現行 DB を初期化し、監査済み catalog を publish します。旧 prefix は rollback / archive 用に残します。旧学習履歴は引き継げません。
+旧 DB を破壊的に作り直すときは、DB ファイルだけを削除して再起動してはいけません。`restore-if-db-not-exists` が旧レプリカを復元するためです。application と Litestream を停止し、旧 volume の DB と `-wal` / `-shm` を退避して除去します。次に現行 prefix `backups/sqlite/schema-v4/vocab.db` を確認し、production entrypoint を動かす前に現行 DB を初期化し、監査済み catalog を publish します。旧 prefix は rollback / archive 用に残します。旧学習履歴は引き継げません。
 
 ## 開発と検証
 
@@ -97,7 +97,7 @@ scripts/ingest-env publish --profile full --source .. --catalog .private/full-ca
 
 カードは最初から term、definition、browser 標準の audio controls を表示します。server は毎回 1 枚だけ選び、期限到来済みの語を優先し、なければ未学習語を level の低い順（level 不明は最後）に選びます。Known は FSRS の Good、Unknown は Again です。
 
-**Previous / Next / Unknown / Known** は常に同じ位置とラベルで表示します。Previous / Next は server から 50 件ずつ取得した履歴を移動するだけで、review event を変更しません。履歴で同じ回答を選ぶと書き込まず次へ進み、反対の回答を選ぶと同じ event UUID と `reviewed_at` の rating を更新し、FSRS を再計算します。
+**Previous / Next / Unknown / Known** は常に同じ位置とラベルで表示します。Previous / Next は server から 50 件ずつ取得した履歴を移動するだけで、review を変更しません。履歴で同じ回答を選ぶと書き込まず次へ進み、反対の回答を選ぶと同じ review UUID の action を更新します。server は元の `reviewed_at` を保って FSRS を再計算します。
 
 新規回答は UUID で冪等です。通信結果を受け取れなかったときはカードと同じ UUID をメモリ上に保ち、**Retry answer** で再送します。Service Worker、IndexedDB、outbox、offline cache はありません。reload 時も server 履歴が正となります。Web Lock により回答可能な tab は 1 つに限定し、2 つ目は読み取り専用で表示します。
 ## 認証とセキュリティ
@@ -153,7 +153,7 @@ Fly では `FLY_APP_NAME` が platform から渡されます。追加 host が�
 fly secrets import --app "$FLY_APP" < .private/fly-production.env
 ```
 
-audio read、catalog upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。現行スキーマは `backups/sqlite/schema-v3/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。schema を破壊的に変更するときは別の `schema-vN` prefix へ進め、古い prefix は rollback / archive 用に保持します。
+audio read、catalog upload/publish、Litestream backup には別々の最小権限 R2 credential を使います。app は private audio bucket の read/HEAD だけ、upload/publish は audio prefix の write（必要時だけ overwrite）、Litestream は backup bucket/path の read/list/write だけを持ちます。Litestream は DeleteObject 権限を持たず、`retention.enabled` も false です。現行スキーマは `backups/sqlite/schema-v4/vocab.db`、1 replica、10 秒間隔の sync、6 時間ごとの validation、compaction verification を使います。schema を破壊的に変更するときは別の `schema-vN` prefix へ進め、古い prefix は rollback / archive 用に保持します。
 
 初回 deploy と schema prefix の切替前には、full catalog の audit/validate、2,000 音声の upload と metadata/size 検証、履歴のない R2-key SQLite seed の publish を完了させます。schema 切替では application / Litestream を停止し、旧 volume の DB / WAL / SHM を退避して除去した後、新 prefix を設定した image と現行 schema の seed DB を volume へ配置します。seed を事前作成しない場合は、production entrypoint とは別の停止中 maintenance 環境で現行 DB を初期化し、catalog を publish してから起動してください。acceptance 用の学習履歴入り DB は seed に使わないでください。
 

@@ -2,5 +2,5 @@ class MissingError(RuntimeError):
     pass
 
 
-class EventConflictError(RuntimeError):
+class ReviewConflictError(RuntimeError):
     pass

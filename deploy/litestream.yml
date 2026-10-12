@@ -12,7 +12,7 @@ dbs:
     replica:
       type: s3
       bucket: ${LITESTREAM_R2_BUCKET}
-      path: backups/sqlite/schema-v3/vocab.db
+      path: backups/sqlite/schema-v4/vocab.db
       endpoint: ${LITESTREAM_R2_ENDPOINT_URL}
       # Cloudflare R2 is auto-detected; do not set a region.
       sync-interval: 10s

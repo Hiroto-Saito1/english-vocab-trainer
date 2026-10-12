@@ -6,8 +6,7 @@ from time import monotonic
 from uuid import uuid4
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
-from english_vocab_trainer.application.services import select_next_word, submit_review
-from english_vocab_trainer.domain.models import ReviewAction, Tier, Word
+from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 
 
 def test_two_thousand_word_next_card_and_review_smoke(tmp_path: Path) -> None:
@@ -20,21 +19,20 @@ def test_two_thousand_word_next_card_and_review_smoke(tmp_path: Path) -> None:
                     str(index),
                     f"term {index}",
                     index % 10,
-                    None,
+                    f"definition {index}",
                     f"{index}.mp3",
-                    Tier.UPPER if index % 2 == 0 else Tier.ULTRA,
                 )
                 for index in range(2_000)
             ]
         )
         now = datetime(2026, 1, 1, tzinfo=UTC)
-        selected = select_next_word(repository, now)
+        selected = repository.next_word(now)
         assert selected is not None
-        event_id = uuid4()
-        review = submit_review(repository, event_id, selected.id, ReviewAction.KNOWN, now)
-        stored = repository.get_event(event_id)
+        review_id = uuid4()
+        repository.save_review(Review(review_id, selected.id, ReviewAction.KNOWN, now))
+        stored = repository.get_review(review_id)
     finally:
         repository.close()
     assert selected.id == "0"
-    assert review.status == "applied" and stored is not None
+    assert stored is not None
     assert monotonic() - started < 8

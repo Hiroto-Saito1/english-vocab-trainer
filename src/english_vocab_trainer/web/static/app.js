@@ -1,16 +1,14 @@
 const WRITER_LOCK = "english-vocab-trainer-writer";
 
 let currentCard = null;
-let emptyStatus = null;
-let nextDue = null;
+let nextDue;
 let history = [];
 let historyIndex = -1;
 let olderCursor = null;
 let busy = false;
 let writer = false;
 let releaseWriterLock = null;
-let problem = null;
-let retry = null;
+let failure = null;
 let nextDueTimer = null;
 let bootFlight = null;
 
@@ -67,7 +65,7 @@ function moveNext() {
 function scheduleNextDue() {
   if (nextDueTimer !== null) clearTimeout(nextDueTimer);
   nextDueTimer = null;
-  if (emptyStatus !== "next_due" || nextDue === null || !writer || busy || retry !== null) return;
+  if (nextDue == null || !writer || busy || failure !== null) return;
   const delay = Date.parse(nextDue) - Date.now();
   if (delay <= 0) {
     queueMicrotask(() => void loadCard());
@@ -86,16 +84,16 @@ function render() {
   const historical = historicalEntry();
   const word = displayedWord();
   const retryLocked = busy || !writer;
-  const studyLocked = retryLocked || retry !== null;
+  const studyLocked = retryLocked || failure !== null;
 
   term.hidden = !word;
   definition.hidden = !word;
   audio.hidden = !word;
   if (word) {
     term.textContent = word.term;
-    definition.textContent = word.definition || "Definition unavailable.";
-    if (audio.dataset.wordId !== word.word_id && audio.dataset.wordId !== word.id) {
-      audio.dataset.wordId = word.word_id || word.id;
+    definition.textContent = word.definition;
+    if (audio.dataset.wordId !== word.word_id) {
+      audio.dataset.wordId = word.word_id;
       audio.src = word.audio_url;
       audio.load();
     }
@@ -105,12 +103,14 @@ function render() {
     audio.removeAttribute("src");
     audio.removeAttribute("data-word-id");
     audio.load();
-    if (emptyStatus === "next_due") {
-      card.textContent = `All caught up. The next review is due ${new Date(nextDue).toLocaleString()}.`;
-    } else if (emptyStatus === "catalog_empty") {
-      card.textContent = "The catalog is empty. Publish a catalog before studying.";
-    } else {
+    if (busy) {
       card.textContent = "Loading a card…";
+    } else if (nextDue === undefined) {
+      card.textContent = "Loading a card…";
+    } else if (nextDue !== null) {
+      card.textContent = `All caught up. The next review is due ${new Date(nextDue).toLocaleString()}.`;
+    } else {
+      card.textContent = "The catalog is empty. Publish a catalog before studying.";
     }
   }
 
@@ -128,11 +128,11 @@ function render() {
     ? ("locks" in navigator
       ? "This app is open in another tab. Close it and reload to study here."
       : "This browser cannot safely save answers because Web Locks are unavailable.")
-    : problem || "";
+    : failure?.message || "";
   status.hidden = !status.textContent;
-  retryButton.hidden = retry === null;
+  retryButton.hidden = failure === null;
   retryButton.disabled = retryLocked;
-  retryButton.textContent = retry?.label || "Try again";
+  retryButton.textContent = failure?.label || "Try again";
   if (logoutButton) logoutButton.disabled = studyLocked;
 
   const focused = document.activeElement;
@@ -143,19 +143,21 @@ function render() {
 async function loadCard() {
   if (busy || !writer) return;
   busy = true;
-  problem = null;
+  failure = null;
+  nextDue = undefined;
   render();
   try {
     const response = await apiFetch("/api/v1/card");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     currentCard = payload.item;
-    emptyStatus = payload.item ? null : payload.status;
     nextDue = payload.next_due;
-    retry = null;
   } catch (_) {
-    problem = "The next card could not be loaded.";
-    retry = { label: "Retry next card", run: loadCard };
+    failure = {
+      message: "The next card could not be loaded.",
+      label: "Retry next card",
+      run: loadCard,
+    };
   } finally {
     busy = false;
     render();
@@ -165,7 +167,7 @@ async function loadCard() {
 async function loadHistory(reset = false) {
   if (busy || !writer) return;
   busy = true;
-  problem = null;
+  failure = null;
   render();
   try {
     const cursor = reset || olderCursor === null
@@ -181,10 +183,12 @@ async function loadHistory(reset = false) {
       history.push(...payload.items);
     }
     olderCursor = payload.next_cursor;
-    retry = null;
   } catch (_) {
-    problem = "Answer history could not be loaded.";
-    retry = { label: "Retry history", run: () => loadHistory(reset) };
+    failure = {
+      message: "Answer history could not be loaded.",
+      label: "Retry history",
+      run: () => loadHistory(reset),
+    };
   } finally {
     busy = false;
     render();
@@ -192,7 +196,7 @@ async function loadHistory(reset = false) {
 }
 
 async function previous() {
-  if (busy || !writer || retry !== null) return;
+  if (busy || !writer || failure !== null) return;
   if (historyIndex < 0) {
     if (!history.length) return;
     historyIndex = 0;
@@ -212,7 +216,7 @@ async function previous() {
 }
 
 function next() {
-  if (busy || !writer || retry !== null || historyIndex < 0) return;
+  if (busy || !writer || failure !== null || historyIndex < 0) return;
   moveNext();
   render();
 }
@@ -220,62 +224,57 @@ function next() {
 function reviewPayload(entry, action) {
   if (entry) {
     return {
-      id: entry.id,
+      id: entry.review_id,
       word_id: entry.word_id,
       action,
-      reviewed_at: entry.reviewed_at,
     };
   }
   return {
     id: crypto.randomUUID(),
-    word_id: currentCard.id,
+    word_id: currentCard.word_id,
     action,
-    reviewed_at: new Date().toISOString(),
   };
 }
 
 async function saveAnswer(operation) {
   if (busy || !writer) return;
   busy = true;
-  problem = null;
+  failure = null;
   render();
   try {
-    const response = await apiFetch("/api/v1/review-events", {
+    const response = await apiFetch("/api/v1/reviews", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(operation.payload),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    await response.json();
     if (operation.kind === "history") {
       history[operation.index] = { ...history[operation.index], action: operation.payload.action };
       historyIndex = operation.index;
       moveNext();
       currentCard = null;
-      emptyStatus = null;
-      nextDue = null;
-      retry = null;
+      nextDue = undefined;
     } else {
       const answered = {
-        id: operation.payload.id,
-        word_id: currentCard.id,
+        review_id: operation.payload.id,
+        word_id: currentCard.word_id,
         action: operation.payload.action,
-        reviewed_at: operation.payload.reviewed_at,
         term: currentCard.term,
         definition: currentCard.definition,
         audio_url: currentCard.audio_url,
       };
       history.unshift(answered);
       currentCard = null;
-      emptyStatus = null;
-      nextDue = null;
-      retry = null;
+      nextDue = undefined;
     }
   } catch (_) {
-    problem = operation.kind === "history"
-      ? "The corrected answer could not be saved."
-      : "The answer could not be saved.";
-    retry = { label: "Retry answer", run: () => saveAnswer(operation) };
+    failure = {
+      message: operation.kind === "history"
+        ? "The corrected answer could not be saved."
+        : "The answer could not be saved.",
+      label: "Retry answer",
+      run: () => saveAnswer(operation),
+    };
     busy = false;
     render();
     return;
@@ -286,7 +285,7 @@ async function saveAnswer(operation) {
 }
 
 async function rate(action) {
-  if (busy || !writer || retry !== null) return;
+  if (busy || !writer || failure !== null) return;
   const entry = historicalEntry();
   const word = displayedWord();
   if (!word) return;
@@ -304,17 +303,20 @@ async function rate(action) {
 }
 
 async function logout() {
-  if (busy || !writer || retry !== null) return;
+  if (busy || !writer || failure !== null) return;
   busy = true;
-  problem = null;
+  failure = null;
   render();
   try {
     const response = await apiFetch("/auth/logout", { method: "POST", redirectOn401: false });
     if (![204, 401].includes(response.status)) throw new Error(`HTTP ${response.status}`);
     location.assign("/login");
   } catch (_) {
-    problem = "Sign-out failed. Please try again.";
-    retry = { label: "Retry sign-out", run: logout };
+    failure = {
+      message: "Sign-out failed. Please try again.",
+      label: "Retry sign-out",
+      run: logout,
+    };
     busy = false;
     render();
   }
@@ -350,7 +352,6 @@ async function boot() {
       if (cardResponse.ok) {
         const payload = await cardResponse.json();
         currentCard = payload.item;
-        emptyStatus = payload.item ? null : payload.status;
         nextDue = payload.next_due;
       }
       if (historyResponse.ok) {
@@ -362,11 +363,10 @@ async function boot() {
       return;
     }
     await loadHistory(true);
-    const historyFailure = retry;
+    const historyFailure = failure;
     await loadCard();
-    if (historyFailure && retry === null) {
-      problem = "Answer history could not be loaded.";
-      retry = historyFailure;
+    if (historyFailure && failure === null) {
+      failure = historyFailure;
       render();
     }
   })();
@@ -381,7 +381,7 @@ previousButton.addEventListener("click", previous);
 nextButton.addEventListener("click", next);
 knownButton.addEventListener("click", () => void rate("known"));
 unknownButton.addEventListener("click", () => void rate("unknown"));
-retryButton.addEventListener("click", () => void retry?.run());
+retryButton.addEventListener("click", () => void failure?.run());
 logoutButton?.addEventListener("click", logout);
 
 addEventListener("pagehide", () => {
@@ -391,13 +391,14 @@ addEventListener("pagehide", () => {
   if (nextDueTimer !== null) clearTimeout(nextDueTimer);
   nextDueTimer = null;
 });
-addEventListener("pageshow", (event) => {
-  if (event.persisted && !writer) void boot();
+addEventListener("pageshow", (pageShow) => {
+  if (pageShow.persisted && !writer) void boot();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible"
       && writer
-      && emptyStatus === "next_due"
+      && failure === null
+      && nextDue != null
       && Date.parse(nextDue) <= Date.now()) {
     void loadCard();
   }

@@ -9,21 +9,9 @@ from fsrs import Card, Scheduler
 from fsrs import Rating as FsrsRating
 
 
-class Rating(StrEnum):
-    AGAIN = "again"
-    GOOD = "good"
-
-
 class ReviewAction(StrEnum):
     KNOWN = "known"
     UNKNOWN = "unknown"
-
-
-class Tier(StrEnum):
-    """Public, English-only source tier for a published word."""
-
-    UPPER = "upper"
-    ULTRA = "ultra"
 
 
 # This interval belongs only to the server-side FSRS scheduler.  The client
@@ -31,18 +19,13 @@ class Tier(StrEnum):
 LEARNING_STEP = timedelta(minutes=10)
 
 
-def rating_for_action(action: ReviewAction) -> Rating:
-    return Rating.AGAIN if action is ReviewAction.UNKNOWN else Rating.GOOD
-
-
 @dataclass(frozen=True, slots=True)
 class Word:
     id: str
     term: str
     level: int | None
-    definition: str | None
+    definition: str
     audio_key: str
-    tier: Tier
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,16 +35,16 @@ class WordState:
 
 
 @dataclass(frozen=True, slots=True)
-class ReviewEvent:
+class Review:
     id: UUID
     word_id: str
-    rating: Rating
+    action: ReviewAction
     reviewed_at: datetime
 
 
-def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
-    """Rebuild state from genesis in stable event order."""
-    ordered = sorted(events, key=lambda event: (event.reviewed_at, event.id.int))
+def replay_word_state(word_id: str, reviews: list[Review]) -> WordState:
+    """Rebuild state from genesis in stable review order."""
+    ordered = sorted(reviews, key=lambda review: (review.reviewed_at, review.id.int))
     # Py-FSRS creates a time-based card id by default; seed it from word_id so
     # rebuilding the same server history produces the same due date.
     seed = int.from_bytes(word_id.encode("utf-8"), "big") % 2_000_000_000
@@ -71,15 +54,12 @@ def replay_word_state(word_id: str, events: list[ReviewEvent]) -> WordState:
         learning_steps=(LEARNING_STEP,),
         relearning_steps=(LEARNING_STEP,),
         maximum_interval=365,
-        # Random interval fuzz would make the same event history produce a
+        # Random interval fuzz would make the same review history produce a
         # different card when a historical answer is corrected.
         enable_fuzzing=False,
     )
-    for event in ordered:
-        now = event.reviewed_at.astimezone(UTC)
-        rating = {
-            Rating.AGAIN: FsrsRating.Again,
-            Rating.GOOD: FsrsRating.Good,
-        }[event.rating]
-        card, _ = scheduler.review_card(card, rating, now)
+    for review in ordered:
+        now = review.reviewed_at.astimezone(UTC)
+        fsrs_rating = FsrsRating.Good if review.action is ReviewAction.KNOWN else FsrsRating.Again
+        card, _ = scheduler.review_card(card, fsrs_rating, now)
     return WordState(word_id, card.due if ordered else datetime.min.replace(tzinfo=UTC))

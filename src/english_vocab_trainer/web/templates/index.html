@@ -17,7 +17,7 @@
     #logout { min-height: 2.5rem; padding: .5rem .8rem; background: #486581; float: right; }
     #unknown { background: #7b341e; }
     #previous, #next { background: #744210; }
-    #navigation-actions, #rating-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
+    #navigation-actions, #answer-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0; }
     #term, #definition { line-height: 1.55; background: white; padding: 1rem; border-radius: .5rem; }
     #saved-answer, #status { color: #486581; font-size: .9rem; }
     #status { margin: .3rem 0; }
@@ -25,7 +25,7 @@
     audio { width: 100%; margin: .5rem 0; }
     @media (max-width: 390px) {
       main { padding: .9rem; }
-      #navigation-actions, #rating-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #navigation-actions, #answer-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       button { width: 100%; }
       #logout { width: auto; }
     }
@@ -45,7 +45,7 @@
     <button id="previous" disabled>Previous</button>
     <button id="next" disabled>Next</button>
   </div>
-  <div id="rating-actions">
+  <div id="answer-actions">
     <button id="unknown" disabled>Unknown</button>
     <button id="known" disabled>Known</button>
   </div>

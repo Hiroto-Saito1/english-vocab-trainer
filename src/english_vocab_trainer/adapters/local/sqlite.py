@@ -5,19 +5,17 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 from uuid import UUID
 
 from english_vocab_trainer.adapters.local.database import initialize_database
 from english_vocab_trainer.domain.models import (
-    Rating,
-    ReviewEvent,
-    Tier,
+    Review,
+    ReviewAction,
     Word,
     WordState,
     replay_word_state,
 )
-from english_vocab_trainer.ports.errors import EventConflictError, MissingError
+from english_vocab_trainer.ports.errors import MissingError, ReviewConflictError
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -57,10 +55,10 @@ class SQLiteVocabularyRepository:
         """Atomically publish a fully validated catalog without touching review history."""
         with self._transaction():
             self.db.executemany(
-                "INSERT INTO words(id,term,level,definition,audio_key,tier) "
-                "VALUES(?,?,?,?,?,?) "
+                "INSERT INTO words(id,term,level,definition,audio_key) "
+                "VALUES(?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET term=excluded.term,level=excluded.level,"
-                "definition=excluded.definition,audio_key=excluded.audio_key,tier=excluded.tier",
+                "definition=excluded.definition,audio_key=excluded.audio_key",
                 [
                     (
                         word.id,
@@ -68,7 +66,6 @@ class SQLiteVocabularyRepository:
                         word.level,
                         word.definition,
                         word.audio_key,
-                        word.tier.value,
                     )
                     for word in words
                 ],
@@ -86,7 +83,6 @@ class SQLiteVocabularyRepository:
             row["level"],
             row["definition"],
             row["audio_key"],
-            Tier(row["tier"]),
         )
 
     def next_word(self, now: datetime) -> Word | None:
@@ -99,43 +95,37 @@ class SQLiteVocabularyRepository:
             return self._word(due)
         unseen = self.db.execute(
             "SELECT w.* FROM words w WHERE NOT EXISTS("
-            "SELECT 1 FROM review_events e WHERE e.word_id=w.id) "
+            "SELECT 1 FROM reviews r WHERE r.word_id=w.id) "
             "ORDER BY w.level IS NULL,w.level,w.id LIMIT 1"
         ).fetchone()
         return self._word(unseen) if unseen is not None else None
 
-    def empty_card_status(
-        self, now: datetime
-    ) -> tuple[Literal["next_due", "catalog_empty"], datetime | None]:
-        if self.db.execute("SELECT COUNT(*) FROM words").fetchone()[0] == 0:
-            return "catalog_empty", None
+    def next_due(self, now: datetime) -> datetime | None:
         row = self.db.execute(
             "SELECT MIN(due_at) FROM word_state WHERE due_at>?",
             (_iso(now),),
         ).fetchone()
-        if row[0] is None:
-            raise RuntimeError("an empty card with available words must have a future due date")
-        return "next_due", datetime.fromisoformat(row[0])
+        return datetime.fromisoformat(row[0]) if row[0] is not None else None
 
-    def _events(self, word_id: str) -> list[ReviewEvent]:
+    def _reviews(self, word_id: str) -> list[Review]:
         return [
-            ReviewEvent(
+            Review(
                 UUID(row["id"]),
                 word_id,
-                Rating(row["rating"]),
+                ReviewAction(row["action"]),
                 datetime.fromisoformat(row["reviewed_at"]),
             )
-            for row in self.db.execute("SELECT * FROM review_events WHERE word_id=?", (word_id,))
+            for row in self.db.execute("SELECT * FROM reviews WHERE word_id=?", (word_id,))
         ]
 
-    def get_event(self, event_id: UUID) -> ReviewEvent | None:
-        row = self.db.execute("SELECT * FROM review_events WHERE id=?", (str(event_id),)).fetchone()
+    def get_review(self, review_id: UUID) -> Review | None:
+        row = self.db.execute("SELECT * FROM reviews WHERE id=?", (str(review_id),)).fetchone()
         if row is None:
             return None
-        return ReviewEvent(
-            event_id,
+        return Review(
+            review_id,
             row["word_id"],
-            Rating(row["rating"]),
+            ReviewAction(row["action"]),
             datetime.fromisoformat(row["reviewed_at"]),
         )
 
@@ -152,64 +142,59 @@ class SQLiteVocabularyRepository:
             (state.word_id, _iso(state.due_at)),
         )
 
-    def save_event(
-        self, event: ReviewEvent
-    ) -> tuple[WordState, Literal["applied", "idempotent", "updated"]]:
+    def save_review(self, review: Review) -> WordState:
         with self._transaction():
             old = self.db.execute(
-                "SELECT word_id,rating,reviewed_at FROM review_events WHERE id=?",
-                (str(event.id),),
+                "SELECT word_id,action FROM reviews WHERE id=?",
+                (str(review.id),),
             ).fetchone()
-            reviewed_at = _iso(event.reviewed_at)
             if old:
-                if old["word_id"] != event.word_id or old["reviewed_at"] != reviewed_at:
-                    raise EventConflictError("event UUID payload conflict")
-                if old["rating"] == event.rating.value:
-                    return self.state(event.word_id), "idempotent"
+                if old["word_id"] != review.word_id:
+                    raise ReviewConflictError("review UUID word conflict")
+                if old["action"] == review.action.value:
+                    return self.state(review.word_id)
                 self.db.execute(
-                    "UPDATE review_events SET rating=? WHERE id=?",
-                    (event.rating.value, str(event.id)),
+                    "UPDATE reviews SET action=? WHERE id=?",
+                    (review.action.value, str(review.id)),
                 )
-                status: Literal["applied", "idempotent", "updated"] = "updated"
             else:
-                if self.get_word(event.word_id) is None:
+                if self.get_word(review.word_id) is None:
                     raise MissingError("word not found")
                 self.db.execute(
-                    "INSERT INTO review_events VALUES(?,?,?,?)",
+                    "INSERT INTO reviews VALUES(?,?,?,?)",
                     (
-                        str(event.id),
-                        event.word_id,
-                        event.rating.value,
-                        reviewed_at,
+                        str(review.id),
+                        review.word_id,
+                        review.action.value,
+                        _iso(review.reviewed_at),
                     ),
                 )
-                status = "applied"
-            state = replay_word_state(event.word_id, self._events(event.word_id))
+            state = replay_word_state(review.word_id, self._reviews(review.word_id))
             self._save(state)
-            return state, status
+            return state
 
     def history_page(
         self, cursor: tuple[datetime, UUID] | None, limit: int
-    ) -> list[tuple[ReviewEvent, Word]]:
+    ) -> list[tuple[Review, Word]]:
         where = ""
         values: tuple[object, ...] = (limit,)
         if cursor is not None:
-            reviewed_at, event_id = cursor
-            where = "WHERE (e.reviewed_at<? OR (e.reviewed_at=? AND e.id<?)) "
+            reviewed_at, review_id = cursor
+            where = "WHERE (r.reviewed_at<? OR (r.reviewed_at=? AND r.id<?)) "
             value = _iso(reviewed_at)
-            values = (value, value, str(event_id), limit)
+            values = (value, value, str(review_id), limit)
         rows = self.db.execute(
-            "SELECT e.id event_id,e.word_id,e.rating,e.reviewed_at,w.* "
-            "FROM review_events e JOIN words w ON w.id=e.word_id "
-            f"{where}ORDER BY e.reviewed_at DESC,e.id DESC LIMIT ?",
+            "SELECT r.id review_id,r.word_id,r.action,r.reviewed_at,w.* "
+            "FROM reviews r JOIN words w ON w.id=r.word_id "
+            f"{where}ORDER BY r.reviewed_at DESC,r.id DESC LIMIT ?",
             values,
         )
         return [
             (
-                ReviewEvent(
-                    UUID(row["event_id"]),
+                Review(
+                    UUID(row["review_id"]),
                     row["word_id"],
-                    Rating(row["rating"]),
+                    ReviewAction(row["action"]),
                     datetime.fromisoformat(row["reviewed_at"]),
                 ),
                 self._word(row),

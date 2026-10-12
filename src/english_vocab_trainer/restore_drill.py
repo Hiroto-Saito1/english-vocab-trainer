@@ -62,9 +62,7 @@ def restore_drill(
                 ) from exc
             return {
                 "words": int(connection.execute("SELECT count(*) FROM words").fetchone()[0]),
-                "review_events": int(
-                    connection.execute("SELECT count(*) FROM review_events").fetchone()[0]
-                ),
+                "reviews": int(connection.execute("SELECT count(*) FROM reviews").fetchone()[0]),
             }
         except sqlite3.DatabaseError as exc:
             raise RestoreDrillError("restored database is not readable") from exc
@@ -87,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     counts = restore_drill(
         live_database=arguments.live_db, output_database=arguments.output, config=arguments.config
     )
-    print(f"restore drill passed: words={counts['words']} review_events={counts['review_events']}")
+    print(f"restore drill passed: words={counts['words']} reviews={counts['reviews']}")
     return 0
 
 

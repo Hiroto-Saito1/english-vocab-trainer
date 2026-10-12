@@ -139,8 +139,8 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
     connection = sqlite3.connect(live)
     initialize_database(connection)
     connection.execute(
-        "INSERT INTO words(id,term,level,definition,audio_key,tier) "
-        "VALUES('one','one',1,NULL,'one.mp3','upper')"
+        "INSERT INTO words(id,term,level,definition,audio_key) "
+        "VALUES('one','one',1,'definition','one.mp3')"
     )
     connection.commit()
     connection.close()
@@ -161,7 +161,7 @@ def test_restore_drill_refuses_live_or_existing_output_and_validates_restored_sc
         live_database=live, output_database=output, config=Path("/safe.yml"), runner=restore
     ) == {
         "words": 1,
-        "review_events": 0,
+        "reviews": 0,
     }
     assert commands == [
         ("litestream", "restore", "-config", "/safe.yml", "-o", str(output), str(live))

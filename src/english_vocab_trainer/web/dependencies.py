@@ -9,7 +9,6 @@ from fastapi import Header, HTTPException, Request
 
 from english_vocab_trainer.adapters.local.sqlite import SQLiteVocabularyRepository
 from english_vocab_trainer.ports.audio import AudioStore
-from english_vocab_trainer.ports.repositories import VocabularyRepository
 from english_vocab_trainer.web.auth import AuthenticationError
 from english_vocab_trainer.web.container import AppContainer
 
@@ -40,7 +39,7 @@ def get_container(request: Request) -> AppContainer:
     return cast(AppContainer, request.app.state.container)
 
 
-def repository(request: Request) -> Iterator[VocabularyRepository]:
+def repository(request: Request) -> Iterator[SQLiteVocabularyRepository]:
     container = get_container(request)
     if container.environment not in {"local", "test"}:
         if container.auth is None:

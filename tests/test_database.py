@@ -13,7 +13,7 @@ EXPECTED_TABLES = {
     "schema_metadata",
     "words",
     "word_state",
-    "review_events",
+    "reviews",
     "login_attempts",
 }
 
@@ -38,15 +38,14 @@ def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
         "level",
         "definition",
         "audio_key",
-        "tier",
     }
-    assert {row[1] for row in connection.execute("PRAGMA table_info(review_events)")} == {
+    assert {row[1] for row in connection.execute("PRAGMA table_info(reviews)")} == {
         "id",
         "word_id",
-        "rating",
+        "action",
         "reviewed_at",
     }
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     assert connection.execute("SELECT version FROM schema_metadata").fetchone() == (SCHEMA_VERSION,)
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -59,8 +58,8 @@ def test_current_schema_initialization_is_idempotent_across_reopen(tmp_path: Pat
     connection = sqlite3.connect(path)
     initialize_database(connection)
     connection.execute(
-        "INSERT INTO words(id,term,level,definition,audio_key,tier) "
-        "VALUES('one','one',9,NULL,'one.mp3','upper')"
+        "INSERT INTO words(id,term,level,definition,audio_key) "
+        "VALUES('one','one',9,'definition','one.mp3')"
     )
     connection.commit()
     connection.close()
@@ -74,14 +73,14 @@ def test_current_schema_initialization_is_idempotent_across_reopen(tmp_path: Pat
 def test_incompatible_columns_and_version_fail_without_migration(tmp_path: Path) -> None:
     old = sqlite3.connect(tmp_path / "old.db")
     old.execute(
-        "CREATE TABLE review_events("
-        "id TEXT PRIMARY KEY,word_id TEXT,rating TEXT,reviewed_at TEXT,voided_at TEXT,"
+        "CREATE TABLE reviews("
+        "id TEXT PRIMARY KEY,word_id TEXT,answer TEXT,reviewed_at TEXT,voided_at TEXT,"
         "payload TEXT,user_id TEXT)"
     )
     old.commit()
     with pytest.raises(SchemaMismatchError, match="recreate"):
         initialize_database(old)
-    assert old.execute("PRAGMA table_info(review_events)").fetchall()
+    assert old.execute("PRAGMA table_info(reviews)").fetchall()
     old.close()
 
     wrong_version = sqlite3.connect(tmp_path / "wrong-version.db")
