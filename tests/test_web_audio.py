@@ -60,11 +60,11 @@ class ConditionalStore:
         self.head_calls = 0
         self.get_calls = 0
 
-    def head(self, key: str) -> AudioMetadata:
+    async def head(self, key: str) -> AudioMetadata:
         self.head_calls += 1
         return AudioMetadata(5, "a" * 64)
 
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    async def get(self, key: str, range_header: str | None = None) -> AudioResult:
         self.get_calls += 1
         return AudioResult(b"abcde", 5, "a" * 64, 0, 4, False)
 
@@ -98,13 +98,13 @@ def test_conditional_audio_get_fetches_when_validator_does_not_match(tmp_path: P
 
 
 class RacingRangeStore(ConditionalStore):
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    async def get(self, key: str, range_header: str | None = None) -> AudioResult:
         self.get_calls += 1
         raise InvalidRangeError("object changed after validation")
 
 
 class UnavailableGetStore(ConditionalStore):
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    async def get(self, key: str, range_header: str | None = None) -> AudioResult:
         self.get_calls += 1
         raise AudioStorageError("upstream secret=private")
 
@@ -145,13 +145,13 @@ class MetadataOnlyStore:
         self.get_calls = 0
         self.unavailable = unavailable
 
-    def head(self, key: str) -> AudioMetadata:
+    async def head(self, key: str) -> AudioMetadata:
         self.head_calls += 1
         if self.unavailable:
             raise AudioStorageError("upstream token=private")
         return AudioMetadata(5, "a" * 64)
 
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    async def get(self, key: str, range_header: str | None = None) -> AudioResult:
         self.get_calls += 1
         raise AssertionError("HEAD must not call get")
 

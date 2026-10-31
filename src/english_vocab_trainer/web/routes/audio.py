@@ -1,7 +1,5 @@
 """Private audio GET and HEAD routes."""
 
-import inspect
-from collections.abc import Awaitable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -9,17 +7,13 @@ from fastapi.responses import Response
 
 from english_vocab_trainer.ports.audio import (
     AudioMetadata,
+    AudioResult,
     AudioStorageError,
     AudioStore,
     InvalidRangeError,
     parse_single_range,
 )
 from english_vocab_trainer.ports.vocabulary import VocabularyRepository
-from english_vocab_trainer.web.audio_response import (
-    build_audio_head_response,
-    build_audio_response,
-    if_none_match_matches,
-)
 from english_vocab_trainer.web.dependencies import audio_store
 from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
@@ -30,13 +24,52 @@ IfNoneMatch = Annotated[str | None, Header(alias="If-None-Match")]
 router = APIRouter()
 
 
-async def _resolve[T](value: T | Awaitable[T]) -> T:
-    return await value if inspect.isawaitable(value) else value
+def if_none_match_matches(etag: str, if_none_match: str | None) -> bool:
+    canonical = f'"{etag}"'
+    candidates = {part.strip() for part in if_none_match.split(",")} if if_none_match else set()
+    return "*" in candidates or canonical in candidates or f"W/{canonical}" in candidates
+
+
+def build_audio_response(result: AudioResult, if_none_match: str | None) -> Response:
+    etag = f'"{result.etag}"'
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+        "ETag": etag,
+        "Content-Type": "audio/mpeg",
+        "Content-Length": str(max(0, result.end - result.start + 1)),
+    }
+    if if_none_match_matches(result.etag, if_none_match):
+        return Response(status_code=304, headers=headers)
+    if result.partial:
+        headers["Content-Range"] = f"bytes {result.start}-{result.end}/{result.size}"
+    return Response(
+        content=result.body,
+        status_code=206 if result.partial else 200,
+        headers=headers,
+    )
+
+
+def build_audio_head_response(
+    metadata: AudioMetadata, range_header: str | None, if_none_match: str | None
+) -> Response:
+    """Build a HEAD response from metadata without ever loading object bytes."""
+    if if_none_match_matches(metadata.etag, if_none_match):
+        return build_audio_response(
+            AudioResult(b"", metadata.size, metadata.etag, 0, metadata.size - 1, False),
+            if_none_match,
+        )
+    selected = parse_single_range(range_header, metadata.size)
+    start, end = selected if selected is not None else (0, metadata.size - 1)
+    return build_audio_response(
+        AudioResult(b"", metadata.size, metadata.etag, start, end, selected is not None),
+        if_none_match,
+    )
 
 
 async def _audio_metadata(store: AudioStore, key: str) -> AudioMetadata:
     try:
-        return await _resolve(store.head(key))
+        return await store.head(key)
     except FileNotFoundError as exc:
         raise HTTPException(404, "audio not found") from exc
     except AudioStorageError as exc:
@@ -77,7 +110,7 @@ async def audio(
             except InvalidRangeError:
                 return _range_not_satisfiable(metadata.size)
     try:
-        result = await _resolve(store.get(word.audio_key, range_header))
+        result = await store.get(word.audio_key, range_header)
     except FileNotFoundError as exc:
         raise HTTPException(404, "audio not found") from exc
     except InvalidRangeError:

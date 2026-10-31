@@ -73,8 +73,6 @@ scripts/ingest-env transcribe \
   --profile full --source .. --catalog .private/full-catalog.jsonl
 scripts/ingest-env audit \
   --profile full --source .. --catalog .private/full-catalog.jsonl
-scripts/ingest-env validate \
-  --profile full --source .. --catalog .private/full-catalog.jsonl
 ```
 
 音声は `audio/<lowercase sha256>.mp3` に変換して R2 へ投入します。1件1 MiB未満、合計8 GB未満でなければ処理を拒否します。アップロード前に dry-run し、既存 object の size と SHA-256 metadata が一致する場合だけ skip します。

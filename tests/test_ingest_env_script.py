@@ -47,7 +47,7 @@ def test_ingest_wrapper_uses_external_cache_environment_and_frozen_lock(tmp_path
     )
     assert doctor.returncode == 0, doctor.stderr
     command = subprocess.run(
-        ["bash", str(SCRIPT), "validate", "--source", "private-source"],
+        ["bash", str(SCRIPT), "audit", "--source", "private-source"],
         check=False,
         capture_output=True,
         text=True,
@@ -60,7 +60,7 @@ def test_ingest_wrapper_uses_external_cache_environment_and_frozen_lock(tmp_path
     assert sum(call.endswith("|sync --group ingest --frozen") for call in calls) == 2
     assert any("|run --group ingest python -c " in call for call in calls)
     assert any(
-        call.endswith("|run --group ingest vocab-ingest validate --source private-source")
+        call.endswith("|run --group ingest vocab-ingest audit --source private-source")
         for call in calls
     )
     expected_prefix = f"{cache}/english-vocab-trainer/ingest-"

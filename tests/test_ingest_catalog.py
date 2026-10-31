@@ -93,6 +93,44 @@ def test_scan_reuses_validated_state_by_default_and_force_discards_it(tmp_path: 
     assert all(record.transcript is None for record in forced)
 
 
+@pytest.mark.parametrize("field,value", [("model", "other-model"), ("language", "fr")])
+def test_scan_rejects_changed_transcription_provenance_until_forced(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    from english_vocab_trainer.ingest.storage import read_manifest, write_manifest
+
+    approved_source_tree(tmp_path, label="sample")
+    catalog = tmp_path / ".private" / "catalog.jsonl"
+    current, manifest = scan_catalog(tmp_path, catalog, limit_per_source=1)
+    write_catalog(
+        catalog,
+        [
+            replace(record, transcript="An English definition with an example.")
+            for record in current
+        ],
+    )
+    changed = (
+        replace(manifest, model=value) if field == "model" else replace(manifest, language=value)
+    )
+    write_manifest(catalog, changed)
+    before = catalog.read_bytes()
+    with pytest.raises(ValueError, match="--force"):
+        scan_catalog(tmp_path, catalog, limit_per_source=1)
+    assert catalog.read_bytes() == before and read_manifest(catalog) == changed
+    with pytest.raises(ValueError, match="provenance"):
+        audit_catalog(tmp_path, catalog, profile=MVP_PROFILE, limit_per_source=1)
+
+    class UnusedTranscriber:
+        def transcribe(self, _: Path) -> str:
+            raise AssertionError("must not transcribe with stale provenance")
+
+    with pytest.raises(ValueError, match="provenance"):
+        transcribe_catalog(tmp_path, catalog, UnusedTranscriber(), force=False)
+    forced, reset_manifest = scan_catalog(tmp_path, catalog, limit_per_source=1, force=True)
+    assert all(record.transcript is None for record in forced)
+    assert reset_manifest == manifest
+
+
 def test_scan_force_discards_mismatched_pending_journal(tmp_path: Path) -> None:
     approved_source_tree(tmp_path, label="sample")
     catalog = tmp_path / ".private" / "catalog.jsonl"

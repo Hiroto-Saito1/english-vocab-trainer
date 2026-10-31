@@ -11,7 +11,6 @@ from ingest_support import materialize_catalog_audio, records
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.ingest.publish import publish_records, upload_audio
 from english_vocab_trainer.ingest.validation import validate_records
-from english_vocab_trainer.ports.audio import r2_audio_key
 
 
 def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
@@ -26,17 +25,15 @@ def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:
         repository.close()
 
 
-def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_path: Path) -> None:
+def test_publish_uses_filesystem_keys_and_rolls_back_as_one_transaction(tmp_path: Path) -> None:
     database = tmp_path / "vocab.db"
     current = materialize_catalog_audio(tmp_path, records())
-    publish_records(database, current, audio_backend="r2", root=tmp_path)
+    publish_records(database, current, root=tmp_path)
     repository = SQLiteVocabularyRepository(database)
     try:
         words = [word for record in current if (word := repository.get_word(record.id))]
         assert len(words) == 20
-        assert {word.audio_key for word in words} == {
-            r2_audio_key(record.checksum) for record in current
-        }
+        assert {word.audio_key for word in words} == {record.audio_key for record in current}
         prior = repository.get_word(current[0].id)
         assert prior is not None
         repository.db.execute(
@@ -50,7 +47,7 @@ def test_publish_r2_uses_canonical_keys_and_rolls_back_as_one_transaction(tmp_pa
             for record in current
         ]
         with pytest.raises(Exception, match="no"):
-            publish_records(database, changed, audio_backend="r2", root=tmp_path)
+            publish_records(database, changed, root=tmp_path)
         assert repository.get_word(current[0].id) == prior
     finally:
         repository.close()
@@ -62,9 +59,6 @@ class _UploadClient:
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         raise AssertionError("checksum validation must happen before network")
-
-    def get_object(self, **kwargs: str) -> dict[str, Any]:
-        raise AssertionError("not used")
 
     def put_object(
         self,

@@ -79,7 +79,7 @@ def read_manifest(catalog: Path) -> CatalogManifest | None:
         or manifest.profile not in PROFILES
         or manifest.expected_count < 1
         or _SHA256.fullmatch(manifest.inventory_digest) is None
-        or manifest.language != "en"
+        or not manifest.language
         or not manifest.model
     ):
         raise ValueError("catalog provenance manifest is invalid")

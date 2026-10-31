@@ -9,14 +9,11 @@ import pytest
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
 from english_vocab_trainer.adapters.r2 import r2_client_from_env
 from english_vocab_trainer.configuration import ConfigurationError
-from english_vocab_trainer.web.container import audio_store_from_env
+from english_vocab_trainer.web.container import container_from_env
 
 
 class FactoryClient:
     def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, Any]:
-        raise AssertionError("not used")
-
-    def get_object(self, **kwargs: str) -> Mapping[str, Any]:
         raise AssertionError("not used")
 
     def put_object(
@@ -32,12 +29,23 @@ class FactoryClient:
 
 
 def test_filesystem_factory_requires_explicit_backend_and_root(tmp_path: Path) -> None:
+    env = {"VOCAB_DB_PATH": str(tmp_path / "v.db")}
     with pytest.raises(ConfigurationError):
-        audio_store_from_env({})
+        container_from_env(env)
     with pytest.raises(ConfigurationError):
-        audio_store_from_env({"AUDIO_BACKEND": "filesystem"})
-    store = audio_store_from_env({"AUDIO_BACKEND": "filesystem", "AUDIO_ROOT": str(tmp_path)})
-    assert isinstance(store, FilesystemAudioStore)
+        container_from_env({**env, "AUDIO_BACKEND": "filesystem"})
+    container = container_from_env(
+        {**env, "AUDIO_BACKEND": "filesystem", "AUDIO_ROOT": str(tmp_path)}
+    )
+    assert isinstance(container.audio, FilesystemAudioStore)
+
+
+def test_container_requires_database_and_rejects_production(tmp_path: Path) -> None:
+    audio_env = {"AUDIO_BACKEND": "filesystem", "AUDIO_ROOT": str(tmp_path)}
+    with pytest.raises(ConfigurationError, match="VOCAB_DB_PATH"):
+        container_from_env(audio_env)
+    with pytest.raises(ConfigurationError, match="Cloudflare Worker"):
+        container_from_env({**audio_env, "APP_ENV": "production"})
 
 
 def test_r2_client_uses_explicit_region_and_sanitizes_factory_failure() -> None:
@@ -68,4 +76,4 @@ def test_r2_client_uses_explicit_region_and_sanitizes_factory_failure() -> None:
 @pytest.mark.parametrize("backend", ["r2", "unknown"])
 def test_factory_fails_closed_for_incomplete_or_unknown_backend(backend: str) -> None:
     with pytest.raises(ConfigurationError):
-        audio_store_from_env({"AUDIO_BACKEND": backend})
+        container_from_env({"VOCAB_DB_PATH": "v.db", "AUDIO_BACKEND": backend})

@@ -15,16 +15,17 @@ def test_range_parser() -> None:
             parse_single_range(invalid, 5)
 
 
-def test_audio_store_blocks_traversal(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_audio_store_blocks_traversal(tmp_path: Path) -> None:
     (tmp_path / "x.mp3").write_bytes(b"abcde")
-    result = FilesystemAudioStore(tmp_path).get("x.mp3", "bytes=1-3")
+    result = await FilesystemAudioStore(tmp_path).get("x.mp3", "bytes=1-3")
     assert result.body == b"bcd" and result.partial
     with pytest.raises(FileNotFoundError):
-        FilesystemAudioStore(tmp_path).get("../x.mp3")
+        await FilesystemAudioStore(tmp_path).get("../x.mp3")
     with pytest.raises(FileNotFoundError):
-        FilesystemAudioStore(tmp_path).get("nested/../x.mp3")
+        await FilesystemAudioStore(tmp_path).get("nested/../x.mp3")
     with pytest.raises(FileNotFoundError):
-        FilesystemAudioStore(tmp_path).get("x.MP3")
+        await FilesystemAudioStore(tmp_path).get("x.MP3")
 
 
 @pytest.mark.parametrize(

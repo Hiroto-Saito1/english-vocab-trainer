@@ -9,8 +9,8 @@ from pathlib import Path
 
 from english_vocab_trainer.ports.audio import r2_audio_key
 
-from .catalog import audit_records
-from .models import CatalogRecord
+from .catalog import audit_catalog
+from .models import MVP_PROFILE, CatalogProfile
 from .storage import write_text_atomically
 
 
@@ -26,14 +26,17 @@ def _literal(value: str | int | None) -> str:
 
 def export_d1(
     root: Path,
-    records: list[CatalogRecord],
+    catalog: Path,
     output: Path,
     *,
-    expected_count: int,
+    profile: CatalogProfile = MVP_PROFILE,
+    limit_per_source: int = 10,
     published_at: str | None = None,
     dry_run: bool = False,
-) -> tuple[str, int]:
-    valid, _warnings = audit_records(root, records, expected_count=expected_count)
+) -> tuple[str, int, list[dict[str, str]]]:
+    valid, warnings = audit_catalog(
+        root, catalog, profile=profile, limit_per_source=limit_per_source
+    )
     rows = sorted(
         ((r.id, r.term, r.level, r.transcript, r2_audio_key(r.checksum)) for r in valid),
         key=lambda row: row[0],
@@ -59,4 +62,4 @@ def export_d1(
             + " WHERE singleton=1;"
         )
         write_text_atomically(output, "\n".join(statements) + "\n")
-    return digest, len(rows)
+    return digest, len(rows), warnings

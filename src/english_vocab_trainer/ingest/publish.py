@@ -17,12 +17,9 @@ def publish_records(
     database: Path,
     records: Iterable[CatalogRecord],
     *,
-    audio_backend: str = "filesystem",
     root: Path | None = None,
     expected_count: int = 20,
 ) -> None:
-    if audio_backend not in {"filesystem", "r2"}:
-        raise ValueError("audio backend must be filesystem or r2")
     if root is None:
         raise ValueError("publish requires a source root for file checksum validation")
     validated = validate_records(records, expected_count, root=root)
@@ -32,7 +29,7 @@ def publish_records(
             record.term,
             record.level,
             cast(str, record.transcript),
-            record.audio_key if audio_backend == "filesystem" else r2_audio_key(record.checksum),
+            record.audio_key,
         )
         for record in validated
     ]

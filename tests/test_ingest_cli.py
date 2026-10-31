@@ -27,9 +27,6 @@ class _CliUploadClient:
         body, digest = self.objects[Key]
         return {"ContentLength": len(body), "Metadata": {"sha256": digest}}
 
-    def get_object(self, **kwargs: str) -> Mapping[str, Any]:
-        raise AssertionError("not used")
-
     def put_object(
         self,
         *,
@@ -84,7 +81,7 @@ def test_cli_upload_dry_run_needs_no_client_and_normal_upload_resumes(
     assert "would upload 20" in output and client.puts == 20 and "skipped 20" in output
 
 
-def test_cli_scan_and_validate_private_catalog(
+def test_cli_scan_and_audit_private_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     approved_source_tree(tmp_path, 10)
@@ -101,10 +98,10 @@ def test_cli_scan_and_validate_private_catalog(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["vocab-ingest", "validate", "--source", str(tmp_path), "--catalog", str(catalog)],
+        ["vocab-ingest", "audit", "--source", str(tmp_path), "--catalog", str(catalog)],
     )
     main()
-    assert "valid: 20" in capsys.readouterr().out
+    assert "audit valid: 20" in capsys.readouterr().out
 
 
 def test_cli_scan_dry_run_does_not_write_catalog(

@@ -67,7 +67,3 @@ def apply_review(card: Card, review: Review, scheduler: Scheduler | None = None)
     )
     rating = FsrsRating.Good if review.action is ReviewAction.KNOWN else FsrsRating.Again
     return scheduler.review_card(card, rating, review.reviewed_at.astimezone(UTC))[0]
-
-
-def replay_due_at(word_id: str, reviews: list[Review]) -> datetime:
-    return replay_card(word_id, reviews).due if reviews else datetime.min.replace(tzinfo=UTC)

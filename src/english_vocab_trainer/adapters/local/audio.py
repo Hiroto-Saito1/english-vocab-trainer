@@ -20,9 +20,9 @@ class FilesystemAudioStore:
             raise FileNotFoundError(key)
         return candidate
 
-    def get(self, key: str, range_header: str | None = None) -> AudioResult:
+    async def get(self, key: str, range_header: str | None = None) -> AudioResult:
         candidate = self._path(key)
-        metadata = self.head(key)
+        metadata = await self.head(key)
         selected = parse_single_range(range_header, metadata.size)
         start, end = selected if selected is not None else (0, metadata.size - 1)
         length = max(0, end - start + 1)
@@ -43,7 +43,7 @@ class FilesystemAudioStore:
             selected is not None,
         )
 
-    def head(self, key: str) -> AudioMetadata:
+    async def head(self, key: str) -> AudioMetadata:
         candidate = self._path(key)
         try:
             size = candidate.stat().st_size

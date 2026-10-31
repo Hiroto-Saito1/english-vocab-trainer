@@ -154,6 +154,11 @@ def _reconcile_existing_catalog(
     prior_manifest = read_manifest(catalog)
     if prior_manifest is None:
         raise ValueError("catalog state exists without a provenance manifest")
+    if (prior_manifest.model, prior_manifest.language) != (
+        snapshot.manifest.model,
+        snapshot.manifest.language,
+    ):
+        raise ValueError("transcription model or language changed; scan with --force to reset")
     prior_records = validate_records(
         base_records,
         prior_manifest.expected_count,
@@ -230,7 +235,7 @@ def audit_records(
     """Blocking catalog inventory checks plus non-blocking manual-review warnings."""
     valid = validate_records(records, expected_count, root=root)
     warnings: list[dict[str, str]] = []
-    transcripts: dict[str, CatalogRecord] = {}
+    transcripts: set[str] = set()
     for record in valid:
         transcript = record.transcript or ""
         folded = transcript.casefold()
@@ -238,7 +243,7 @@ def audit_records(
             warnings.append(
                 {"kind": "term-not-found", "checksum": record.checksum, "term": record.term}
             )
-        if len(transcript) < 40 or len(transcript) > 2_000:
+        if len(transcript) < 40:
             warnings.append(
                 {
                     "kind": "unusual-transcript-length",
@@ -246,13 +251,12 @@ def audit_records(
                     "term": record.term,
                 }
             )
-        duplicate = transcripts.get(folded)
-        if duplicate is not None:
+        if folded in transcripts:
             warnings.append(
                 {"kind": "duplicate-transcript", "checksum": record.checksum, "term": record.term}
             )
         else:
-            transcripts[folded] = record
+            transcripts.add(folded)
     return valid, warnings
 
 
@@ -271,6 +275,8 @@ def _verify_catalog_inventory(
         manifest.schema_version != CATALOG_SCHEMA_VERSION
         or manifest.profile != profile.name
         or manifest.expected_count != expected
+        or manifest.model != TRANSCRIPTION_MODEL
+        or manifest.language != "en"
     ):
         raise ValueError("catalog profile does not match provenance manifest")
     candidates = select_audio(root, limit_per_source, profile=profile)

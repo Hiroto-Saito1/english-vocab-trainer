@@ -10,16 +10,6 @@ from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.ports.audio import AudioStore
 
 
-def audio_store_from_env(environ: Mapping[str, str]) -> AudioStore:
-    """Build filesystem storage for local/test use."""
-    if environ.get("AUDIO_BACKEND") != "filesystem":
-        raise ConfigurationError("AUDIO_BACKEND must be filesystem")
-    root = environ.get("AUDIO_ROOT")
-    if not root:
-        raise ConfigurationError("AUDIO_ROOT is required for the filesystem audio backend")
-    return FilesystemAudioStore(Path(root))
-
-
 @dataclass(frozen=True, slots=True)
 class AppContainer:
     database: Path
@@ -34,4 +24,9 @@ def container_from_env(environ: Mapping[str, str] = os.environ) -> AppContainer:
         database = Path(environ["VOCAB_DB_PATH"])
     except KeyError as exc:
         raise ConfigurationError("VOCAB_DB_PATH is required") from exc
-    return AppContainer(database, audio_store_from_env(environ))
+    if environ.get("AUDIO_BACKEND") != "filesystem":
+        raise ConfigurationError("AUDIO_BACKEND must be filesystem")
+    root = environ.get("AUDIO_ROOT")
+    if not root:
+        raise ConfigurationError("AUDIO_ROOT is required for the filesystem audio backend")
+    return AppContainer(database, FilesystemAudioStore(Path(root)))

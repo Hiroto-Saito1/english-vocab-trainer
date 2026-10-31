@@ -12,7 +12,7 @@ from english_vocab_trainer.adapters.local.vocabulary import (
     ReviewConflictError,
     SQLiteVocabularyRepository,
 )
-from english_vocab_trainer.domain.models import Review, ReviewAction, Word, replay_due_at
+from english_vocab_trainer.domain.models import Review, ReviewAction, Word, replay_card
 
 
 def seed(repository: SQLiteVocabularyRepository) -> None:
@@ -121,7 +121,7 @@ def test_save_is_idempotent_and_correction_preserves_server_timestamp(tmp_path: 
         due = repository.db.execute("SELECT due_at FROM word_state WHERE word_id='one'").fetchone()
         assert row is not None and due is not None
         assert tuple(row) == ("one", "unknown", now.isoformat())
-        assert datetime.fromisoformat(due["due_at"]) == replay_due_at("one", [corrected])
+        assert datetime.fromisoformat(due["due_at"]) == replay_card("one", [corrected]).due
 
 
 def test_review_identity_conflict_and_missing_word_are_atomic(tmp_path: Path) -> None:
@@ -180,4 +180,4 @@ def test_concurrent_distinct_reviews_are_serialized_and_both_persist(tmp_path: P
         due = repository.db.execute("SELECT due_at FROM word_state WHERE word_id='one'").fetchone()
         assert due is not None
         assert [row["id"] for row in rows] == [str(first.id), str(second.id)]
-        assert datetime.fromisoformat(due["due_at"]) == replay_due_at("one", [first, second])
+        assert datetime.fromisoformat(due["due_at"]) == replay_card("one", [first, second]).due

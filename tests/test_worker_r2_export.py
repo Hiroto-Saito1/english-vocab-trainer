@@ -8,10 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from ingest_support import materialize_catalog_audio, records
+from ingest_support import approved_source_tree, materialize_catalog_audio, records
 
 from english_vocab_trainer.adapters.worker_r2 import WorkerR2AudioStore, _bytes
+from english_vocab_trainer.ingest.catalog import scan_catalog
 from english_vocab_trainer.ingest.export_d1 import export_d1
+from english_vocab_trainer.ingest.storage import write_catalog
 from english_vocab_trainer.ingest.validation import validate_records
 from english_vocab_trainer.ports.audio import AudioStorageError, InvalidRangeError
 
@@ -63,22 +65,26 @@ async def test_worker_binding_ranges_keys_size_and_integrity() -> None:
 
 
 def test_export_deterministic_escaped_and_atomic(tmp_path: Path) -> None:
-    current = materialize_catalog_audio(tmp_path, records())
+    approved_source_tree(tmp_path, 10)
+    catalog = tmp_path / "catalog.jsonl"
+    current, _ = scan_catalog(tmp_path, catalog)
+    current = [
+        replace(record, transcript="A clear English definition includes an example sentence.")
+        for record in current
+    ]
     current[0] = replace(current[0], transcript="It's a clear English example sentence.")
+    write_catalog(catalog, current)
     output = tmp_path / "private.sql"
-    digest, count = export_d1(
-        tmp_path, current, output, expected_count=20, published_at="2026-01-01"
-    )
+    digest, count, warnings = export_d1(tmp_path, catalog, output, published_at="2026-01-01")
     text = output.read_text()
-    assert "It''s" in text and count == 20
+    assert "It''s" in text and count == 20 and warnings
     again = tmp_path / "again.sql"
-    assert (
-        export_d1(
-            tmp_path, list(reversed(current)), again, expected_count=20, published_at="2026-01-01"
-        )[0]
-        == digest
-    )
+    write_catalog(catalog, list(reversed(current)))
+    assert export_d1(tmp_path, catalog, again, published_at="2026-01-01")[0] == digest
     assert again.read_text() == text
+    dry_output = tmp_path / "dry.sql"
+    assert export_d1(tmp_path, catalog, dry_output, dry_run=True)[0] == digest
+    assert not dry_output.exists()
     database = sqlite3.connect(":memory:")
     database.executescript(
         Path("src/english_vocab_trainer/migrations/0001_initial.sql").read_text()
@@ -91,9 +97,8 @@ def test_export_deterministic_escaped_and_atomic(tmp_path: Path) -> None:
     database.close()
     (tmp_path / current[-1].audio_key).write_bytes(b"bad")
     with pytest.raises(ValueError):
-        export_d1(tmp_path, current, output, expected_count=20)
+        export_d1(tmp_path, catalog, output)
     assert output.read_text() == text
-    assert not (tmp_path / "dry.sql").exists()
 
 
 def test_capacity_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

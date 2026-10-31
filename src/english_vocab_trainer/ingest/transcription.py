@@ -73,6 +73,8 @@ def transcribe_catalog(
         manifest = read_manifest(catalog)
         if manifest is None:
             raise ValueError("catalog provenance manifest is missing")
+        if (manifest.model, manifest.language) != (TRANSCRIPTION_MODEL, "en"):
+            raise ValueError("transcription provenance changed; scan with --force to reset")
         fingerprint = manifest.fingerprint
         if force:
             remove_durable_file(journal_path(catalog))

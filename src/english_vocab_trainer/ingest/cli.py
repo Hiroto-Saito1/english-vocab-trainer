@@ -32,7 +32,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
             "scan",
             "transcribe",
             "status",
-            "validate",
             "audit",
             "publish",
             "upload-audio",
@@ -45,12 +44,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     parser.add_argument("--catalog", type=Path, default=Path(".private/catalog.jsonl"))
     parser.add_argument("--database", type=Path)
     parser.add_argument("--output", type=Path, help="private D1 SQL output")
-    parser.add_argument(
-        "--audio-backend",
-        choices=["filesystem", "r2"],
-        default="filesystem",
-        help="audio keys to publish (default: filesystem)",
-    )
     parser.add_argument("--limit-per-source", type=int, default=10)
     parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
     parser.add_argument("--force", action="store_true")
@@ -108,9 +101,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
             )
             if summary.errors:
                 raise SystemExit("transcription completed with errors; see private error report")
-    elif args.command == "validate":
-        valid = validate_records(read_catalog(args.catalog), expected_count, root=args.source)
-        print(f"valid: {len(valid)} English transcript records")
     elif args.command == "status":
         total, transcribed = catalog_status(
             args.source,
@@ -131,14 +121,12 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     elif args.command == "export-d1":
         if args.output is None and not args.dry_run:
             raise SystemExit("export-d1 requires --output")
-        records, warnings = audit_catalog(
-            args.source, args.catalog, profile=profile, limit_per_source=args.limit_per_source
-        )
-        digest, count = export_d1(
+        digest, count, warnings = export_d1(
             args.source,
-            records,
+            args.catalog,
             args.output or Path(".private/catalog.sql"),
-            expected_count=expected_count,
+            profile=profile,
+            limit_per_source=args.limit_per_source,
             dry_run=args.dry_run,
         )
         print(
@@ -177,15 +165,11 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
         records = read_catalog(args.catalog)
         if args.dry_run:
             validated_count = len(validate_records(records, expected_count, root=args.source))
-            print(
-                f"would publish {validated_count} records "
-                f"to SQLite using {args.audio_backend} audio keys"
-            )
+            print(f"would publish {validated_count} records to SQLite using filesystem audio keys")
         else:
             publish_records(
                 args.database,
                 records,
-                audio_backend=args.audio_backend,
                 root=args.source,
                 expected_count=expected_count,
             )

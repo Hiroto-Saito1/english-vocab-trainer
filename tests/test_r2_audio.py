@@ -40,9 +40,6 @@ class UploadR2:
             else {"sha256": "b" * 64 if self.bad_verify else digest},
         }
 
-    def get_object(self, **kwargs: str) -> Mapping[str, Any]:
-        raise AssertionError("not used")
-
     def put_object(
         self,
         *,
