@@ -1,11 +1,24 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1e60f620b9541d7c2439c6f47e0a47936428bece # v4.0.3
+        with:
+          node-version: 22
       - uses: astral-sh/setup-uv@22695119d769bdb6f7032ad67b9bca0ef8c4a174 # v5.4.0
+        with:
+          version: "0.13.6"
       - run: uv lock --check && uv sync --group dev --frozen
       - run: uv run ruff format --check . && uv run ruff check .
       - run: uv run mypy src tests
@@ -14,14 +27,14 @@ jobs:
       - run: uv run playwright install --with-deps chromium
       - run: uv run pytest -m e2e --no-cov -W error::ResourceWarning
       - run: uv build
-      - run: |
+      - name: Verify installed wheel and ingest CLI
+        run: |
           smoke_dir="$(mktemp -d)"
           uv venv "$smoke_dir/venv"
           uv pip install --python "$smoke_dir/venv/bin/python" dist/*.whl
-          cd "$smoke_dir"
-          env -u PYTHONPATH "$smoke_dir/venv/bin/python" -c "from pathlib import Path; from english_vocab_trainer.adapters.local.database import SCHEMA_VERSION, validate_database_schema; from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository; repo=SQLiteVocabularyRepository(Path('wheel.db')); validate_database_schema(repo.db); assert tuple(repo.db.execute('SELECT singleton,version FROM schema_metadata').fetchone()) == (1, SCHEMA_VERSION); repo.close()"
-      - run: docker build --tag english-vocab-trainer:ci .
-      - run: docker run --rm --entrypoint /usr/local/bin/litestream english-vocab-trainer:ci version
-      - run: docker run --rm --entrypoint /app/.venv/bin/python english-vocab-trainer:ci -c "from pathlib import Path; from english_vocab_trainer.adapters.local.database import SCHEMA_VERSION, validate_database_schema; from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository; repo=SQLiteVocabularyRepository(Path('/tmp/smoke.db')); validate_database_schema(repo.db); assert tuple(repo.db.execute('SELECT singleton,version FROM schema_metadata').fetchone()) == (1, SCHEMA_VERSION); repo.close()"
-      - run: |
-          ! git ls-files | grep -E '(^|/)[^/]*catalog[^/]*\.(json|jsonl)$|\.(mp3|wav|m4a)$'
+          env -u PYTHONPATH "$smoke_dir/venv/bin/python" -c "import english_vocab_trainer; from english_vocab_trainer.ingest.cli import main; from english_vocab_trainer.worker import app"
+      - name: Build the Python Worker bundle
+        run: uv run pywrangler deploy --dry-run --env=""
+      - name: Reject tracked private study data
+        run: |
+          ! git ls-files | grep -E '(^|/)[^/]*catalog[^/]*\.(json|jsonl|sql)$|\.(mp3|wav|m4a|db)$'

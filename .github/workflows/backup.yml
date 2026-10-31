@@ -1,0 +1,103 @@
+name: Backup and restore-check D1
+
+on:
+  schedule:
+    - cron: "0 18 * * 6" # Sunday 03:00 JST
+  workflow_dispatch:
+    inputs:
+      restore_check:
+        description: Restore into the isolated test database
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-production-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_BACKUP_API_TOKEN }}
+      PRODUCTION_D1_NAME: english-vocab-trainer
+      RESTORE_D1_NAME: english-vocab-trainer-restore-test
+      BACKUP_R2_BUCKET: english-vocab-trainer-backup
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1e60f620b9541d7c2439c6f47e0a47936428bece # v4.0.3
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@22695119d769bdb6f7032ad67b9bca0ef8c4a174 # v5.4.0
+        with:
+          version: "0.13.6"
+      - run: uv sync --group dev --frozen
+      - name: Export, validate, and compress Production D1
+        id: export
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/d1-backup"
+          mkdir -p "$dir"
+          uv run pywrangler d1 export "$PRODUCTION_D1_NAME" --remote --output "$dir/database.sql"
+          sqlite3 "$dir/check.db" < "$dir/database.sql"
+          version="$(sqlite3 "$dir/check.db" 'SELECT version FROM schema_metadata WHERE singleton=1')"
+          catalog="$(sqlite3 "$dir/check.db" 'SELECT catalog_sha256 FROM schema_metadata WHERE singleton=1')"
+          words="$(sqlite3 "$dir/check.db" 'SELECT count(*) FROM words')"
+          reviews="$(sqlite3 "$dir/check.db" 'SELECT count(*) FROM reviews')"
+          states="$(sqlite3 "$dir/check.db" 'SELECT count(*) FROM word_state')"
+          gzip -9 "$dir/database.sql"
+          digest="$(sha256sum "$dir/database.sql.gz" | cut -d' ' -f1)"
+          slot="$((10#$(date -u +%V) % 8))"
+          jq -n --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg digest "$digest" --arg catalog "$catalog" \
+            --argjson version "$version" --argjson words "$words" \
+            --argjson reviews "$reviews" --argjson states "$states" --argjson slot "$slot" \
+            '{timestamp:$timestamp,slot:$slot,sha256:$digest,schema_version:$version,catalog_sha256:$catalog,words:$words,reviews:$reviews,word_state:$states}' \
+            > "$dir/manifest.json"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+      - name: Upload one of eight fixed backup slots
+        run: |
+          dir="${{ steps.export.outputs.dir }}"
+          slot="${{ steps.export.outputs.slot }}"
+          uv run pywrangler r2 object put "$BACKUP_R2_BUCKET/d1/slot-$slot.sql.gz" --file "$dir/database.sql.gz"
+          uv run pywrangler r2 object put "$BACKUP_R2_BUCKET/d1/slot-$slot.json" --file "$dir/manifest.json"
+          uv run pywrangler r2 object put "$BACKUP_R2_BUCKET/d1/latest.json" --file "$dir/manifest.json"
+      - name: Select monthly restore check
+        id: restore
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            echo "run=${{ inputs.restore_check }}" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%d)" -le 7 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Restore and verify an isolated D1 database
+        if: steps.restore.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          dir="${{ steps.export.outputs.dir }}"
+          slot="${{ steps.export.outputs.slot }}"
+          uv run pywrangler r2 object get "$BACKUP_R2_BUCKET/d1/slot-$slot.sql.gz" --file "$dir/restored.sql.gz"
+          test "$(sha256sum "$dir/restored.sql.gz" | cut -d' ' -f1)" = "$(jq -r .sha256 "$dir/manifest.json")"
+          gzip -dc "$dir/restored.sql.gz" > "$dir/restored.sql"
+          uv run pywrangler d1 execute "$RESTORE_D1_NAME" --remote --yes --command \
+            "DROP TABLE IF EXISTS word_state; DROP TABLE IF EXISTS reviews; DROP TABLE IF EXISTS words; DROP TABLE IF EXISTS schema_metadata; DROP TABLE IF EXISTS d1_migrations;"
+          uv run pywrangler d1 execute "$RESTORE_D1_NAME" --remote --file "$dir/restored.sql"
+          uv run pywrangler d1 export "$RESTORE_D1_NAME" --remote --output "$dir/roundtrip.sql"
+          sqlite3 "$dir/roundtrip.db" < "$dir/roundtrip.sql"
+          test "$(sqlite3 "$dir/roundtrip.db" 'SELECT version FROM schema_metadata WHERE singleton=1')" = "$(jq -r .schema_version "$dir/manifest.json")"
+          test "$(sqlite3 "$dir/roundtrip.db" 'SELECT catalog_sha256 FROM schema_metadata WHERE singleton=1')" = "$(jq -r .catalog_sha256 "$dir/manifest.json")"
+          test "$(sqlite3 "$dir/roundtrip.db" 'SELECT count(*) FROM words')" = "$(jq -r .words "$dir/manifest.json")"
+          test "$(sqlite3 "$dir/roundtrip.db" 'SELECT count(*) FROM reviews')" = "$(jq -r .reviews "$dir/manifest.json")"
+          test "$(sqlite3 "$dir/roundtrip.db" 'SELECT count(*) FROM word_state')" = "$(jq -r .word_state "$dir/manifest.json")"
+      - name: Remove runner copies
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/d1-backup"
