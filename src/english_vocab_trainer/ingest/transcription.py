@@ -121,7 +121,6 @@ def transcribe_catalog(
             completed += 1
             if on_transcribed is not None:
                 on_transcribed(completed, total, records[index])
-        write_error_report(catalog, unresolved)
         if not unresolved and all(record.transcript is not None for record in records):
             write_catalog(catalog, records)
             remove_durable_file(journal_path(catalog))

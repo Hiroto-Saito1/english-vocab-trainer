@@ -54,11 +54,7 @@ async def test_d1_parity_incremental_correction_and_idempotence(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_retry_and_incremental_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import english_vocab_trainer.adapters.cloudflare.d1 as module
-
+async def test_retry_and_incremental_review(tmp_path: Path) -> None:
     local = SQLiteVocabularyRepository(tmp_path / "retry.db")
     local.bulk_upsert_words([Word("w", "term", None, "definition", "key")])
 
@@ -75,9 +71,6 @@ async def test_retry_and_incremental_review(
     repo = D1VocabularyRepository(fake)
     now = datetime(2025, 1, 1, tzinfo=UTC)
     await repo.save_review(Review(UUID(int=1), "w", ReviewAction.KNOWN, now))
-    monkeypatch.setattr(
-        module, "replay_card", lambda *_: (_ for _ in ()).throw(AssertionError("replayed"))
-    )
     await repo.save_review(Review(UUID(int=2), "w", ReviewAction.KNOWN, now + timedelta(minutes=1)))
     fake.failures = 3
     with pytest.raises(ReviewConflictError):

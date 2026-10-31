@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from english_vocab_trainer.domain.models import Review, ReviewAction, Word
+from english_vocab_trainer.domain.models import Review, ReviewAction
 from english_vocab_trainer.ports.vocabulary import (
     MissingWordError,
     ReviewConflictError,
@@ -56,15 +56,6 @@ class HistoryOut(BaseModel):
     next_cursor: str | None
 
 
-def word_out(word: Word) -> WordOut:
-    return WordOut(
-        word_id=word.id,
-        term=word.term,
-        definition=word.definition,
-        audio_url=f"/api/v1/audio/{word.id}",
-    )
-
-
 def _history_cursor(reviewed_at: datetime, review_id: UUID) -> str:
     value = f"{reviewed_at.astimezone(UTC).isoformat()}|{review_id}"
     return urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
@@ -84,7 +75,14 @@ async def next_card(repository: Repository) -> CardOut:
     now = datetime.now(UTC)
     word = await repository.next_word(now)
     if word is not None:
-        return CardOut(item=word_out(word))
+        return CardOut(
+            item=WordOut(
+                word_id=word.id,
+                term=word.term,
+                definition=word.definition,
+                audio_url=f"/api/v1/audio/{word.id}",
+            )
+        )
     return CardOut(item=None, next_due=await repository.next_due(now))
 
 

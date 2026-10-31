@@ -132,7 +132,12 @@ def test_cli_dry_run_transcribe_and_publish(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
-    write_catalog(catalog, materialize_catalog_audio(tmp_path, records()))
+    approved_source_tree(tmp_path, 10)
+    scanned, _ = scan_catalog(tmp_path, catalog)
+    write_catalog(
+        catalog,
+        [replace(record, transcript="An English definition has an example.") for record in scanned],
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -167,25 +172,32 @@ def test_cli_dry_run_transcribe_and_publish(
     assert "would transcribe 0" in output and "would publish 20" in output
 
 
-def test_cli_status_accepts_untranscribed_profile_inventory(
+def test_cli_transcribe_dry_run_accepts_untranscribed_profile_inventory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    approved_source_tree(tmp_path, 2, label="status")
+    approved_source_tree(tmp_path, 2, label="dry-run")
     catalog = tmp_path / ".private" / "catalog.jsonl"
     scan_catalog(tmp_path, catalog, limit_per_source=2)
+    before = {path.name: path.read_bytes() for path in catalog.parent.iterdir()}
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "vocab-ingest",
-            "status",
+            "transcribe",
             "--source",
             str(tmp_path),
             "--catalog",
             str(catalog),
             "--limit-per-source",
             "2",
+            "--dry-run",
         ],
     )
     main()
-    assert "status valid: 4 inventory records; transcribed 0" in capsys.readouterr().out
+    assert "would transcribe 4 records" in capsys.readouterr().out
+    assert {path.name: path.read_bytes() for path in catalog.parent.iterdir()} == before
+
+    catalog.with_suffix(catalog.suffix + ".manifest.json").unlink()
+    with pytest.raises(ValueError, match="provenance manifest is missing"):
+        main()

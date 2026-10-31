@@ -36,7 +36,7 @@ def payload(review_id: int, action: str = "known", word_id: str = "one") -> dict
     }
 
 
-def test_card_returns_one_due_or_lowest_level_unseen(tmp_path: Path) -> None:
+def test_card_returns_lowest_level_unseen(tmp_path: Path) -> None:
     words = [word("high", 9), word("low", 1)]
     with client(tmp_path, words) as app:
         first = app.get("/api/v1/card")

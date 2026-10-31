@@ -24,7 +24,7 @@ from english_vocab_trainer.ingest.validation import (
 from english_vocab_trainer.ports.audio import r2_audio_key
 
 
-def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> None:
+def test_private_catalog_storage_and_validation(tmp_path: Path) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
     record = records(1)[0]
     write_catalog(catalog, [record])

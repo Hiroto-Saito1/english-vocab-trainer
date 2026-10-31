@@ -17,11 +17,9 @@ def publish_records(
     database: Path,
     records: Iterable[CatalogRecord],
     *,
-    root: Path | None = None,
+    root: Path,
     expected_count: int = 20,
 ) -> None:
-    if root is None:
-        raise ValueError("publish requires a source root for file checksum validation")
     validated = validate_records(records, expected_count, root=root)
     words = [
         Word(

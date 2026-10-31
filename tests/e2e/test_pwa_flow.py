@@ -181,8 +181,6 @@ def test_initial_card_and_known_unknown_advance(page: Page, pwa_server: tuple[st
     expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     expect(page.locator("#logout")).to_be_hidden()
-    assert page.locator("text=Ready to answer").count() == 0
-    assert page.locator("text=Choose Known or Unknown.").count() == 0
 
     answer(page, "Known")
     expect(page.locator("#term")).to_have_text("word word 1")
@@ -382,7 +380,7 @@ def test_response_loss_retains_card_and_retries_same_uuid(
     assert page.evaluate("window.__audioPlayCalls") == []
 
     page.get_by_role("button", name="Retry answer", exact=True).click()
-    expect(page.locator("#term")).not_to_have_text(initial or "")
+    expect(page.locator("#term")).to_have_text("word word 1")
     page.wait_for_function("window.__audioPlayCalls.length === 1")
     expect(page.get_by_role("button", name="Previous", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()

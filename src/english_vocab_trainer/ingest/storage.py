@@ -30,10 +30,6 @@ def journal_path(catalog: Path) -> Path:
     return catalog.with_suffix(catalog.suffix + ".journal.jsonl")
 
 
-def report_path(catalog: Path, name: str) -> Path:
-    return catalog.with_suffix(catalog.suffix + f".{name}.json")
-
-
 def error_report_path(catalog: Path) -> Path:
     return catalog.with_suffix(catalog.suffix + ".transcription-errors.jsonl")
 
@@ -268,4 +264,5 @@ def write_audit_report(
     payload: dict[str, object] = {"warnings": warnings, "warning_count": len(warnings)}
     if manifest is not None:
         payload["manifest"] = asdict(manifest)
-    write_text_atomically(report_path(catalog, "audit"), json.dumps(payload, sort_keys=True) + "\n")
+    audit_path = catalog.with_suffix(catalog.suffix + ".audit.json")
+    write_text_atomically(audit_path, json.dumps(payload, sort_keys=True) + "\n")

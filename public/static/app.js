@@ -121,9 +121,7 @@ function render({ autoplay = false } = {}) {
     audio.removeAttribute("src");
     audio.removeAttribute("data-word-id");
     audio.load();
-    if (busy) {
-      card.textContent = "Loading a card…";
-    } else if (nextDue === undefined) {
+    if (busy || nextDue === undefined) {
       card.textContent = "Loading a card…";
     } else if (nextDue !== null) {
       card.textContent = `All caught up. The next review is due ${new Date(nextDue).toLocaleString()}.`;
@@ -324,7 +322,7 @@ async function rate(action) {
   await saveAnswer(operation);
 }
 
-async function logout() {
+function logout() {
   location.assign("/cdn-cgi/access/logout");
 }
 

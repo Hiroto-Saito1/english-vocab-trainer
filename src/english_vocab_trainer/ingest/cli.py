@@ -31,7 +31,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
         choices=[
             "scan",
             "transcribe",
-            "status",
             "audit",
             "publish",
             "upload-audio",
@@ -76,13 +75,17 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
             )
             print(f"wrote {len(records)} private catalog records")
     elif args.command == "transcribe":
-        records = read_catalog(args.catalog)
-        validate_records(records, expected_count, root=args.source, require_transcript=False)
         if args.dry_run:
-            print(
-                f"would transcribe {sum(record.transcript is None for record in records)} records"
+            total, transcribed = catalog_status(
+                args.source,
+                args.catalog,
+                profile=profile,
+                limit_per_source=args.limit_per_source,
             )
+            print(f"would transcribe {total - transcribed} records")
         else:
+            records = read_catalog(args.catalog)
+            validate_records(records, expected_count, root=args.source, require_transcript=False)
             summary = transcribe_catalog(
                 args.source,
                 args.catalog,
@@ -101,14 +104,6 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
             )
             if summary.errors:
                 raise SystemExit("transcription completed with errors; see private error report")
-    elif args.command == "status":
-        total, transcribed = catalog_status(
-            args.source,
-            args.catalog,
-            profile=profile,
-            limit_per_source=args.limit_per_source,
-        )
-        print(f"status valid: {total} inventory records; transcribed {transcribed}")
     elif args.command == "audit":
         valid, warnings = audit_catalog(
             args.source,

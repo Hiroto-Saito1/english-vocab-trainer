@@ -94,9 +94,10 @@ def select_audio(
     for source in APPROVED_SOURCES:
         candidates = candidates_by_source[source]
         wanted = profile.per_source if profile.per_source is not None else limit_per_source
-        chosen = candidates if full_profile else candidates[:wanted]
-        completed = [replace(candidate, checksum=checksum(candidate.path)) for candidate in chosen]
-        selected.extend(completed)
+        selected.extend(
+            replace(candidate, checksum=checksum(candidate.path))
+            for candidate in candidates[:wanted]
+        )
     if full_profile:
         if len({item.audio_key for item in selected}) != len(selected):
             raise ValueError("full profile contains duplicate audio paths")
