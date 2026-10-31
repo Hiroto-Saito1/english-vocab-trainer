@@ -6,7 +6,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import RequestResponseEndpoint
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, container_from_env
@@ -21,11 +20,6 @@ ROOT = Path(__file__).parent
 def create_app(container: AppContainer) -> FastAPI:
     new_app = FastAPI(title="English Vocab Trainer", version="1.0.0")
     new_app.state.container = container
-    if container.environment == "production":
-        # A manually assembled production container is useful in tests; the
-        # env factory never permits this fallback for an internet-facing app.
-        allowed_hosts = list(container.trusted_hosts or ("localhost", "127.0.0.1", "testserver"))
-        new_app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @new_app.middleware("http")
     async def private_response_cache_control(
@@ -47,8 +41,6 @@ def create_app(container: AppContainer) -> FastAPI:
             "form-action 'self'; img-src 'self'; media-src 'self'; "
             "style-src 'self' 'unsafe-inline'; connect-src 'self'"
         )
-        if container.environment == "production":
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
     new_app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")

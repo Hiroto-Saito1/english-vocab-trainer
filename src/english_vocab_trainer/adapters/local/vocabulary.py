@@ -5,23 +5,20 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from fsrs import Card
 
 from english_vocab_trainer.adapters.local.database import initialize_database
 from english_vocab_trainer.domain.models import (
     Review,
     ReviewAction,
     Word,
-    replay_due_at,
+    apply_review,
+    replay_card,
 )
-
-
-class MissingWordError(RuntimeError):
-    pass
-
-
-class ReviewConflictError(RuntimeError):
-    pass
+from english_vocab_trainer.ports.vocabulary import MissingWordError as MissingWordError
+from english_vocab_trainer.ports.vocabulary import ReviewConflictError as ReviewConflictError
 
 
 def _iso(value: datetime) -> str:
@@ -124,42 +121,52 @@ class SQLiteVocabularyRepository:
             for row in self.db.execute("SELECT * FROM reviews WHERE word_id=?", (word_id,))
         ]
 
-    def _save_due_at(self, word_id: str, due_at: datetime) -> None:
-        self.db.execute(
-            "INSERT INTO word_state VALUES(?,?) "
-            "ON CONFLICT(word_id) DO UPDATE SET due_at=excluded.due_at",
-            (word_id, _iso(due_at)),
-        )
-
     def save_review(self, review: Review) -> None:
         with self._transaction():
-            old = self.db.execute(
-                "SELECT word_id,action FROM reviews WHERE id=?",
-                (str(review.id),),
+            old = self.db.execute("SELECT * FROM reviews WHERE id=?", (str(review.id),)).fetchone()
+            if old and old["word_id"] != review.word_id:
+                raise ReviewConflictError("review UUID word conflict")
+            if old and old["action"] == review.action.value:
+                return
+            if not old and self.get_word(review.word_id) is None:
+                raise MissingWordError("word not found")
+            state = self.db.execute(
+                "SELECT * FROM word_state WHERE word_id=?", (review.word_id,)
+            ).fetchone()
+            latest = self.db.execute(
+                "SELECT reviewed_at,id FROM reviews WHERE word_id=? "
+                "ORDER BY reviewed_at DESC,id DESC LIMIT 1",
+                (review.word_id,),
             ).fetchone()
             if old:
-                if old["word_id"] != review.word_id:
-                    raise ReviewConflictError("review UUID word conflict")
-                if old["action"] == review.action.value:
-                    return
                 self.db.execute(
-                    "UPDATE reviews SET action=? WHERE id=?",
-                    (review.action.value, str(review.id)),
+                    "UPDATE reviews SET action=? WHERE id=?", (review.action.value, str(review.id))
                 )
             else:
-                if self.get_word(review.word_id) is None:
-                    raise MissingWordError("word not found")
                 self.db.execute(
                     "INSERT INTO reviews VALUES(?,?,?,?)",
-                    (
-                        str(review.id),
-                        review.word_id,
-                        review.action.value,
-                        _iso(review.reviewed_at),
-                    ),
+                    (str(review.id), review.word_id, review.action.value, _iso(review.reviewed_at)),
                 )
-            due_at = replay_due_at(review.word_id, self._reviews(review.word_id))
-            self._save_due_at(review.word_id, due_at)
+            if old or (
+                latest
+                and (_iso(review.reviewed_at), str(review.id))
+                < (latest["reviewed_at"], latest["id"])
+            ):
+                card = replay_card(review.word_id, self._reviews(review.word_id))
+            else:
+                card = apply_review(
+                    Card.from_json(state["card_json"])
+                    if state
+                    else replay_card(review.word_id, []),
+                    review,
+                )
+            version = state["version"] + 1 if state else 1
+            self.db.execute(
+                "INSERT INTO word_state VALUES(?,?,?,?,?) ON CONFLICT(word_id) DO UPDATE SET "
+                "due_at=excluded.due_at,card_json=excluded.card_json, "
+                "version=excluded.version,mutation_id=excluded.mutation_id",
+                (review.word_id, _iso(card.due), card.to_json(), version, str(uuid4())),
+            )
 
     def history_page(
         self, cursor: tuple[datetime, UUID] | None, limit: int
@@ -189,3 +196,27 @@ class SQLiteVocabularyRepository:
             )
             for row in rows
         ]
+
+
+class AsyncSQLiteVocabularyRepository:
+    """Async interface around the local reference repository."""
+
+    def __init__(self, repository: SQLiteVocabularyRepository) -> None:
+        self.repository = repository
+
+    async def get_word(self, word_id: str) -> Word | None:
+        return self.repository.get_word(word_id)
+
+    async def next_word(self, now: datetime) -> Word | None:
+        return self.repository.next_word(now)
+
+    async def next_due(self, now: datetime) -> datetime | None:
+        return self.repository.next_due(now)
+
+    async def save_review(self, review: Review) -> None:
+        self.repository.save_review(review)
+
+    async def history_page(
+        self, cursor: tuple[datetime, UUID] | None, limit: int
+    ) -> list[tuple[Review, Word]]:
+        return self.repository.history_page(cursor, limit)

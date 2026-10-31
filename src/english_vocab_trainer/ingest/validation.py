@@ -10,6 +10,9 @@ from pathlib import Path, PurePosixPath
 
 from .models import APPROVED_SOURCES, TRANSCRIPTION_ERROR_REASONS, CatalogRecord
 
+MAX_AUDIO_BYTES = 1_048_576
+MAX_AGGREGATE_AUDIO_BYTES = 8_000_000_000
+
 _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
 _TERM_VALUE = re.compile(r"[A-Za-z][A-Za-z '\-]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -163,6 +166,8 @@ def _validate_record(
             raise ValueError("audio key is outside approved source trees")
         if not source_path.is_file():
             raise ValueError("catalog source audio is missing")
+        if source_path.stat().st_size > MAX_AUDIO_BYTES:
+            raise ValueError("audio source exceeds maximum size")
         if checksum(source_path) != record.checksum:
             raise ValueError("local audio does not match catalog checksum")
     if require_transcript:
@@ -188,6 +193,16 @@ def validate_records(
         raise ValueError("duplicate catalog checksum")
     if len({record.audio_key for record in result}) != len(result):
         raise ValueError("duplicate catalog audio key")
+    if len({record.term.casefold() for record in result}) != len(result):
+        raise ValueError("duplicate catalog term")
     for record in result:
         _validate_record(record, root, require_transcript=require_transcript)
+    if (
+        root is not None
+        and sum(
+            (root / Path(*relative_audio_path(r.audio_key).parts)).stat().st_size for r in result
+        )
+        >= MAX_AGGREGATE_AUDIO_BYTES
+    ):
+        raise ValueError("aggregate audio exceeds capacity")
     return result

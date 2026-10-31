@@ -10,17 +10,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from english_vocab_trainer.adapters.local.vocabulary import (
+from english_vocab_trainer.domain.models import Review, ReviewAction, Word
+from english_vocab_trainer.ports.vocabulary import (
     MissingWordError,
     ReviewConflictError,
-    SQLiteVocabularyRepository,
+    VocabularyRepository,
 )
-from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 from english_vocab_trainer.web.dependencies import csrf
-from english_vocab_trainer.web.dependencies import repository as repository_dependency
+from english_vocab_trainer.web.repository_dependency import repository as repository_dependency
 
 Csrf = Annotated[None, Depends(csrf)]
-Repository = Annotated[SQLiteVocabularyRepository, Depends(repository_dependency)]
+Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 HISTORY_PAGE_SIZE = 50
 router = APIRouter()
 
@@ -82,18 +82,18 @@ def _parse_history_cursor(value: str) -> tuple[datetime, UUID]:
 
 
 @router.get("/api/v1/card", response_model=CardOut)
-def next_card(repository: Repository) -> CardOut:
+async def next_card(repository: Repository) -> CardOut:
     now = datetime.now(UTC)
-    word = repository.next_word(now)
+    word = await repository.next_word(now)
     if word is not None:
         return CardOut(item=word_out(word))
-    return CardOut(item=None, next_due=repository.next_due(now))
+    return CardOut(item=None, next_due=await repository.next_due(now))
 
 
 @router.post("/api/v1/reviews", status_code=204)
-def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
+async def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
     try:
-        repository.save_review(
+        await repository.save_review(
             Review(
                 review_input.id,
                 review_input.word_id,
@@ -109,9 +109,9 @@ def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
 
 
 @router.get("/api/v1/history", response_model=HistoryOut)
-def history(repository: Repository, cursor: str | None = None) -> HistoryOut:
+async def history(repository: Repository, cursor: str | None = None) -> HistoryOut:
     parsed = _parse_history_cursor(cursor) if cursor else None
-    rows = repository.history_page(parsed, HISTORY_PAGE_SIZE + 1)
+    rows = await repository.history_page(parsed, HISTORY_PAGE_SIZE + 1)
     has_more = len(rows) > HISTORY_PAGE_SIZE
     rows = rows[:HISTORY_PAGE_SIZE]
     items = [

@@ -16,6 +16,7 @@ from .catalog import (
     scan_catalog,
     select_audio,
 )
+from .export_d1 import export_d1
 from .models import PROFILES
 from .publish import publish_records, upload_audio
 from .storage import read_catalog, read_manifest, write_audit_report
@@ -27,13 +28,23 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
     parser = argparse.ArgumentParser(description="Import a private English-only SVL catalog")
     parser.add_argument(
         "command",
-        choices=["scan", "transcribe", "status", "validate", "audit", "publish", "upload-audio"],
+        choices=[
+            "scan",
+            "transcribe",
+            "status",
+            "validate",
+            "audit",
+            "publish",
+            "upload-audio",
+            "export-d1",
+        ],
     )
     parser.add_argument(
         "--source", type=Path, required=True, help="parent containing approved SVL trees"
     )
     parser.add_argument("--catalog", type=Path, default=Path(".private/catalog.jsonl"))
     parser.add_argument("--database", type=Path)
+    parser.add_argument("--output", type=Path, help="private D1 SQL output")
     parser.add_argument(
         "--audio-backend",
         choices=["filesystem", "r2"],
@@ -117,6 +128,23 @@ def main() -> None:  # pragma: no cover - thin argparse wiring covered by CLI in
         )
         write_audit_report(args.catalog, read_manifest(args.catalog), warnings)
         print(f"audit valid: {len(valid)} records; warnings {len(warnings)}")
+    elif args.command == "export-d1":
+        if args.output is None and not args.dry_run:
+            raise SystemExit("export-d1 requires --output")
+        records, warnings = audit_catalog(
+            args.source, args.catalog, profile=profile, limit_per_source=args.limit_per_source
+        )
+        digest, count = export_d1(
+            args.source,
+            records,
+            args.output or Path(".private/catalog.sql"),
+            expected_count=expected_count,
+            dry_run=args.dry_run,
+        )
+        print(
+            f"{'would export' if args.dry_run else 'exported'} {count} records; "
+            f"catalog sha256 {digest}; warnings {len(warnings)}"
+        )
     elif args.command == "upload-audio":
         records = read_catalog(args.catalog)
         if args.dry_run:

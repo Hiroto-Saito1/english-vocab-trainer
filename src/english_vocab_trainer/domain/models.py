@@ -36,7 +36,7 @@ class Review:
     reviewed_at: datetime
 
 
-def replay_due_at(word_id: str, reviews: list[Review]) -> datetime:
+def replay_card(word_id: str, reviews: list[Review]) -> Card:
     """Rebuild the due time from genesis in stable review order."""
     ordered = sorted(reviews, key=lambda review: (review.reviewed_at, review.id.int))
     # Py-FSRS creates a time-based card id by default; seed it from word_id so
@@ -53,7 +53,21 @@ def replay_due_at(word_id: str, reviews: list[Review]) -> datetime:
         enable_fuzzing=False,
     )
     for review in ordered:
-        now = review.reviewed_at.astimezone(UTC)
-        fsrs_rating = FsrsRating.Good if review.action is ReviewAction.KNOWN else FsrsRating.Again
-        card, _ = scheduler.review_card(card, fsrs_rating, now)
-    return card.due if ordered else datetime.min.replace(tzinfo=UTC)
+        card = apply_review(card, review, scheduler)
+    return card
+
+
+def apply_review(card: Card, review: Review, scheduler: Scheduler | None = None) -> Card:
+    scheduler = scheduler or Scheduler(
+        desired_retention=0.90,
+        learning_steps=(LEARNING_STEP,),
+        relearning_steps=(LEARNING_STEP,),
+        maximum_interval=365,
+        enable_fuzzing=False,
+    )
+    rating = FsrsRating.Good if review.action is ReviewAction.KNOWN else FsrsRating.Again
+    return scheduler.review_card(card, rating, review.reviewed_at.astimezone(UTC))[0]
+
+
+def replay_due_at(word_id: str, reviews: list[Review]) -> datetime:
+    return replay_card(word_id, reviews).due if reviews else datetime.min.replace(tzinfo=UTC)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -54,5 +55,7 @@ def parse_single_range(value: str | None, size: int) -> tuple[int, int] | None:
 
 
 class AudioStore(Protocol):
-    def head(self, key: str) -> AudioMetadata: ...
-    def get(self, key: str, range_header: str | None = None) -> AudioResult: ...
+    def head(self, key: str) -> AudioMetadata | Awaitable[AudioMetadata]: ...
+    def get(
+        self, key: str, range_header: str | None = None
+    ) -> AudioResult | Awaitable[AudioResult]: ...

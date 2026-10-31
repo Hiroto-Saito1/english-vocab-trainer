@@ -1,13 +1,12 @@
 import importlib.resources
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 1
 EXPECTED_COLUMNS = {
-    "schema_metadata": {"singleton", "version"},
+    "schema_metadata": {"singleton", "version", "catalog_sha256", "catalog_count", "published_at"},
     "words": {"id", "term", "level", "definition", "audio_key"},
-    "word_state": {"word_id", "due_at"},
+    "word_state": {"word_id", "due_at", "card_json", "version", "mutation_id"},
     "reviews": {"id", "word_id", "action", "reviewed_at"},
-    "login_attempts": {"attempted_at"},
 }
 
 
@@ -22,6 +21,7 @@ def validate_database_schema(connection: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
     }
+    tables -= {"d1_migrations"}
     columns = {
         table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         for table in tables
@@ -50,7 +50,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
     existing = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name NOT LIKE 'sqlite_%' AND name != 'd1_migrations' LIMIT 1"
     ).fetchone()
     if existing is None:
         schema = (

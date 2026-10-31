@@ -8,13 +8,14 @@ from english_vocab_trainer.ports.audio import AudioMetadata, AudioResult, parse_
 def if_none_match_matches(etag: str, if_none_match: str | None) -> bool:
     canonical = f'"{etag}"'
     candidates = {part.strip() for part in if_none_match.split(",")} if if_none_match else set()
-    return canonical in candidates or f"W/{canonical}" in candidates
+    return "*" in candidates or canonical in candidates or f"W/{canonical}" in candidates
 
 
 def build_audio_response(result: AudioResult, if_none_match: str | None) -> Response:
     etag = f'"{result.etag}"'
     headers = {
         "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
         "ETag": etag,
         "Content-Type": "audio/mpeg",
         "Content-Length": str(max(0, result.end - result.start + 1)),
@@ -34,6 +35,11 @@ def build_audio_head_response(
     metadata: AudioMetadata, range_header: str | None, if_none_match: str | None
 ) -> Response:
     """Build a HEAD response from metadata without ever loading object bytes."""
+    if if_none_match_matches(metadata.etag, if_none_match):
+        return build_audio_response(
+            AudioResult(b"", metadata.size, metadata.etag, 0, metadata.size - 1, False),
+            if_none_match,
+        )
     selected = parse_single_range(range_header, metadata.size)
     start, end = selected if selected is not None else (0, metadata.size - 1)
     return build_audio_response(

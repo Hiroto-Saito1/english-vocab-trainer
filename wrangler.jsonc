@@ -1,0 +1,19 @@
+{
+  "name": "english-vocab-trainer",
+  "main": "src/english_vocab_trainer/worker.py",
+  "compatibility_date": "2026-10-31",
+  "compatibility_flags": ["python_workers"],
+  "keep_vars": true,
+  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": true},
+  "d1_databases": [{"binding": "DB", "database_name": "english-vocab-trainer", "database_id": "00000000-0000-0000-0000-000000000000"}],
+  "r2_buckets": [{"binding": "AUDIO", "bucket_name": "english-vocab-trainer-audio"}],
+  "env": {
+    "preview": {
+      "name": "english-vocab-trainer-preview",
+      "keep_vars": true,
+      "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": true},
+      "d1_databases": [{"binding": "DB", "database_name": "english-vocab-trainer-preview", "database_id": "00000000-0000-0000-0000-000000000001"}],
+      "r2_buckets": [{"binding": "AUDIO", "bucket_name": "english-vocab-trainer-audio"}]
+    }
+  }
+}

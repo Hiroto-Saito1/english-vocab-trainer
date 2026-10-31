@@ -42,7 +42,7 @@ S3ClientFactory = Callable[..., S3LikeClient]
 
 def _boto3_client_factory(**kwargs: Any) -> S3LikeClient:
     # Import only when R2 is selected so local/test users do not need network setup.
-    import boto3  # type: ignore[import-untyped]
+    import boto3  # type: ignore[import-not-found]
 
     return cast(S3LikeClient, boto3.client("s3", **kwargs))
 
@@ -91,6 +91,7 @@ def _metadata(response: Mapping[str, Any]) -> AudioMetadata:
         or _SHA256.fullmatch(checksum) is None
         or not isinstance(length, int)
         or length < 0
+        or length > 1_048_576
     ):
         raise AudioStorageError("private audio storage is unavailable")
     return AudioMetadata(length, checksum)
@@ -202,6 +203,8 @@ class Boto3R2AudioUploader:
             size = path.stat().st_size
         except OSError as exc:
             raise AudioStorageError("private audio source is unavailable") from exc
+        if size > 1_048_576:
+            raise ValueError("audio source exceeds maximum size")
         existing = self._head(key)
         if existing is not None:
             if self._metadata_matches(existing, size, checksum):

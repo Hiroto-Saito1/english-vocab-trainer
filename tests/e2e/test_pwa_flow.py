@@ -12,16 +12,13 @@ from uuid import UUID
 
 import pytest
 import uvicorn
-from argon2 import PasswordHasher
 from fastapi import FastAPI
 from playwright.sync_api import Page, Route, expect
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.local.auth import SQLiteLoginAttemptLimiter
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.domain.models import Review, ReviewAction, Word
 from english_vocab_trainer.web.app import create_app
-from english_vocab_trainer.web.auth import AuthService
 from english_vocab_trainer.web.container import AppContainer
 
 
@@ -130,24 +127,6 @@ def repeated_history_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
             )
         )
     app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
-    with _serve(app) as base_url:
-        yield base_url, database
-
-
-@pytest.fixture
-def production_auth_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
-    database = tmp_path / "production.db"
-    audio_root = tmp_path / "audio"
-    _seed(database, audio_root, "protected", 2)
-    auth = AuthService(
-        PasswordHasher().hash("browser-password"),
-        b"p" * 32,
-        SQLiteLoginAttemptLimiter(database),
-        secure_cookies=False,
-    )
-    app = create_app(
-        AppContainer(database, FilesystemAudioStore(audio_root), "production", auth=auth)
-    )
     with _serve(app) as base_url:
         yield base_url, database
 
@@ -492,20 +471,3 @@ def test_second_tab_is_read_only_until_writer_closes(
     follower.reload()
     expect(follower.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     expect(follower.locator("#status")).to_be_hidden()
-
-
-@pytest.mark.e2e
-def test_production_logout_ends_session_only(
-    page: Page, production_auth_server: tuple[str, Path]
-) -> None:
-    base_url, database = production_auth_server
-    page.goto(f"{base_url}/login")
-    page.get_by_label("Password").fill("browser-password")
-    page.get_by_role("button", name="Sign in", exact=True).click()
-    expect(page.get_by_role("button", name="Logout", exact=True)).to_be_visible()
-    answer(page, "Known")
-    wait_for_rows(database, 1)
-    page.get_by_role("button", name="Logout", exact=True).click()
-    page.wait_for_url(f"{base_url}/login")
-    assert len(review_rows(database)) == 1
-    assert page.evaluate("fetch('/api/v1/card').then((response) => response.status)") == 401
