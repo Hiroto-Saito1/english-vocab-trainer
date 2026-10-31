@@ -4,7 +4,14 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
-from english_vocab_trainer.ingest.models import CatalogRecord
+from english_vocab_trainer.ingest.catalog import inventory_digest
+from english_vocab_trainer.ingest.models import (
+    CATALOG_SCHEMA_VERSION,
+    TRANSCRIPTION_MODEL,
+    CatalogManifest,
+    CatalogRecord,
+)
+from english_vocab_trainer.ingest.storage import write_manifest
 
 
 def audio(root: Path, source: str, level: str, name: str, content: bytes) -> Path:
@@ -54,3 +61,17 @@ def materialize_catalog_audio(
         digest = sha256(content).hexdigest()
         result.append(replace(record, id=f"audio-{digest}", checksum=digest))
     return result
+
+
+def write_test_manifest(catalog: Path, current: list[CatalogRecord]) -> None:
+    write_manifest(
+        catalog,
+        CatalogManifest(
+            CATALOG_SCHEMA_VERSION,
+            "mvp",
+            len(current),
+            inventory_digest(current),
+            TRANSCRIPTION_MODEL,
+            "en",
+        ),
+    )

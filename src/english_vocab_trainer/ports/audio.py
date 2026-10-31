@@ -1,8 +1,30 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Protocol
+
+MAX_AUDIO_BYTES = 1_048_576
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_R2_KEY = re.compile(r"audio/([0-9a-f]{64})\.mp3\Z")
+
+
+def valid_audio_digest(value: str) -> bool:
+    return _SHA256.fullmatch(value) is not None
+
+
+def r2_audio_key(digest: str) -> str:
+    if not valid_audio_digest(digest):
+        raise ValueError("checksum must be a lowercase SHA-256 hex digest")
+    return f"audio/{digest}.mp3"
+
+
+def r2_audio_digest(key: str) -> str:
+    match = _R2_KEY.fullmatch(key)
+    if match is None:
+        raise FileNotFoundError("invalid audio key")
+    return match.group(1)
 
 
 @dataclass(frozen=True, slots=True)

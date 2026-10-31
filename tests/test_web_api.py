@@ -25,7 +25,7 @@ def client(tmp_path: Path, words: list[Word] | None = None) -> TestClient:
     database = tmp_path / "v.db"
     with SQLiteVocabularyRepository(database) as repository:
         repository.bulk_upsert_words(words or [])
-    return TestClient(create_app(AppContainer(database, FilesystemAudioStore(tmp_path), "test")))
+    return TestClient(create_app(AppContainer(database, FilesystemAudioStore(tmp_path))))
 
 
 def payload(review_id: int, action: str = "known", word_id: str = "one") -> dict[str, str]:
@@ -125,3 +125,15 @@ def test_due_card_is_selected_before_unseen(tmp_path: Path) -> None:
             )
         selected = app.get("/api/v1/card").json()["item"]
     assert selected["word_id"] == "reviewed"
+
+
+def test_local_app_serves_public_frontend_and_session(tmp_path: Path) -> None:
+    public = Path(__file__).resolve().parents[1] / "public"
+    with client(tmp_path) as app:
+        page = app.get("/")
+        script = app.get("/static/app.js")
+        session = app.get("/api/v1/session")
+    assert page.text == (public / "index.html").read_text()
+    assert script.text == (public / "static/app.js").read_text()
+    assert session.json() == {"csrf_token": "local", "local": True}
+    assert session.headers["cache-control"] == "no-store"

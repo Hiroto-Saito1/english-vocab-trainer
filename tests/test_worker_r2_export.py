@@ -80,7 +80,9 @@ def test_export_deterministic_escaped_and_atomic(tmp_path: Path) -> None:
     )
     assert again.read_text() == text
     database = sqlite3.connect(":memory:")
-    database.executescript(Path("src/english_vocab_trainer/schema.sql").read_text())
+    database.executescript(
+        Path("src/english_vocab_trainer/migrations/0001_initial.sql").read_text()
+    )
     database.executescript(text)
     assert database.execute(
         "SELECT catalog_sha256,catalog_count,published_at FROM schema_metadata"

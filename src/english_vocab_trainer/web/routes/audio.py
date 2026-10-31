@@ -21,7 +21,7 @@ from english_vocab_trainer.web.audio_response import (
     if_none_match_matches,
 )
 from english_vocab_trainer.web.dependencies import audio_store
-from english_vocab_trainer.web.repository_dependency import repository as repository_dependency
+from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 Audio = Annotated[AudioStore, Depends(audio_store)]

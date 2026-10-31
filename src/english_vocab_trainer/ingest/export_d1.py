@@ -7,10 +7,11 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from english_vocab_trainer.ports.audio import r2_audio_key
+
 from .catalog import audit_records
 from .models import CatalogRecord
 from .storage import write_text_atomically
-from .validation import r2_audio_key
 
 
 def _literal(value: str | int | None) -> str:

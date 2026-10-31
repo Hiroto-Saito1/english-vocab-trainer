@@ -55,7 +55,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if existing is None:
         schema = (
-            importlib.resources.files("english_vocab_trainer").joinpath("schema.sql").read_text()
+            importlib.resources.files("english_vocab_trainer")
+            .joinpath("migrations", "0001_initial.sql")
+            .read_text()
         )
         connection.executescript(schema)
     validate_database_schema(connection)

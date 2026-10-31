@@ -37,7 +37,9 @@ async function ensureSession() {
     });
     if (response.status === 401 || response.status === 403) location.reload();
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    csrfToken = (await response.json()).csrf_token;
+    const session = await response.json();
+    csrfToken = session.csrf_token;
+    if (logoutButton) logoutButton.hidden = Boolean(session.local);
     if (!csrfToken) throw new Error("Missing session token");
   })().finally(() => { sessionFlight = null; });
   await sessionFlight;

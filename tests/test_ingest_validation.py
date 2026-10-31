@@ -16,12 +16,12 @@ from english_vocab_trainer.ingest.storage import (
     write_catalog,
 )
 from english_vocab_trainer.ingest.validation import (
-    r2_audio_key,
     transcription_failure_reason,
     validate_records,
     validate_term,
     validate_transcript,
 )
+from english_vocab_trainer.ports.audio import r2_audio_key
 
 
 def test_private_catalog_transcribe_resume_and_validation(tmp_path: Path) -> None:

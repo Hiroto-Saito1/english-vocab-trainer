@@ -3,25 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import Any
 
 from english_vocab_trainer.ports.audio import (
+    MAX_AUDIO_BYTES,
     AudioMetadata,
     AudioResult,
     AudioStorageError,
     parse_single_range,
+    r2_audio_digest,
 )
-
-_KEY = re.compile(r"audio/([0-9a-f]{64})\.mp3\Z")
-MAX_AUDIO_BYTES = 1_048_576
-
-
-def _identity(key: str) -> str:
-    match = _KEY.fullmatch(key)
-    if match is None:
-        raise FileNotFoundError("invalid audio key")
-    return match.group(1)
 
 
 def _metadata(obj: Any, digest: str) -> AudioMetadata:
@@ -45,7 +36,7 @@ class WorkerR2AudioStore:
         self._binding = binding
 
     async def head(self, key: str) -> AudioMetadata:
-        digest = _identity(key)
+        digest = r2_audio_digest(key)
         try:
             obj = await self._binding.head(key)
             if obj is None:
@@ -57,7 +48,7 @@ class WorkerR2AudioStore:
             raise AudioStorageError("private audio storage is unavailable") from exc
 
     async def get(self, key: str, range_header: str | None = None) -> AudioResult:
-        digest = _identity(key)
+        digest = r2_audio_digest(key)
         try:
             obj = await self._binding.get(key)
             if obj is None:

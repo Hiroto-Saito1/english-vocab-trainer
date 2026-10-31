@@ -12,7 +12,6 @@ from .models import (
 )
 from .storage import (
     append_journal_record,
-    catalog_fingerprint,
     catalog_lock,
     journal_path,
     merge_journal_records,
@@ -72,9 +71,9 @@ def transcribe_catalog(
     with catalog_lock(catalog):
         base_records = read_catalog(catalog, include_journal=False)
         manifest = read_manifest(catalog)
-        fingerprint = (
-            manifest.fingerprint if manifest is not None else catalog_fingerprint(base_records)
-        )
+        if manifest is None:
+            raise ValueError("catalog provenance manifest is missing")
+        fingerprint = manifest.fingerprint
         if force:
             remove_durable_file(journal_path(catalog))
             updates: dict[str, CatalogRecord] = {}

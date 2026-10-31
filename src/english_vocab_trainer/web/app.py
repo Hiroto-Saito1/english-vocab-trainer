@@ -3,18 +3,16 @@
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import RequestResponseEndpoint
 
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.web.container import AppContainer, container_from_env
 from english_vocab_trainer.web.routes.audio import router as audio_router
-from english_vocab_trainer.web.routes.session import router as session_router
 from english_vocab_trainer.web.routes.study import router as study_router
-from english_vocab_trainer.web.routes.system import router as system_router
 
-ROOT = Path(__file__).parent
+PUBLIC = Path(__file__).resolve().parents[3] / "public"
 
 
 def create_app(container: AppContainer) -> FastAPI:
@@ -27,11 +25,7 @@ def create_app(container: AppContainer) -> FastAPI:
     ) -> Response:
         response = await call_next(request)
         path = request.url.path
-        if (
-            (path.startswith("/api/") and not path.startswith("/api/v1/audio/"))
-            or path.startswith("/auth/")
-            or path == "/login"
-        ):
+        if path.startswith("/api/") and not path.startswith("/api/v1/audio/"):
             response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
@@ -43,9 +37,15 @@ def create_app(container: AppContainer) -> FastAPI:
         )
         return response
 
-    new_app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
-    new_app.include_router(session_router)
-    new_app.include_router(system_router)
+    @new_app.get("/", include_in_schema=False)
+    def home() -> FileResponse:
+        return FileResponse(PUBLIC / "index.html")
+
+    @new_app.get("/api/v1/session")
+    def session() -> dict[str, str | bool]:
+        return {"csrf_token": "local", "local": True}
+
+    new_app.mount("/static", StaticFiles(directory=str(PUBLIC / "static")), name="static")
     new_app.include_router(study_router)
     new_app.include_router(audio_router)
     return new_app

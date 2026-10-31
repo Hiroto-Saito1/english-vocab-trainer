@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -243,14 +242,6 @@ def read_catalog(path: Path, *, include_journal: bool = True) -> list[CatalogRec
 def write_catalog(path: Path, records: Iterable[CatalogRecord]) -> None:
     text = "".join(json.dumps(asdict(record), sort_keys=True) + "\n" for record in records)
     write_text_atomically(path, text)
-
-
-def catalog_fingerprint(records: Iterable[CatalogRecord]) -> str:
-    identity = [
-        {"audio_key": record.audio_key, "checksum": record.checksum, "term": record.term}
-        for record in sorted(records, key=lambda item: item.audio_key)
-    ]
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
 @contextmanager

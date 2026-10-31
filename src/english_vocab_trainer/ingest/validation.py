@@ -8,14 +8,14 @@ import unicodedata
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
+from english_vocab_trainer.ports.audio import MAX_AUDIO_BYTES, valid_audio_digest
+
 from .models import APPROVED_SOURCES, TRANSCRIPTION_ERROR_REASONS, CatalogRecord
 
-MAX_AUDIO_BYTES = 1_048_576
 MAX_AGGREGATE_AUDIO_BYTES = 8_000_000_000
 
 _TERM = re.compile(r"(?:^|[ \u3000])\d{4}[ \u3000]+(.+?)\.mp3$", re.IGNORECASE)
 _TERM_VALUE = re.compile(r"[A-Za-z][A-Za-z '\-]*\Z")
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _WORDS = re.compile(r"[^\W\d_]+", re.UNICODE)
 _JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _COMMON_ENGLISH_PUNCTUATION = str.maketrans(
@@ -63,13 +63,6 @@ def parse_audio_path(root: Path, path: Path) -> tuple[int | None, str]:
 def checksum(path: Path) -> str:
     with path.open("rb") as audio:
         return hashlib.file_digest(audio, "sha256").hexdigest()
-
-
-def r2_audio_key(checksum_value: str) -> str:
-    """Return the only allowed private R2 object key for a catalog checksum."""
-    if _SHA256.fullmatch(checksum_value) is None:
-        raise ValueError("checksum must be a lowercase SHA-256 hex digest")
-    return f"audio/{checksum_value}.mp3"
 
 
 def relative_audio_path(audio_key: str) -> PurePosixPath:
@@ -145,7 +138,7 @@ def _validate_record(
     if record.source not in APPROVED_SOURCES:
         raise ValueError("catalog source is not approved")
     validate_term(record.term)
-    if _SHA256.fullmatch(record.checksum) is None:
+    if not valid_audio_digest(record.checksum):
         raise ValueError("catalog checksum must be a lowercase SHA-256 hex digest")
     if record.id != f"audio-{record.checksum}":
         raise ValueError("catalog id must match checksum")

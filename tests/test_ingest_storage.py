@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from ingest_support import records
+from ingest_support import records, write_test_manifest
 
 from english_vocab_trainer.ingest.storage import (
     journal_path,
@@ -21,6 +21,7 @@ def test_journal_handles_truncated_tail_and_continue_on_error(tmp_path: Path) ->
     catalog = tmp_path / ".private" / "catalog.jsonl"
     current = [replace(record, transcript=None) for record in records(2)]
     write_catalog(catalog, current)
+    write_test_manifest(catalog, current)
 
     class MixedTranscriber:
         calls = 0

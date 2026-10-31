@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from ingest_support import records
+from ingest_support import records, write_test_manifest
 
 from english_vocab_trainer.ingest.storage import (
     catalog_lock,
@@ -40,6 +40,7 @@ def test_transcribe_checkpoints_and_resumes_after_failure(tmp_path: Path) -> Non
     catalog = tmp_path / ".private" / "catalog.jsonl"
     current = [replace(record, transcript=None) for record in records(2)]
     write_catalog(catalog, current)
+    write_test_manifest(catalog, current)
 
     class FailingTranscriber:
         calls = 0
@@ -82,7 +83,9 @@ def test_transcribe_checkpoints_and_resumes_after_failure(tmp_path: Path) -> Non
 
 def test_force_transcription_resets_pending_journal(tmp_path: Path) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
-    write_catalog(catalog, [replace(record, transcript=None) for record in records(2)])
+    current = [replace(record, transcript=None) for record in records(2)]
+    write_catalog(catalog, current)
+    write_test_manifest(catalog, current)
 
     class StableTranscriber:
         calls = 0
@@ -102,7 +105,9 @@ def test_force_transcription_resets_pending_journal(tmp_path: Path) -> None:
 
 def test_transcription_batch_caps_failed_attempts(tmp_path: Path) -> None:
     catalog = tmp_path / ".private" / "catalog.jsonl"
-    write_catalog(catalog, [replace(record, transcript=None) for record in records(2)])
+    current = [replace(record, transcript=None) for record in records(2)]
+    write_catalog(catalog, current)
+    write_test_manifest(catalog, current)
 
     class FailingTranscriber:
         calls = 0
@@ -121,3 +126,17 @@ def test_transcription_batch_caps_failed_attempts(tmp_path: Path) -> None:
         max_records=1,
     )
     assert transcriber.calls == 1 and summary.errors == 1 and summary.completed == 0
+
+
+def test_transcription_requires_manifest_before_changing_journal(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog.jsonl"
+    write_catalog(catalog, records(1))
+    journal_path(catalog).write_text("pending", encoding="utf-8")
+
+    class UnusedTranscriber:
+        def transcribe(self, _: Path) -> str:
+            raise AssertionError("must not transcribe")
+
+    with pytest.raises(ValueError, match="provenance manifest is missing"):
+        transcribe_catalog(tmp_path, catalog, UnusedTranscriber(), force=True)
+    assert journal_path(catalog).read_text(encoding="utf-8") == "pending"

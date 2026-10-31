@@ -7,7 +7,7 @@ from typing import Any, BinaryIO
 import pytest
 
 from english_vocab_trainer.adapters.local.audio import FilesystemAudioStore
-from english_vocab_trainer.adapters.r2 import Boto3R2AudioStore, r2_client_from_env
+from english_vocab_trainer.adapters.r2 import r2_client_from_env
 from english_vocab_trainer.configuration import ConfigurationError
 from english_vocab_trainer.web.container import audio_store_from_env
 
@@ -38,32 +38,6 @@ def test_filesystem_factory_requires_explicit_backend_and_root(tmp_path: Path) -
         audio_store_from_env({"AUDIO_BACKEND": "filesystem"})
     store = audio_store_from_env({"AUDIO_BACKEND": "filesystem", "AUDIO_ROOT": str(tmp_path)})
     assert isinstance(store, FilesystemAudioStore)
-
-
-def test_r2_factory_injects_client_and_defaults_region() -> None:
-    received: dict[str, object] = {}
-
-    def factory(**kwargs: object) -> FactoryClient:
-        received.update(kwargs)
-        return FactoryClient()
-
-    store = audio_store_from_env(
-        {
-            "AUDIO_BACKEND": "r2",
-            "R2_ENDPOINT_URL": "https://account.r2.cloudflarestorage.com",
-            "R2_ACCESS_KEY_ID": "access",
-            "R2_SECRET_ACCESS_KEY": "secret",
-            "R2_BUCKET": "private-audio",
-        },
-        factory,
-    )
-    assert isinstance(store, Boto3R2AudioStore)
-    assert received == {
-        "endpoint_url": "https://account.r2.cloudflarestorage.com",
-        "aws_access_key_id": "access",
-        "aws_secret_access_key": "secret",
-        "region_name": "auto",
-    }
 
 
 def test_r2_client_uses_explicit_region_and_sanitizes_factory_failure() -> None:

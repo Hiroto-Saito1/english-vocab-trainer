@@ -89,7 +89,7 @@ def pwa_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
     database = tmp_path / "vocab.db"
     audio_root = tmp_path / "audio"
     _seed(database, audio_root, "word", 4)
-    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
+    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root)))
     with _serve(app) as base_url:
         yield base_url, database
 
@@ -105,7 +105,7 @@ def paginated_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
             repository.save_review(
                 Review(UUID(int=index), word.id, ReviewAction.KNOWN, reviewed_at)
             )
-    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
+    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root)))
     with _serve(app) as base_url:
         yield base_url, database
 
@@ -126,7 +126,7 @@ def repeated_history_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
                 reviewed_at + timedelta(minutes=1),
             )
         )
-    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root), "test"))
+    app = create_app(AppContainer(database, FilesystemAudioStore(audio_root)))
     with _serve(app) as base_url:
         yield base_url, database
 
@@ -180,7 +180,7 @@ def test_initial_card_and_known_unknown_advance(page: Page, pwa_server: tuple[st
     expect(page.get_by_role("button", name="Next", exact=True)).to_be_disabled()
     expect(page.get_by_role("button", name="Unknown", exact=True)).to_be_enabled()
     expect(page.get_by_role("button", name="Known", exact=True)).to_be_enabled()
-    expect(page.get_by_role("button", name="Logout", exact=True)).to_have_count(0)
+    expect(page.locator("#logout")).to_be_hidden()
     assert page.locator("text=Ready to answer").count() == 0
     assert page.locator("text=Choose Known or Unknown.").count() == 0
 
@@ -471,3 +471,15 @@ def test_second_tab_is_read_only_until_writer_closes(
     follower.reload()
     expect(follower.get_by_role("button", name="Known", exact=True)).to_be_enabled()
     expect(follower.locator("#status")).to_be_hidden()
+
+
+@pytest.mark.e2e
+def test_access_session_shows_logout(page: Page, pwa_server: tuple[str, Path]) -> None:
+    base_url, _ = pwa_server
+    page.route(
+        "**/api/v1/session",
+        lambda route: route.fulfill(json={"csrf_token": "access-token"}),
+    )
+    page.goto(base_url)
+    expect(page.locator("#term")).to_have_text("word word 0")
+    expect(page.get_by_role("button", name="Logout", exact=True)).to_be_visible()

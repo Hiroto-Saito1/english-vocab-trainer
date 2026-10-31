@@ -7,9 +7,10 @@ from typing import cast
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.adapters.r2 import Boto3R2AudioUploader, S3LikeClient
 from english_vocab_trainer.domain.models import Word
+from english_vocab_trainer.ports.audio import r2_audio_key
 
 from .models import CatalogRecord, UploadSummary
-from .validation import r2_audio_key, relative_audio_path, validate_records
+from .validation import relative_audio_path, validate_records
 
 
 def publish_records(

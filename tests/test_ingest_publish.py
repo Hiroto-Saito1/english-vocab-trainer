@@ -10,7 +10,8 @@ from ingest_support import materialize_catalog_audio, records
 
 from english_vocab_trainer.adapters.local.vocabulary import SQLiteVocabularyRepository
 from english_vocab_trainer.ingest.publish import publish_records, upload_audio
-from english_vocab_trainer.ingest.validation import r2_audio_key, validate_records
+from english_vocab_trainer.ingest.validation import validate_records
+from english_vocab_trainer.ports.audio import r2_audio_key
 
 
 def test_publish_records_writes_sqlite_words(tmp_path: Path) -> None:

@@ -25,7 +25,7 @@ class AccessError(ValueError):
     """Invalid Access assertion or unavailable verifier."""
 
 
-def _decode(value: str) -> bytes:
+def _decode_base64url(value: str) -> bytes:
     if not value or len(value) > 16384 or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
         raise AccessError("invalid base64url")
     try:
@@ -37,8 +37,8 @@ def _decode(value: str) -> bytes:
     return result
 
 
-def _json(value: bytes) -> dict[str, Any]:
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+def _decode_json_object(value: bytes) -> dict[str, Any]:
+    def unique_members(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, item in items:
             if key in result:
@@ -49,7 +49,7 @@ def _json(value: bytes) -> dict[str, Any]:
     try:
         obj = json.loads(
             value,
-            object_pairs_hook=pairs,
+            object_pairs_hook=unique_members,
             parse_constant=lambda _: (_ for _ in ()).throw(AccessError("invalid JSON")),
         )
     except (ValueError, UnicodeDecodeError) as exc:
@@ -59,15 +59,15 @@ def _json(value: bytes) -> dict[str, Any]:
     return obj
 
 
-def _config(env: Any, name: str) -> str:
+def _required_setting(env: Any, name: str) -> str:
     value = getattr(env, name, None)
     if not isinstance(value, str) or not value or value != value.strip():
         raise AccessError("missing configuration")
     return value
 
 
-def _issuer(env: Any) -> str:
-    domain = _config(env, "ACCESS_TEAM_DOMAIN")
+def _access_issuer(env: Any) -> str:
+    domain = _required_setting(env, "ACCESS_TEAM_DOMAIN")
     if domain.startswith("https://"):
         domain = domain[8:]
     if not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.cloudflareaccess\.com", domain):
@@ -81,7 +81,7 @@ async def _fetch_jwks(url: str) -> list[dict[str, Any]]:
     response = await fetch(url)
     if not response.ok:
         raise AccessError("JWKS unavailable")
-    body = _json((await response.text()).encode())
+    body = _decode_json_object((await response.text()).encode())
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(key, dict) for key in keys):
         raise AccessError("invalid JWKS")
@@ -123,79 +123,84 @@ class AccessValidator:
         self.cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
     async def validate(self, token: str | None, env: Any, method: str, path: str) -> None:
-        issuer = _issuer(env)
-        audience = _config(env, "ACCESS_AUD")
-        owner = _config(env, "OWNER_EMAIL")
+        issuer = _access_issuer(env)
+        audience = _required_setting(env, "ACCESS_AUD")
+        owner = _required_setting(env, "OWNER_EMAIL")
         if not token or len(token) > 24000:
             raise AccessError("missing assertion")
         parts = token.split(".")
         if len(parts) != 3:
             raise AccessError("invalid assertion")
-        header, claims = _json(_decode(parts[0])), _json(_decode(parts[1]))
-        signature = _decode(parts[2])
+        header = _decode_json_object(_decode_base64url(parts[0]))
+        claims = _decode_json_object(_decode_base64url(parts[1]))
+        signature = _decode_base64url(parts[2])
         kid = header.get("kid")
-        if (
-            header.get("alg") != "RS256"
-            or not isinstance(kid, str)
-            or not kid
-            or header.get("crit") is not None
-        ):
+        if header.get("alg") != "RS256" or header.get("crit") is not None:
             raise AccessError("invalid assertion header")
+        if not isinstance(kid, str) or not kid:
+            raise AccessError("invalid assertion header")
+
         now = self.clock()
-        aud = claims.get("aud")
-        if (
-            claims.get("iss") != issuer
-            or not (
-                aud == audience
-                or isinstance(aud, list)
-                and all(isinstance(a, str) for a in aud)
-                and audience in aud
-            )
-            or type(claims.get("exp")) not in (int, float)
-            or not math.isfinite(claims["exp"])
-            or claims["exp"] <= now
-            or (
-                "nbf" in claims
-                and (
-                    type(claims["nbf"]) not in (int, float)
-                    or not math.isfinite(claims["nbf"])
-                    or claims["nbf"] > now
-                )
-            )
-        ):
+        if claims.get("iss") != issuer:
             raise AccessError("invalid assertion claims")
-        service = getattr(env, "HEALTHCHECK_SERVICE_TOKEN_ID", None)
+
+        token_audience = claims.get("aud")
+        valid_audience = token_audience == audience or (
+            isinstance(token_audience, list)
+            and all(isinstance(item, str) for item in token_audience)
+            and audience in token_audience
+        )
+        if not valid_audience:
+            raise AccessError("invalid assertion claims")
+
+        expires_at = claims.get("exp")
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+            raise AccessError("invalid assertion claims")
+        if not math.isfinite(expires_at) or expires_at <= now:
+            raise AccessError("invalid assertion claims")
+
+        if "nbf" in claims:
+            not_before = claims["nbf"]
+            if isinstance(not_before, bool) or not isinstance(not_before, (int, float)):
+                raise AccessError("invalid assertion claims")
+            if not math.isfinite(not_before) or not_before > now:
+                raise AccessError("invalid assertion claims")
+
+        healthcheck_client_id = getattr(env, "HEALTHCHECK_SERVICE_TOKEN_ID", None)
         is_probe = (
             method in {"GET", "HEAD"}
             and path in {"/healthz", "/readyz"}
-            and isinstance(service, str)
-            and bool(service)
-            and claims.get("common_name") == service
+            and isinstance(healthcheck_client_id, str)
+            and bool(healthcheck_client_id)
+            and claims.get("common_name") == healthcheck_client_id
         )
         if ("common_name" in claims and not is_probe) or (
             claims.get("email") != owner and not is_probe
         ):
             raise AccessError("identity not allowed")
-        cached = self.cache.get(issuer)
-        if cached is None or cached[0] <= now:
+        cached_keys = self.cache.get(issuer)
+        if cached_keys is None or cached_keys[0] <= now:
             keys = await self.fetch_jwks(issuer + "/cdn-cgi/access/certs")
             self.cache[issuer] = (now + 300, keys)
         else:
-            keys = cached[1]
+            keys = cached_keys[1]
         matches = [key for key in keys if key.get("kid") == kid]
-        if not matches and cached is not None and cached[0] > now:
+        if not matches and cached_keys is not None and cached_keys[0] > now:
             keys = await self.fetch_jwks(issuer + "/cdn-cgi/access/certs")
             self.cache[issuer] = (now + 300, keys)
             matches = [key for key in keys if key.get("kid") == kid]
+        if len(matches) != 1:
+            raise AccessError("invalid assertion signature")
+
+        signing_key = matches[0]
         if (
-            len(matches) != 1
-            or matches[0].get("kty") != "RSA"
-            or matches[0].get("alg", "RS256") != "RS256"
-            or matches[0].get("use", "sig") != "sig"
-            or not await self.verify(
-                matches[0], signature, (parts[0] + "." + parts[1]).encode("ascii")
-            )
+            signing_key.get("kty") != "RSA"
+            or signing_key.get("alg", "RS256") != "RS256"
+            or signing_key.get("use", "sig") != "sig"
         ):
+            raise AccessError("invalid assertion signature")
+        signed_data = (parts[0] + "." + parts[1]).encode("ascii")
+        if not await self.verify(signing_key, signature, signed_data):
             raise AccessError("invalid assertion signature")
 
 
@@ -215,7 +220,7 @@ async def access_and_csrf(request: Request, call_next: Any) -> Response:
             request.headers.get("Cf-Access-Jwt-Assertion"), env, request.method, request.url.path
         )
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            origin = _config(env, "APP_ORIGIN")
+            origin = _required_setting(env, "APP_ORIGIN")
             parsed = urlsplit(origin)
             if (
                 parsed.scheme != "https"
@@ -257,7 +262,7 @@ async def access_and_csrf(request: Request, call_next: Any) -> Response:
 async def session(request: Request) -> Response:
     csrf = request.cookies.get("__Host-vocab-csrf", "")
     try:
-        valid = len(_decode(csrf)) == 32
+        valid = len(_decode_base64url(csrf)) == 32
     except AccessError:
         valid = False
     if not valid:

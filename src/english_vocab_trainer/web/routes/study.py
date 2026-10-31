@@ -16,10 +16,8 @@ from english_vocab_trainer.ports.vocabulary import (
     ReviewConflictError,
     VocabularyRepository,
 )
-from english_vocab_trainer.web.dependencies import csrf
-from english_vocab_trainer.web.repository_dependency import repository as repository_dependency
+from english_vocab_trainer.web.dependencies import repository as repository_dependency
 
-Csrf = Annotated[None, Depends(csrf)]
 Repository = Annotated[VocabularyRepository, Depends(repository_dependency)]
 HISTORY_PAGE_SIZE = 50
 router = APIRouter()
@@ -91,7 +89,7 @@ async def next_card(repository: Repository) -> CardOut:
 
 
 @router.post("/api/v1/reviews", status_code=204)
-async def review(review_input: ReviewIn, repository: Repository, _: Csrf) -> Response:
+async def review(review_input: ReviewIn, repository: Repository) -> Response:
     try:
         await repository.save_review(
             Review(

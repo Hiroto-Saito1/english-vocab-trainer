@@ -110,7 +110,7 @@ class SQLiteVocabularyRepository:
         ).fetchone()
         return datetime.fromisoformat(row[0]) if row[0] is not None else None
 
-    def _reviews(self, word_id: str) -> list[Review]:
+    def _reviews_for_word(self, word_id: str) -> list[Review]:
         return [
             Review(
                 UUID(row["id"]),
@@ -123,22 +123,29 @@ class SQLiteVocabularyRepository:
 
     def save_review(self, review: Review) -> None:
         with self._transaction():
-            old = self.db.execute("SELECT * FROM reviews WHERE id=?", (str(review.id),)).fetchone()
-            if old and old["word_id"] != review.word_id:
+            existing_review = self.db.execute(
+                "SELECT * FROM reviews WHERE id=?", (str(review.id),)
+            ).fetchone()
+            if existing_review and existing_review["word_id"] != review.word_id:
                 raise ReviewConflictError("review UUID word conflict")
-            if old and old["action"] == review.action.value:
+            if existing_review and existing_review["action"] == review.action.value:
                 return
-            if not old and self.get_word(review.word_id) is None:
+            if not existing_review and self.get_word(review.word_id) is None:
                 raise MissingWordError("word not found")
-            state = self.db.execute(
+            stored_state = self.db.execute(
                 "SELECT * FROM word_state WHERE word_id=?", (review.word_id,)
             ).fetchone()
-            latest = self.db.execute(
+            latest_review = self.db.execute(
                 "SELECT reviewed_at,id FROM reviews WHERE word_id=? "
                 "ORDER BY reviewed_at DESC,id DESC LIMIT 1",
                 (review.word_id,),
             ).fetchone()
-            if old:
+            is_out_of_order = bool(
+                latest_review
+                and (_iso(review.reviewed_at), str(review.id))
+                < (latest_review["reviewed_at"], latest_review["id"])
+            )
+            if existing_review:
                 self.db.execute(
                     "UPDATE reviews SET action=? WHERE id=?", (review.action.value, str(review.id))
                 )
@@ -147,25 +154,27 @@ class SQLiteVocabularyRepository:
                     "INSERT INTO reviews VALUES(?,?,?,?)",
                     (str(review.id), review.word_id, review.action.value, _iso(review.reviewed_at)),
                 )
-            if old or (
-                latest
-                and (_iso(review.reviewed_at), str(review.id))
-                < (latest["reviewed_at"], latest["id"])
-            ):
-                card = replay_card(review.word_id, self._reviews(review.word_id))
+            if existing_review or is_out_of_order:
+                next_card = replay_card(review.word_id, self._reviews_for_word(review.word_id))
             else:
-                card = apply_review(
-                    Card.from_json(state["card_json"])
-                    if state
+                next_card = apply_review(
+                    Card.from_json(stored_state["card_json"])
+                    if stored_state
                     else replay_card(review.word_id, []),
                     review,
                 )
-            version = state["version"] + 1 if state else 1
+            next_version = stored_state["version"] + 1 if stored_state else 1
             self.db.execute(
                 "INSERT INTO word_state VALUES(?,?,?,?,?) ON CONFLICT(word_id) DO UPDATE SET "
                 "due_at=excluded.due_at,card_json=excluded.card_json, "
                 "version=excluded.version,mutation_id=excluded.mutation_id",
-                (review.word_id, _iso(card.due), card.to_json(), version, str(uuid4())),
+                (
+                    review.word_id,
+                    _iso(next_card.due),
+                    next_card.to_json(),
+                    next_version,
+                    str(uuid4()),
+                ),
             )
 
     def history_page(

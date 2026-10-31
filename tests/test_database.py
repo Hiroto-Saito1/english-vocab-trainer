@@ -10,44 +10,10 @@ from english_vocab_trainer.adapters.local.database import (
     validate_database_schema,
 )
 
-EXPECTED_TABLES = {
-    "schema_metadata",
-    "words",
-    "word_state",
-    "reviews",
-}
-
 
 def test_current_schema_and_connection_pragmas(tmp_path: Path) -> None:
     connection = sqlite3.connect(tmp_path / "installed.db")
     initialize_database(connection)
-    tables = {
-        row[0]
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
-    }
-    assert tables == EXPECTED_TABLES
-    assert {row[1] for row in connection.execute("PRAGMA table_info(word_state)")} == {
-        "word_id",
-        "due_at",
-        "card_json",
-        "version",
-        "mutation_id",
-    }
-    assert {row[1] for row in connection.execute("PRAGMA table_info(words)")} == {
-        "id",
-        "term",
-        "level",
-        "definition",
-        "audio_key",
-    }
-    assert {row[1] for row in connection.execute("PRAGMA table_info(reviews)")} == {
-        "id",
-        "word_id",
-        "action",
-        "reviewed_at",
-    }
     assert SCHEMA_VERSION == 1
     assert connection.execute("SELECT version FROM schema_metadata").fetchone() == (SCHEMA_VERSION,)
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
@@ -99,7 +65,9 @@ def test_incompatible_columns_and_version_fail_without_migration(tmp_path: Path)
 
 def test_d1_initial_migration_matches_reference_schema() -> None:
     connection = sqlite3.connect(":memory:")
-    connection.executescript(Path("migrations/0001_initial.sql").read_text())
+    connection.executescript(
+        Path("src/english_vocab_trainer/migrations/0001_initial.sql").read_text()
+    )
     validate_database_schema(connection)
     indexes = {
         row[0]

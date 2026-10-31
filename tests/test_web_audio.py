@@ -22,7 +22,7 @@ def _audio_app_with_store(tmp_path: Path, store: AudioStore) -> FastAPI:
     database = tmp_path / "v.db"
     with SQLiteVocabularyRepository(database) as repository:
         repository.bulk_upsert_words([Word("one", "one", 9, "definition", "x.mp3")])
-    return create_app(AppContainer(database, store, "test"))
+    return create_app(AppContainer(database, store))
 
 
 def test_audio_api_full_and_range(tmp_path: Path) -> None:
