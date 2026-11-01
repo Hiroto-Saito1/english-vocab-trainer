@@ -1,6 +1,6 @@
 {
   "name": "english-vocab-trainer",
-  "main": "src/english_vocab_trainer/worker.py",
+  "main": "src/worker.py",
   "compatibility_date": "2026-10-31",
   "compatibility_flags": ["python_workers"],
   "keep_vars": true,
