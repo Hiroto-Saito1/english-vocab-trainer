@@ -39,7 +39,7 @@ strict = true
 packages = ["english_vocab_trainer"]
 
 [[tool.mypy.overrides]]
-module = ["js", "mlx_whisper", "pyodide.ffi"]
+module = ["boto3", "js", "mlx_whisper", "pyodide.ffi"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -32,7 +32,7 @@ S3ClientFactory = Callable[..., S3LikeClient]
 
 def _boto3_client_factory(**kwargs: Any) -> S3LikeClient:
     # Import only when R2 is selected so local/test users do not need network setup.
-    import boto3  # type: ignore[import-not-found]
+    import boto3
 
     return cast(S3LikeClient, boto3.client("s3", **kwargs))
 
